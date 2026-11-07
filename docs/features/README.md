@@ -5,7 +5,7 @@
 | ID | Function | Phase | Status | Spec | CR ที่เกี่ยว | Report ล่าสุด |
 |---|---|---|---|---|---|---|
 | F-000 | Repo scaffolding | MVP-0 | `done` | [spec](F-000-scaffolding.md) | — | — |
-| F-001 | Config + `$WEBHUB_HOME` + migration | MVP-1 | `todo` | — | — | — |
+| F-001 | Config + `$WEBHUB_HOME` + migration | MVP-1 | `done` | [spec](F-001-config.md) | — | — |
 | F-002 | Platform layer (Windows) | MVP-1 | `todo` | — | — | — |
 | F-003 | Daemon + API + auth | MVP-1 | `todo` | — | — | — |
 | F-004 | CLI client | MVP-1 | `todo` | — | — | — |

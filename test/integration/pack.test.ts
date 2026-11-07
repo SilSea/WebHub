@@ -21,8 +21,9 @@ function npmCli(): string {
 
 /** dist/<name>.js(.map) is allowed only when src/<name>.ts exists. */
 function expectedDist(): Set<string> {
-  const names = readdirSync(join(ROOT, "src"))
-    .filter((f) => f.endsWith(".ts"))
+  const names = readdirSync(join(ROOT, "src"), { recursive: true, encoding: "utf8" })
+    .map((f) => f.replaceAll("\\", "/"))
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
     .map((f) => f.slice(0, -3));
   return new Set(names.flatMap((n) => [`dist/${n}.js`, `dist/${n}.js.map`]));
 }

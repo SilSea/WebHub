@@ -19,7 +19,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Database | **Shared Infra**: postgres / mysql / mariadb / mongo / redis — **1 server ต่อ engine ต่อ major** (ปกติ engine ละตัวเดียว), แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
 | DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase (MVP-5); **mongo-express** มาพร้อม Mongo infra (phase 8) |
 | ภาษา | **Runtime Profiles** แบบ data-driven (YAML) — built-in หลายภาษา + เพิ่มเองได้ไม่ต้องแก้ code |
-| ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาใช้ repo `_WebHub/` ได้) — `data/`, `runtimes/`, `logs/`, `nginx/`, `docker/` (generated) — path relative ใน config = relative กับ `$WEBHUB_HOME` (§21.4) |
+| ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาตั้ง `WEBHUB_HOME` เป็นโฟลเดอร์นอก scan root เช่น `%APPDATA%\webhub-dev`) — `data/`, `runtimes/`, `logs/`, `nginx/`, `docker/` (generated) — path relative ใน config = relative กับ `$WEBHUB_HOME` (§21.4) |
 | Docker project | `docker compose` ด้วย **project name เดิม** + override file; adopt container ที่รันอยู่แล้ว |
 | Hot reload | compose ที่ mount source → default `hybrid` (app native); compose ที่ build image → compose + Rebuild; polling เป็น fallback |
 | Non-docker | dev mode native ด้วย runtime จาก Runtime Manager (ของเครื่อง หรือ portable); ทำไม่ได้ → `container` |
@@ -755,7 +755,7 @@ _WebHub/                      # repo (npm package source)
 │   ├── docker/{nginx,infra,tools}.compose.yml   # template → gen ลง $WEBHUB_HOME/docker/
 │   └── nginx/{nginx.conf, proxy.conf, errors/}   # template → gen ลง $WEBHUB_HOME/nginx/
 │
-│  ── ด้านล่างอยู่ใน $WEBHUB_HOME ตอนใช้งานจริง (default %APPDATA%\webhub), dev = ใน repo + gitignore ──
+│  ── ด้านล่างอยู่ใน $WEBHUB_HOME ตอนใช้งานจริง (default %APPDATA%\webhub), dev = WEBHUB_HOME นอก scan root; gitignore ใน repo กันพลาด ──
 ├── webhub.config.json
 ├── docker/  nginx/{nginx.conf, webhub/, sites/, errors/}   # generated (path absolute)
 ├── runtimes/                 # portable runtimes <lang>/<ver>/
@@ -1163,7 +1163,11 @@ webhub doctor              # ตรวจซ้ำได้ตลอด
 ### 21.6 ความปลอดภัย + ความเข้ากันได้
 
 - **Run approval**: Enable / Start ครั้งแรก → โชว์สิ่งที่จะรันจริง (start command, compose files + override, image ที่จะ pull, install command) → ยืนยัน; เปลี่ยนคำสั่งภายหลัง → ยืนยันใหม่
-- **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน
+- **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน (`data/backups/migrate/<ts>/`); ไฟล์จาก webhub เวอร์ชันใหม่กว่า → ไม่แตะ + error (กันข้อมูลหายตอน downgrade)
+- **Store** (F-001): เขียนแบบ atomic (tmp + fsync + rename, เก็บ `.bak`), lock `data/.lock` ให้ daemon เป็นผู้เขียนคนเดียว, ปฏิเสธ symlink + ไฟล์ > 5 MB, validate ด้วย zod (strict) — config ผิด/key ไม่รู้จัก = ไม่ start + บอกทุกจุดที่ผิด
+- **Secrets at rest**: `data/secrets.json` เข้ารหัสด้วย **DPAPI (CurrentUser)** + ACL เฉพาะ user; ไม่ fallback เป็น plaintext; macOS/Linux → Keychain / libsecret (phase 13)
+- `$WEBHUB_HOME`: env `WEBHUB_HOME` (absolute) → default ต่อ OS; ห้ามเป็น symlink, root ของ drive หรืออยู่ใน scan root; home + parent ต้องเป็นของ user ตัวเอง (หรือ SYSTEM/Administrators); โฟลเดอร์ที่มีอยู่แล้วต้องว่างหรือเป็น home ของ webhub (ไม่ใช่ → ปฏิเสธโดยไม่แตะ); ตรวจทั้ง tree ครั้งแรก (ไม่ตาม junction, ไม่ยอม entry ของ user อื่น) แล้วเขียน marker (รายละเอียด F-001 §3.1)
+- เครื่องมือ OS เรียกด้วย path เต็มเสมอ (`%SystemRoot%\System32\…`) ไม่หาใน PATH
 - **i18n**: UI/CLI ข้อความผ่าน locale file (`th` default, `en`)
 - ไม่มี telemetry / ไม่ส่งข้อมูลออกนอกเครื่อง (ยกเว้นโหลด runtime/image ที่ผู้ใช้สั่ง)
 
