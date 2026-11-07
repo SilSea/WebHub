@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Status | `draft` (รออนุมัติ) |
+| Status | `in-progress` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §0 (ที่เก็บ config), §2 Registry, §11.3, §12, §21.4, §21.6 |
 | Depends on | F-000 |
-| Owner อนุมัติ | — |
+| Owner อนุมัติ | ผู้ใช้ / 2026-11-07 |
 
 ## 1. เป้าหมาย / ขอบเขต
 **ทำ** (library ภายใน `src/config/` + `src/store/` — ยังไม่มี daemon/CLI command)
@@ -38,7 +38,7 @@
 
 กติกา (R6):
 - ปฏิเสธ home ที่เป็น symlink/junction, อยู่ใน scan root, หรือเป็น root ของ drive
-- ระหว่างพัฒนาใช้ repo ได้โดยตั้ง `WEBHUB_HOME` เอง (gitignore ครอบ `data/` `logs/` `runtimes/` แล้ว)
+- ระหว่างพัฒนาตั้ง `WEBHUB_HOME` เป็นโฟลเดอร์**นอก scan root** เช่น `%APPDATA%\webhub-dev` (repo อยู่ใน scan root `E:\Workspaces\Project` จึงใช้ repo เป็น home ไม่ได้ — กติกาข้อแรกปฏิเสธ; gitignore ยังครอบ `data/` `logs/` `runtimes/` กันพลาด)
 - test ใช้ home ใน temp dir เสมอ (ไม่แตะ home จริงของเครื่อง)
 
 ```ts
@@ -55,23 +55,25 @@ ensureHome(paths: Paths): Promise<void>   // mkdir; Windows: ACL เฉพาะ
 
 ### 3.2 JSON store (`src/store/json-store.ts`)
 ```ts
-readJson<T>(file, schema, migrations): Promise<{ value: T; migratedFrom?: number }>
-writeJsonAtomic(file, value): Promise<void>
+readDoc<T>(file, spec: DocSpec<T>, { home, lock?, backupsDir? }): Promise<{ value: T; migratedFrom?: number } | undefined>
+writeDoc(lock, file, value): Promise<void>   // ต้องถือ lock; file ต้องอยู่ใน lock.home
 ```
 - **atomic write**: เขียน `<file>.tmp-<rand>` → fsync → rename ทับ (Windows: retry เมื่อ EPERM/EBUSY จาก AV สูงสุด 5 ครั้ง) → เก็บรุ่นก่อนหน้าเป็น `<file>.bak` 1 ชุด
 - ทุกไฟล์มี `schemaVersion` (integer)
   - เท่ากับปัจจุบัน → validate
-  - ต่ำกว่า → backup ไป `data/backups/migrate/<timestamp>/<file>` → รัน migration ทีละขั้น → validate → เขียน
+  - ต่ำกว่า → รัน migration ทีละขั้น (บน copy) → validate → ถ้าถือ lock: backup ไป `data/backups/migrate/<timestamp>/<file>` แล้วเขียนกลับ; ไม่ถือ lock (CLI): ใช้ค่าที่ migrate ในหน่วยความจำ ไม่แตะไฟล์
   - **สูงกว่า** (ไฟล์จาก webhub เวอร์ชันใหม่) → error `CONFIG_FROM_NEWER_VERSION` ไม่แก้ไฟล์ (กันข้อมูลหายตอน downgrade)
 - อ่านไฟล์: ปฏิเสธ symlink (lstat), จำกัดขนาด 5 MB, JSON parse error → error ระบุไฟล์ + บรรทัด, ลอง `.bak` ไม่อัตโนมัติ (แจ้งให้ `doctor` เสนอ restore)
 - เขียนได้เฉพาะ process ที่ถือ lock
 
 ### 3.3 Lock (`src/store/lock.ts`)
 ```ts
-acquireLock(paths): Promise<Lock>   // data/.lock: { pid, startedAt, hostname }, เปิดแบบ exclusive (wx)
+acquireLock(paths): Promise<Lock>   // data/.lock: { pid, startedAt, hostname, token }, เปิดแบบ exclusive (wx), 0600
 Lock.release(): Promise<void>
 ```
 - lock ค้างจาก process ที่ตายแล้ว (PID ไม่อยู่ หรือ start time ไม่ตรง — กัน PID reuse) → ยึดคืนได้
+- lock ของ hostname อื่น (home บน network drive) → ถือว่ายังล็อกอยู่ (ตรวจ process เครื่องอื่นไม่ได้)
+- `release()` ลบไฟล์เฉพาะเมื่อ token ตรง (ไม่ลบ lock ที่คนอื่นยึดไปแล้ว)
 - process ที่ไม่ถือ lock (CLI) อ่านได้อย่างเดียว
 
 ### 3.4 Config schema (`webhub.config.json`, schemaVersion 1)
@@ -79,21 +81,26 @@ Lock.release(): Promise<void>
 - ไม่มีไฟล์ → ใช้ default ในหน่วยความจำ (ไม่เขียนจนกว่าจะ save — `setup` F-008 เป็นคนสร้าง)
 - validate เพิ่ม: `scanRoots` เป็น absolute + มีอยู่จริง (warning ถ้าไม่มี), ห้ามซ้อนกับ `$WEBHUB_HOME`; ช่วง port 1–65535 และ start ≤ end; `domainSuffix` เป็น hostname label ที่ถูกต้อง; path relative → resolve กับ home และต้องอยู่ใน home
 - key ไม่รู้จัก / ค่าผิด → **error `CONFIG_INVALID` ไม่ start** พร้อมรายการทุกจุดที่ผิด (path ของ key, ค่าที่ได้, ที่คาด) — zod `strict()` ทุก object
-- schema เขียนด้วย zod 4 → export JSON Schema (`schemas/webhub.config.schema.json`) ไว้ให้ editor autocomplete
+- schema เขียนด้วย zod 4 → `configJsonSchema()` คืน JSON Schema (ไว้ให้ editor autocomplete / profile §21.5). **การ export เป็นไฟล์ `schemas/` ใน package เลื่อนออกไป** — ต้องเพิ่มใน `files` ของ package.json = แก้ F-000 (ต้องมี CR); ทำพร้อม feature ที่ใช้จริง
 
 ### 3.5 Secrets (`src/store/secrets.ts`)
 ```ts
-interface SecretStore { get(key: string): Promise<string | undefined>; set(key: string, value: string): Promise<void>; delete(key: string): Promise<void>; }
+class SecretStore { static open(file, home, backend): Promise<SecretStore>; get(key): string | undefined; has(key); size; set(lock, key, value): Promise<void>; delete(lock, key): Promise<void>; }
 generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 ```
 - key รูปแบบ `<scope>/<name>` เช่น `postgres-17/pos`, `auth/master`
-- ค่าไม่ปรากฏใน error/log (`toString`/`inspect` ของ object ที่ถือ secret → `***`)
-- at-rest: **DPAPI (CurrentUser scope)** — ไฟล์ `data/secrets.json` = `{ schemaVersion, entries: { <key>: <base64 ciphertext> } }`; daemon ถอดครั้งเดียวตอนเปิดผ่าน PowerShell (`System.Security.Cryptography.ProtectedData`, spawn แบบ args array, ข้อมูลส่งทาง stdin ไม่ผ่าน argv) แล้ว cache ในหน่วยความจำ; เขียน = เข้ารหัสค่าใหม่ทีละค่า
-- interface `SecretBackend { protect(buf): Promise<Buffer>; unprotect(buf): Promise<Buffer> }` → Windows = DPAPI; macOS/Linux (phase 13) = Keychain / libsecret; test ใช้ backend จำลอง + test จริงบน Windows
+- ค่าไม่ปรากฏใน error/log (`toJSON`/`inspect` ของ store → `[SecretStore: N secrets]`)
+- at-rest: **DPAPI (CurrentUser scope)** — ไฟล์ `data/secrets.json` = `{ schemaVersion, backend, entries: { <key>: <base64 ciphertext> } }` (backend ไม่ตรง → `SECRET_BACKEND`); daemon ถอดครั้งเดียวตอนเปิดผ่าน PowerShell (`System.Security.Cryptography.ProtectedData`, spawn แบบ args array, ข้อมูลส่งทาง stdin บรรทัดละ `b:<base64>` ไม่ผ่าน argv — prefix ทำให้ secret ว่างยังเป็น 1 บรรทัด) แล้ว cache ในหน่วยความจำ; เขียน = เข้ารหัสค่าใหม่ทีละค่า
+- interface `SecretBackend { name; protect(items: Buffer[]): Promise<Buffer[]>; unprotect(items: Buffer[]): Promise<Buffer[]> }` (batch = เรียก PowerShell ครั้งเดียว) → Windows = DPAPI; macOS/Linux (phase 13) = Keychain / libsecret; test ใช้ backend จำลอง + test จริงบน Windows
 - DPAPI ใช้ไม่ได้ (เช่น PowerShell ถูกบล็อก) → error `SECRET_BACKEND` ไม่ fallback เป็น plaintext เงียบๆ
 
 ### 3.6 Errors
-ทุก error เป็น `WebhubError { code, message, file?, hint? }` — code: `HOME_INVALID`, `CONFIG_INVALID`, `CONFIG_FROM_NEWER_VERSION`, `JSON_PARSE`, `LOCKED`, `SYMLINK_REFUSED`, `FILE_TOO_LARGE`, `SECRET_BACKEND`
+ทุก error เป็น `WebhubError { code, message, file?, hint?, details[] }` — code: `HOME_INVALID`, `CONFIG_INVALID`, `CONFIG_FROM_NEWER_VERSION`, `JSON_PARSE`, `LOCKED`, `NOT_LOCKED`, `SYMLINK_REFUSED`, `PATH_OUTSIDE_HOME`, `FILE_TOO_LARGE`, `SECRET_BACKEND`
+
+### 3.7 เรียกโปรแกรมของ OS (`src/proc/exec.ts`)
+- `execFile` = spawn แบบ args array, `shell: false`, ข้อมูลลับส่งทาง stdin
+- `systemExe(name)` = path เต็มของเครื่องมือ OS: Windows `%SystemRoot%\System32\…` (`icacls.exe`, `whoami.exe`, `WindowsPowerShell\v1.0\powershell.exe`), POSIX `/bin`, `/usr/bin`, … — **ห้ามหาผ่าน PATH** (เจอจริงตอนเทส: Git Bash มี `whoami` ของ coreutils มาก่อนใน PATH ทำให้หา SID ไม่ได้; และกัน binary planting)
+- `powershell(script, input?)` = `-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand` (script คงที่ ไม่มีข้อมูลผู้ใช้ใน script)
 
 ## 4. ผลดี / ผลเสีย
 | | รายละเอียด |
@@ -105,12 +112,12 @@ generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 ## 5. Impact ต่อของเดิม
 | เรื่อง | กระทบไหม | รายละเอียด |
 |---|---|---|
-| feature ที่ done (F-000) | ไม่ | เพิ่มไฟล์ใหม่ใน `src/config`, `src/store`, `test/` เท่านั้น |
+| feature ที่ done (F-000) | test เท่านั้น | เพิ่มไฟล์ใหม่ใน `src/config`, `src/store`, `src/fs`, `src/proc`, `test/`. แก้ `test/integration/pack.test.ts` ให้อ่าน `src/` แบบ recursive (เดิมอ่านแค่ชั้นบนสุด → ไฟล์ใน subfolder ถูกนับว่า "ไม่คาดหมาย"); เจตนาเดิมไม่เปลี่ยน: ทุกไฟล์ใน `dist/` ต้องมี `src/*.ts` รองรับ. พฤติกรรม CLI/package ของ F-000 ไม่เปลี่ยน |
 | Zero-touch | ไม่ | เขียนเฉพาะใน `$WEBHUB_HOME`; ปฏิเสธ home ที่อยู่ใน scan root |
 | Security | มี | secret at rest, สิทธิ์ไฟล์, symlink, path traversal — ดู §6 |
 | Performance | เล็กน้อย | fsync ต่อการเขียน |
 | Config / data เดิม | ไม่ | ยังไม่มีผู้ใช้ |
-| Dependency | อาจเพิ่ม 1 ตัว | ตาม Q1 |
+| Dependency | เพิ่ม 1 ตัว | `zod 4.6.7` (ไม่มี dependency ย่อย) |
 
 ## 6. Threat model
 | Asset | ผู้โจมตี / ช่องทาง | ป้องกันด้วย | เทส |
@@ -158,12 +165,16 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 ## 9. Reports
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-001/test-1.md) | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
+| 2026-11-07 | W1 ③④⑤ | อนุมัติ, เข้า queue, ผู้ใช้สั่งทำต่อ → W3 |
 | 2026-11-07 | W1 ② | Q1 zod 4, Q2 DPAPI + ACL, Q3 ไม่ start + บอกจุดผิด, Q4 JSON |
+| 2026-11-07 | W3 E2 | implement; ปรับ spec ให้ตรงของจริง: dev home ต้องอยู่นอก scan root, เลื่อน export ไฟล์ JSON Schema (ต้อง CR F-000), API ของ store/secrets, `systemExe` (§3.7), `NOT_LOCKED`/`PATH_OUTSIDE_HOME` |
+| 2026-11-07 | W3 E3 | test-1: 89 pass / 4 skip (ตาม OS); เทสเจอ bug 2 ตัวแก้แล้ว (whoami จาก PATH, secret ว่างทำ DPAPI พัง) |

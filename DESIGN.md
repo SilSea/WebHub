@@ -19,7 +19,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Database | **Shared Infra**: postgres / mysql / mariadb / mongo / redis — **1 server ต่อ engine ต่อ major** (ปกติ engine ละตัวเดียว), แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
 | DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase (MVP-5); **mongo-express** มาพร้อม Mongo infra (phase 8) |
 | ภาษา | **Runtime Profiles** แบบ data-driven (YAML) — built-in หลายภาษา + เพิ่มเองได้ไม่ต้องแก้ code |
-| ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาใช้ repo `_WebHub/` ได้) — `data/`, `runtimes/`, `logs/`, `nginx/`, `docker/` (generated) — path relative ใน config = relative กับ `$WEBHUB_HOME` (§21.4) |
+| ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาตั้ง `WEBHUB_HOME` เป็นโฟลเดอร์นอก scan root เช่น `%APPDATA%\webhub-dev`) — `data/`, `runtimes/`, `logs/`, `nginx/`, `docker/` (generated) — path relative ใน config = relative กับ `$WEBHUB_HOME` (§21.4) |
 | Docker project | `docker compose` ด้วย **project name เดิม** + override file; adopt container ที่รันอยู่แล้ว |
 | Hot reload | compose ที่ mount source → default `hybrid` (app native); compose ที่ build image → compose + Rebuild; polling เป็น fallback |
 | Non-docker | dev mode native ด้วย runtime จาก Runtime Manager (ของเครื่อง หรือ portable); ทำไม่ได้ → `container` |
@@ -755,7 +755,7 @@ _WebHub/                      # repo (npm package source)
 │   ├── docker/{nginx,infra,tools}.compose.yml   # template → gen ลง $WEBHUB_HOME/docker/
 │   └── nginx/{nginx.conf, proxy.conf, errors/}   # template → gen ลง $WEBHUB_HOME/nginx/
 │
-│  ── ด้านล่างอยู่ใน $WEBHUB_HOME ตอนใช้งานจริง (default %APPDATA%\webhub), dev = ใน repo + gitignore ──
+│  ── ด้านล่างอยู่ใน $WEBHUB_HOME ตอนใช้งานจริง (default %APPDATA%\webhub), dev = WEBHUB_HOME นอก scan root; gitignore ใน repo กันพลาด ──
 ├── webhub.config.json
 ├── docker/  nginx/{nginx.conf, webhub/, sites/, errors/}   # generated (path absolute)
 ├── runtimes/                 # portable runtimes <lang>/<ver>/
