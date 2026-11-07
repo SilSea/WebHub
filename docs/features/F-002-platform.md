@@ -72,15 +72,19 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 ### 3.3 elevate (Windows)
 - งานที่ยกสิทธิ์ได้ = **allowlist ของ `kind`** ที่ define ในโค้ด webhub เท่านั้น; ไม่มี "รันคำสั่งนี้แบบ admin"
 - กลไก (ตาม Q2): `ProcessStartInfo{Verb=runas, UseShellExecute}` (PowerShell, script คงที่, ข้อมูลทาง stdin) เรียก `node <dist>/platform/elevated.mjs <token>` → UAC แสดงชื่อ Node.js
-  - elevated.mjs **self-contained** (security-2 T3): import ได้แค่ `node:*` (test บังคับ + trace การโหลดจริง) — ไม่มี zod / ไม่มี package.json lookup; validate allowlist ด้วยโค้ดเขียนเอง (เข้มกว่าหรือเท่า zod schema ฝั่ง user — parity test) → ทำงาน → exit code **10 ok** / 2 task ไม่ถูก / 3 token หมดอายุ / 1 ล้ม — ไม่ใช้ 0 เป็น success เพราะ 0 = node จบโดยไม่ได้รัน main (review-3 E4; `EXIT:0` → `ELEVATION_FAILED`); ไม่อ่านไฟล์ที่ user เขียนได้เพื่อตัดสินใจ; ไม่มี top-level await (import ด้วย `require()` ได้ — E9); token ยาวเกิน 8192 → ปฏิเสธก่อน UAC (E7)
+  - elevated.mjs **self-contained** (security-2 T3): import ได้แค่ `node:*` (test บังคับ + trace การโหลดจริง) — ไม่มี zod / ไม่มี package.json lookup; validate allowlist ด้วยโค้ดเขียนเอง (เข้มกว่าหรือเท่า zod schema ฝั่ง user — parity test) → ทำงาน → exit code **40 ok** / 42 task ไม่ถูก / 43 token หมดอายุ / 41 ล้ม — อยู่นอกช่วงที่ node ใช้เอง (0–14, >128): 0 = node จบโดยไม่ได้รัน main (review-3 E4), 10 = node bootstrap ล้ม (review-4 G3 / security-4 V4) → `EXIT:0`/`EXIT:10`/อื่นๆ = `ELEVATION_FAILED`; ไม่อ่านไฟล์ที่ user เขียนได้เพื่อตัดสินใจ; ไม่มี top-level await (import ด้วย `require()` ได้ — E9); token ยาวเกิน 8192 → ปฏิเสธก่อน UAC (E7)
   - task ห้ามมี secret (อยู่ใน argv ของ process admin)
+  - เปิด node ด้วย `--openssl-config=NUL` (security-4 V1): process admin ไม่อ่าน OpenSSL config เลย — ทั้ง `OPENSSL_CONF` ทุกรูปแบบชื่อ และ `OPENSSLDIR\openssl.cnf` ค่า default (`C:\Program Files\Common Files\SSL`) → ไม่มี provider DLL จาก config; ปิด U4 ไปด้วย. env denylist ยังอยู่ (defence in depth)
+  - token สร้าง**ทันทีก่อนเด้ง UAC** (หลังตรวจ guard) → ผู้ใช้ได้เวลา 5 นาทีเต็ม (review-4 G4); ตรวจความยาวทั้งก่อน guard และหลังสร้างจริง
+  - งาน elevated ห้ามพึ่ง env ที่สืบทอดมา (`PATH`, `_NT_SYMBOL_PATH`, `windir`/`SystemRoot` ไม่ถูกตรวจ — task `noop` ไม่แตะ) — task ใหม่ที่ใช้ COM / shell / spawn ต้องพิจารณาเปิดด้วย env ขั้นต่ำ (security-4 V5)
   - path ของ node/elevated.mjs = **real path** (`realpathSync.native`, resolve link — T4) ของ `process.execPath` + ตำแหน่ง package; path เดียวกันใช้ทั้งตรวจและเปิด (ไม่หาใน PATH)
 - ผู้ใช้กด No ใน UAC → `ELEVATION_DENIED` (ไม่ retry เอง) — เฉพาะ Win32 error 1223 เท่านั้น; error อื่น = `ELEVATION_FAILED` (C3/S4). เปิดด้วย `ProcessStartInfo{Verb=runas, UseShellExecute, WorkingDirectory=System32}` (S2 กัน DLL planting จาก cwd)
 - script ที่รันแบบ admin = `<package>/dist/platform/elevated.mjs` เสมอ (แม้รันจาก source, C6); ไม่มีไฟล์ → `ELEVATION_FAILED` + hint. `.mjs` ทำให้ต้องแก้ pack test ของ F-000 → [CR-001](../changes/CR-001-pack-mjs.md) (ผู้ใช้อนุญาต)
 - **Token มีอายุ 5 นาที** (`{v:1, iat, task}`); elevated.mjs เจอ token หมดอายุ → exit 3 ไม่ทำอะไร → `ELEVATION_EXPIRED`. PowerShell รอ 5.5 นาที → หมดเวลา = `ELEVATION_FAILED` "timed out" — กด Yes ทีหลังก็ไม่มีผล (S3/C9). MVP-2 (`hosts.writeBlock`): timeout นี้รวมเวลารันงานด้วย → ต้องแยกเวลารอ prompt กับเวลารันงาน (review-2 D12)
 - **Pre-elevation guard (S1, ผู้ใช้เลือก 2026-11-07 "Guards now + CR later")**: ก่อนเด้ง UAC ตรวจ → ถ้าเจอปัญหา = `ELEVATION_UNSAFE` (ไม่ถาม UAC) พร้อมรายการ + hint ให้ติดตั้งใน `C:\Program Files`:
-  - ไฟล์ที่ process admin โหลด = `node.exe` + โฟลเดอร์ของมัน (DLL search) + ทุก `*.dll` / `*.manifest` / `*.local` ที่อยู่ในโฟลเดอร์นั้นแล้ว (security-3 U3) + `elevated.mjs` + โฟลเดอร์ของมัน (real path; resolve ไม่ได้ด้วยเหตุอื่นที่ไม่ใช่ไฟล์หาย = `ELEVATION_UNSAFE` — E6): owner ต้องเป็น SYSTEM/Administrators/TrustedInstaller และไม่มี ACE Allow ของคนอื่นที่เขียน/เพิ่มไฟล์/แก้ attribute/EA/ลบ/เปลี่ยนสิทธิ์ได้ (T5)
-  - ทุก ancestor ของ path ข้างบน: คนอื่นต้องลบ/rename/เปลี่ยนสิทธิ์ไม่ได้ (เพิ่มไฟล์ได้ ok)
+  - ไฟล์ที่ process admin โหลด = `node.exe` + โฟลเดอร์ของมัน (DLL search) + ทุก `*.dll` / `*.manifest` ที่อยู่ในโฟลเดอร์นั้นแล้ว (security-3 U3; ตรวจทั้ง path ในโฟลเดอร์และ real path ถ้าเป็น link — security-4 V2) + `elevated.mjs` + โฟลเดอร์ของมัน (real path; resolve ไม่ได้ด้วยเหตุอื่นที่ไม่ใช่ไฟล์หาย = `ELEVATION_UNSAFE` — E6): owner ต้องเป็น SYSTEM/Administrators/TrustedInstaller และไม่มี ACE Allow ของคนอื่นที่เขียน/เพิ่มไฟล์/แก้ attribute/EA/ลบ/เปลี่ยนสิทธิ์ได้ (T5)
+  - list โฟลเดอร์ node ไม่ได้ (นอกจากไม่มีโฟลเดอร์) = `ELEVATION_UNSAFE` (fail closed — review-4 G7); มี `*.local` (DotLocal DLL redirection) ข้าง node = ปฏิเสธทันที (Node.js ปกติไม่มี — G6/V6)
+  - ทุก ancestor ของ path ข้างบน: คนอื่นต้องลบ/rename/เปลี่ยนสิทธิ์ไม่ได้ (เพิ่มไฟล์ได้ ok); ancestor ที่ "หาไม่เจอ" = ปัญหา (เป็นไปได้แค่ access denied หรือ race — security-4 V3)
   - env ห้ามมีชื่อขึ้นต้น `NODE_` (ยกเว้น `NODE_ENV`), `OPENSSL_` (provider DLL — T1), `SSL_CERT_`, `UV_`, `ICU_` (U2) และ**ห้ามชื่อที่มีอักขระ non-ASCII** (security-3 U1: OpenSSL อ่าน env ผ่าน CRT narrow `getenv` → Windows best-fit แปลง `ＯPENSSL_CONF`, `OPENŚSL_CONF` … เป็น `OPENSSL_CONF`) — ตรวจจาก `HKLM\...\Session Manager\Environment`, `HKCU\Environment`, `HKCU\Volatile Environment` + subkey ทุก session (T2) และ env ของ process webhub เอง (กันกรณีสืบทอด). **ใช้ denylist ตาม prefix ไม่ใช่ allowlist** (R3): ตัวแปรอื่น (JAVA_HOME, GOPATH …) มีทั่วไปในเครื่อง dev และ node.exe ไม่อ่าน — allowlist จะปฏิเสธเกือบทุกเครื่อง
   - ผล: dev checkout / npm global ใต้โฟลเดอร์ user = elevate ไม่ได้ (ตั้งใจ). CR ทีหลัง: helper ติดตั้งใน Program Files
 - ก่อนเรียก: ส่งคืน `describe(task)` ข้อความบอกผู้ใช้ว่าจะทำอะไร (dashboard/CLI แสดงก่อนกด) — ตาม PLAN "แสดงสิ่งที่จะทำ"
@@ -135,7 +139,8 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 - **โปรแกรมที่รันเป็น user เดียวกันอยู่แล้ว ป้องกันไม่ได้จริง (T6)**: มันเด้ง UAC ของ node.exe (signed ของจริง) พร้อม argument ของมันเองได้ หรือแก้ตัว guard ที่รันด้วยสิทธิ์ user (PSModulePath, HKCU SystemRoot → `systemExe` ของ F-001). guard นี้กัน user อื่น + การติดตั้งที่ไม่ปลอดภัย ไม่ใช่ malware ที่ได้สิทธิ์ user แล้ว — แก้จริงด้วย helper ใน Program Files ที่มี identity ของตัวเอง (CR ทีหลัง). ช่วงระหว่างตรวจกับ UAC (TOCTOU) ยอมรับ
 - `canBind` แต่ละครั้งใช้ CIM สด (~1 วิ): เช็คหลาย port ให้เรียกพร้อมกัน (แชร์ query) หรือใช้ `findFree` (review-2 D6)
 - env ของ process webhub ถูกตรวจด้วย (กันกรณีสืบทอด) → เปิด webhub ผ่าน shim ของ package manager ที่ตั้ง `NODE_PATH` (เช่น pnpm `.cmd`) = elevate ไม่ได้ (fail safe, hint บอก) (review-3 E10)
-- node.exe build มี `MODULESDIR` = `c:\ws\…` ฝังไว้ และ user ทั่วไปสร้าง `C:\ws` ได้ — ใช้เฉพาะ provider ที่โหลดด้วยชื่อ (ต้อง `--openssl-legacy-provider` ซึ่งถูกบล็อกทาง `NODE_OPTIONS` หรือ `openssl.cnf` ของ admin) → ไม่ exploit ได้ตามค่า default (security-3 U4)
+- ~~node.exe build มี `MODULESDIR` = `c:\ws\…` ฝังไว้ (security-3 U4)~~ — ปิดแล้วด้วย `--openssl-config=NUL` (security-4 V1): ไม่มี config → ไม่มี provider ที่โหลดด้วยชื่อ; `--openssl-legacy-provider` ทาง `NODE_OPTIONS` ถูก denylist อยู่แล้ว
+- cache ของ `listening` / deadline ของ killTree ใช้นาฬิกา monotonic (`performance.now()`) — ปรับนาฬิกาเครื่องย้อนหลังไม่ทำให้ snapshot ค้าง (review-4 G2)
 - `CreateEnvironmentBlock` อ่าน `C:\autoexec.bat` ได้เมื่อ `ParseAutoexec=1` — สร้างไฟล์นี้ได้แค่ admin → ไม่ใช่ช่องของ non-admin (U5)
 - killTree ยังเป็นแบบ PID: ช่วงสั้นๆ ระหว่างอ่านตารางกับ taskkill; หลาน ที่พ่อตายไปก่อน (orphan) หาไม่เจอ (C11) → Job Object ตอน spawn (CR / feature daemon)
 - เทียบ start time เป็น string จาก CIM local → UTC ใน F-001 `processState` — เปลี่ยน timezone / DST ช่วง fall-back อาจทำให้ไม่ตรง (fail safe = ไม่ฆ่า) (C12, ต้อง CR ของ F-001)
@@ -170,7 +175,8 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 16 | elevate: token หมดอายุ / อนาคต → `ELEVATION_EXPIRED`, elevated exit 3; outcome: เฉพาะ 1223 = DENIED, timeout แยก | unit |
 | 17 | pre-elevation guard: system file ผ่าน; temp folder ของ user ไม่ผ่าน; ไฟล์หาย = missing; `NODE_*` ถูกจับ; repo dev → `ELEVATION_UNSAFE` (ไม่เด้ง UAC) | unit + integration |
 | 18 | notify: script คงที่ทุก input, text อยู่ใน stdin base64 เท่านั้น, ค่าว่างไม่หาย, ล้มเหลว → log | unit (runner ปลอม) |
-| 19 | env non-ASCII / `ICU_` ถูกปฏิเสธ; DLL ในโฟลเดอร์ node ถูกตรวจ; parity สองทิศ + ทุก kind มี sample; exit 10 / `EXIT:0` = ล้ม; volatile-only names ถูกอ่าน; load trace = 1 module + bad token exit 2 | unit + integration |
+| 19 | env non-ASCII / `ICU_` ถูกปฏิเสธ; DLL ในโฟลเดอร์ node ถูกตรวจ; parity สองทิศ + ทุก kind มี sample; `EXIT:0` / `EXIT:10` = ล้ม; volatile-only names ถูกอ่าน (skip ถ้าไม่มี key); load trace = 1 module + bad token = `EXIT.invalid` (รอ `close`) | unit + integration |
+| 20 | exit code ไม่ชนกับของ node (15–128, ไม่ซ้ำกัน); token ยาวพอดี 8192 ผ่าน / 8194 ไม่ผ่าน (envelope ถูกต้อง); `--openssl-config=NUL` อยู่ใน ELEVATE_PS; `.local` ข้าง node = ปัญหา; `realPath` ENOENT → path เดิม, error อื่น → `ELEVATION_UNSAFE`; list โฟลเดอร์ node ไม่ได้ → `ELEVATION_UNSAFE`; ancestor หาย = missing | unit + integration |
 
 ## 9. Reports
 | รอบ | test | review | security | ผล |
@@ -178,7 +184,8 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 1 | [test-1](../reports/F-002/test-1.md) | [review-1](../reports/F-002/review-1.md) | [security-1](../reports/F-002/security-1.md) | major C1–C4 + S1; ผู้ใช้: S1 guard now + CR later, แก้ minor/nit ทั้งหมดที่แก้ได้ |
 | 2 | [test-2](../reports/F-002/test-2.md) | [review-2](../reports/F-002/review-2.md) | [security-2](../reports/F-002/security-2.md) | critical T1/T2 (=D1/D2), major T3/T4 → แก้ + CR-001 |
 | 3 | [test-3](../reports/F-002/test-3.md) | [review-3](../reports/F-002/review-3.md) | [security-3](../reports/F-002/security-3.md) | code: 0 crit/major; security: critical U1 → ครบ 3 loop, ผู้ใช้: แก้ + review รอบ 4, แก้ minor/nit ทั้งหมด |
-| 4 | [test-4](../reports/F-002/test-4.md) | | | รอ review รอบ 4 |
+| 4 | [test-4](../reports/F-002/test-4.md) | [review-4](../reports/F-002/review-4.md) | [security-4](../reports/F-002/security-4.md) | code + security: 0 crit/major; ผู้ใช้: แก้ minor/nit ทั้งหมด (G1–G9, V1–V6) |
+| 5 | [test-5](../reports/F-002/test-5.md) | | | แก้ตาม review-4 / security-4 |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [ ] DESIGN.md §21.1 (elevate allowlist + กลไก, findFree, toast)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
@@ -192,3 +199,4 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 2026-11-07 | W3 รอบ 2 | ผู้ใช้: S1 "Guards now + CR later", minor/nit "Fix all fixable" (เว้น C11 Job Object, C12 CR F-001) → แก้ + test-2 |
 | 2026-11-07 | W3 รอบ 3 | review-2/security-2 → self-contained elevated.mjs, real path, env denylist + volatile, kill root ก่อน; ผู้ใช้อนุญาต CR-001 → test-3 |
 | 2026-11-07 | W3 รอบ 4 | ครบ 3 loop: ผู้ใช้ "Fix + review round 4", minor/nit "Fix all" → U1 non-ASCII env, ICU_, DLL ในโฟลเดอร์ node, exit 10, E1–E10 → test-4 |
+| 2026-11-07 | W3 รอบ 5 | review-4 / security-4: 0 crit/major; ผู้ใช้ "แก้ทั้งหมด" → `--openssl-config=NUL`, exit 40–43, `.local` ปฏิเสธ, readdir fail closed, DLL real path, ancestor หาย = ปัญหา, monotonic clock, token สร้างก่อน UAC, test G1/G5/G8/G9 → test-5 |

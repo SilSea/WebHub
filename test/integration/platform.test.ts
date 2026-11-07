@@ -1,15 +1,12 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getPlatform, isPlatformError } from "../../src/platform/index.js";
-import { elevatedCommand } from "../../src/platform/win32.js";
+import { elevatedCommand, elevationProblems } from "../../src/platform/win32.js";
 import {
-  elevationFiles,
-  nodeDirEntries,
-  nodeEnvProblems,
   pathTrustProblems,
   persistentEnvNames,
   trustTargets,
@@ -190,6 +187,10 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
       expect(await pathTrustProblems([["F", join(dir, "missing.js")]])).toEqual([
         `${join(dir, "missing.js")}: missing`,
       ]);
+      // a "missing" ancestor can only be access-denied or a race → reported too (V3)
+      expect(await pathTrustProblems([["A", join(dir, "gone")]])).toEqual([
+        `${join(dir, "gone")}: missing`,
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -203,7 +204,10 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     expect(problems.some((x) => x.includes(": owner "))).toBe(false);
   });
 
-  it("environment sources include the volatile keys (T2, E1)", async () => {
+  it("environment sources include the volatile keys (T2, E1)", async (ctx) => {
+    // the volatile key exists only for interactive logons (not under services / some SSH) — G9
+    const key = spawnSync("reg.exe", ["query", "HKCU\\Volatile Environment"], { stdio: "ignore" });
+    if (key.status !== 0) return ctx.skip();
     const names = (await persistentEnvNames()).map((n) => n.toUpperCase());
     // APPDATA / LOCALAPPDATA / HOMEPATH live only in HKCU\Volatile Environment (not in HKLM or
     // HKCU\Environment), so this fails if the volatile key stops being read
@@ -212,10 +216,7 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
 
   it("elevate refuses (ELEVATION_UNSAFE) when webhub's files are user-writable — no UAC shown", async (ctx) => {
     const { exe, script } = elevatedCommand();
-    const problems = [
-      ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
-      ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script, nodeDirEntries(exe))))),
-    ];
+    const problems = await elevationProblems(exe, script);
     // a dev checkout is user-owned; if this machine is fully trusted, skip (would show UAC)
     if (problems.length === 0) return ctx.skip();
     await expect(p.elevate({ kind: "noop" })).rejects.toSatisfy(
@@ -234,14 +235,18 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     const hook =
       "data:text/javascript,import{registerHooks}from'node:module';registerHooks({resolve(s,c,n){const r=n(s,c);if(!r.url.startsWith('node:'))process.stderr.write('LOAD '+r.url+'\\n');return r}})";
     const run = async (token: string) => {
-      const child = spawn(process.execPath, ["--import", hook, script, token], {
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      // same node flag as the real elevated launch (V1)
+      const child = spawn(
+        process.execPath,
+        ["--openssl-config=NUL", "--import", hook, script, token],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
       let err = "";
       child.stderr.on("data", (b: Buffer) => {
         err += b.toString();
       });
-      const exit = await new Promise<number | null>((r) => child.once("exit", r));
+      // 'close' = exit AND stderr drained, so no LOAD line is missed (G1)
+      const exit = await new Promise<number | null>((r) => child.once("close", r));
       return { exit, loaded: err.split(/\r?\n/).filter((l) => l.startsWith("LOAD ")) };
     };
     const ok = await run(encodeTask({ kind: "noop" }));

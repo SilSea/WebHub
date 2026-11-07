@@ -11,7 +11,7 @@
  *
  * Takes exactly one argument: a base64url token `{v:1, iat, task}`. Reads no files and no
  * environment to decide what to do (spec F-002 §3.3, §6).
- * Exit codes: see `EXIT` (10 done, 2 invalid task, 3 expired token — nothing done, 1 failed).
+ * Exit codes: see `EXIT` (40 done, 42 invalid task, 43 expired token — nothing done, 41 failed).
  */
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -54,9 +54,11 @@ export const TOKEN_MAX_LENGTH = 8192;
 
 /**
  * Exit codes. Success is NOT 0: 0 is also what node returns when this file is loaded but
- * `main` never ran, which must never be reported as success (review-3 E4).
+ * `main` never ran, which must never be reported as success (review-3 E4). All codes are
+ * outside the ones node itself uses (0–14, and >128 for signals), so a node failure can never
+ * look like one of these (review-4 G3, security-4 V4). An uncaught error still gives node's 1.
  */
-export const EXIT = { ok: 10, failed: 1, invalid: 2, expired: 3 } as const;
+export const EXIT = { ok: 40, failed: 41, invalid: 42, expired: 43 } as const;
 
 export function decodeToken(token: string, now: number = Date.now()): DecodeResult {
   if (token.length > TOKEN_MAX_LENGTH || !/^[A-Za-z0-9_-]+$/.test(token)) {

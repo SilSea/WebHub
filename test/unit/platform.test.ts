@@ -1,5 +1,7 @@
 import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   EXIT,
@@ -38,7 +40,10 @@ import { fields, PS_UTF8 } from "../../src/platform/win32-shell.js";
 import {
   ENV_PS,
   elevationFiles,
+  loaderRedirectProblems,
+  nodeDirEntries,
   nodeEnvProblems,
+  realPath,
   trustTargets,
 } from "../../src/platform/win32-trust.js";
 import type { ExecResult } from "../../src/proc/exec.js";
@@ -245,16 +250,39 @@ describe("elevated tasks (allowlist)", () => {
     expect(await code(() => decodeTask(t, now - 120_000))).toBe("ELEVATION_EXPIRED");
   });
 
-  it("elevated entry: 10 valid (never 0), 2 invalid, 3 expired", async () => {
-    expect(EXIT.ok).not.toBe(0);
+  it("elevated entry: ok / invalid / expired codes", async () => {
     expect(await elevatedMain([encodeTask({ kind: "noop" })])).toBe(EXIT.ok);
-    expect(await elevatedMain(["a".repeat(TOKEN_MAX_LENGTH + 1)])).toBe(2);
-    expect(await elevatedMain([])).toBe(2);
-    expect(await elevatedMain(["a", "b"])).toBe(2);
-    expect(await elevatedMain([Buffer.from('{"kind":"exec"}').toString("base64url")])).toBe(2);
+    expect(await elevatedMain([])).toBe(EXIT.invalid);
+    expect(await elevatedMain(["a", "b"])).toBe(EXIT.invalid);
+    expect(await elevatedMain([Buffer.from('{"kind":"exec"}').toString("base64url")])).toBe(
+      EXIT.invalid,
+    );
     expect(
       await elevatedMain([encodeTask({ kind: "noop" }, Date.now() - TOKEN_MAX_AGE_MS - 1000)]),
-    ).toBe(3);
+    ).toBe(EXIT.expired);
+  });
+
+  it("exit codes never collide with node's own (0–14, >128) or each other (G3/V4)", () => {
+    const codes = Object.values(EXIT);
+    expect(new Set(codes).size).toBe(codes.length);
+    for (const c of codes) {
+      expect(c).toBeGreaterThan(14);
+      expect(c).toBeLessThanOrEqual(128);
+    }
+  });
+
+  it("token length limit: exactly TOKEN_MAX_LENGTH accepted, one byte more refused (G5)", async () => {
+    // a VALID envelope padded with JSON whitespace: only the length check can refuse it
+    const json = JSON.stringify({ v: 1, iat: Date.now(), task: { kind: "noop" } });
+    const padded = (bytes: number) =>
+      Buffer.from(json + " ".repeat(bytes - json.length)).toString("base64url");
+    const atLimit = padded((TOKEN_MAX_LENGTH / 4) * 3); // 6144 bytes → 8192 chars
+    const over = padded((TOKEN_MAX_LENGTH / 4) * 3 + 1); // → 8194 chars
+    expect(atLimit).toHaveLength(TOKEN_MAX_LENGTH);
+    expect(over.length).toBeGreaterThan(TOKEN_MAX_LENGTH);
+    expect(JSON.parse(Buffer.from(over, "base64url").toString())).toMatchObject({ v: 1 });
+    expect(await elevatedMain([atLimit])).toBe(EXIT.ok);
+    expect(await elevatedMain([over])).toBe(EXIT.invalid);
   });
 
   it("describeTask gives text for the UAC explanation", () => {
@@ -279,14 +307,19 @@ describe("elevated tasks (allowlist)", () => {
     expect(decodeFields(input)).toEqual([evil, evil, "tok"]);
     expect(ELEVATE_PS).not.toContain("calc");
     expect(ELEVATE_PS).toContain("1223");
+    // elevated node reads no OpenSSL config (env or default OPENSSLDIR) — V1
+    expect(ELEVATE_PS).toContain("$si.Arguments = '--openssl-config=NUL \"' + $f[1]");
   });
 
   it("elevate outcome: only 1223 is DENIED; expiry, timeout and failures distinct", async () => {
     expect(await code(() => elevateOutcome(`EXIT:${EXIT.ok}\r\n`, 0))).toBe("ok");
     expect(await code(() => elevateOutcome("EXIT:0\r\n", 0))).toBe("ELEVATION_FAILED"); // main never ran
     expect(await code(() => elevateOutcome("DENIED\r\n", 0))).toBe("ELEVATION_DENIED");
-    expect(await code(() => elevateOutcome("EXIT:3", 0))).toBe("ELEVATION_EXPIRED");
-    expect(await code(() => elevateOutcome("EXIT:2", 0))).toBe("ELEVATION_FAILED");
+    expect(await code(() => elevateOutcome("EXIT:10\r\n", 0))).toBe("ELEVATION_FAILED"); // node bootstrap failure
+    expect(await code(() => elevateOutcome("EXIT:1", 0))).toBe("ELEVATION_FAILED");
+    expect(await code(() => elevateOutcome(`EXIT:${EXIT.expired}`, 0))).toBe("ELEVATION_EXPIRED");
+    expect(await code(() => elevateOutcome(`EXIT:${EXIT.invalid}`, 0))).toBe("ELEVATION_FAILED");
+    expect(await code(() => elevateOutcome(`EXIT:${EXIT.failed}`, 0))).toBe("ELEVATION_FAILED");
     expect(await code(() => elevateOutcome("FAIL:Win32Exception 2", 0))).toBe("ELEVATION_FAILED");
     expect(await code(() => elevateOutcome("", -1))).toBe("ELEVATION_FAILED");
   });
@@ -343,7 +376,7 @@ describe("elevation trust checks (pure parts)", () => {
     for (const p of problems) expect(p).toMatch(/non-ASCII/);
   });
 
-  it("elevationFiles: node.exe, its folder, DLL/manifest/.local in it, script + folder (U3)", () => {
+  it("elevationFiles: node.exe, its folder, DLL/manifest in it, script + folder (U3)", () => {
     expect(
       elevationFiles("C:\\n\\node.exe", "C:\\w\\elevated.mjs", [
         "node.exe",
@@ -357,10 +390,34 @@ describe("elevation trust checks (pure parts)", () => {
       "C:\\n",
       "C:\\n\\evil.DLL",
       "C:\\n\\node.exe.manifest",
-      "C:\\n\\node.exe.local",
       "C:\\w\\elevated.mjs",
       "C:\\w",
     ]);
+  });
+
+  it("a .local redirection entry next to node is refused outright (G6/V6)", () => {
+    expect(
+      loaderRedirectProblems("C:\\n\\node.exe", ["node.exe", "NODE.EXE.LOCAL", "a.dll"]),
+    ).toEqual(["C:\\n\\NODE.EXE.LOCAL: DLL redirection (.local) present"]);
+    expect(loaderRedirectProblems("C:\\n\\node.exe", ["node.exe", "a.dll"])).toEqual([]);
+  });
+
+  it("realPath: missing → given path; any other error refuses (E6/G8)", async () => {
+    const fail = (errCode: string) => () => {
+      throw Object.assign(new Error(errCode), { code: errCode });
+    };
+    expect(realPath("C:\\x", () => "C:\\real\\x")).toBe("C:\\real\\x");
+    expect(realPath("C:\\x", fail("ENOENT"))).toBe("C:\\x");
+    for (const c of ["EACCES", "ELOOP", "EPERM"]) {
+      expect(await code(() => realPath("C:\\x", fail(c)))).toBe("ELEVATION_UNSAFE");
+    }
+  });
+
+  it("nodeDirEntries: missing folder → []; unlistable folder refuses (G7/V2)", async () => {
+    const here = fileURLToPath(import.meta.url);
+    expect(nodeDirEntries(join(here, "..", "no-such-dir", "node.exe"))).toEqual([]);
+    // dirname is a FILE → ENOTDIR (a listing error other than "missing")
+    expect(await code(() => nodeDirEntries(join(here, "node.exe")))).toBe("ELEVATION_UNSAFE");
   });
 
   it("environment script reads machine, user and volatile keys incl. session subkeys (T2/E1)", () => {

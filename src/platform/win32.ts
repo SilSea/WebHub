@@ -1,6 +1,7 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { powershell } from "../proc/exec.js";
@@ -18,10 +19,12 @@ import {
 import { fields, jsonLine, PS_READ_FIELDS, type PsRunner, runExe, runPs } from "./win32-shell.js";
 import {
   elevationFiles,
+  loaderRedirectProblems,
   nodeDirEntries,
   nodeEnvProblems,
   pathTrustProblems,
   persistentEnvNames,
+  realPath,
   trustTargets,
 } from "./win32-trust.js";
 
@@ -81,7 +84,10 @@ const LISTEN_PS = [
 let listenCache: { at: number; value: readonly PortOwner[] } | undefined;
 let listenInFlight: { at: number; promise: Promise<readonly PortOwner[]> } | undefined;
 
-/** `at` = when the query STARTED; an older overlapping query never replaces a newer snapshot (E8). */
+/**
+ * `at` = when the query STARTED; an older overlapping query never replaces a newer snapshot (E8).
+ * Monotonic clock: a wall-clock jump backwards must not pin a stale snapshot (review-4 G2).
+ */
 async function queryListening(startedAt: number): Promise<readonly PortOwner[]> {
   const res = await runPs("listening ports", LISTEN_PS);
   if (res.code !== 0) throw new PlatformError("PLATFORM_TOOL", "could not list listening ports");
@@ -98,7 +104,7 @@ async function queryListening(startedAt: number): Promise<readonly PortOwner[]> 
  * Each query costs ~1 s (PowerShell + CIM): check many ports in parallel, or use findFree.
  */
 async function listening(opts: { fresh?: boolean } = {}): Promise<PortOwner[]> {
-  const calledAt = Date.now();
+  const calledAt = performance.now();
   let value: readonly PortOwner[];
   if (!opts.fresh && listenCache !== undefined && calledAt - listenCache.at < LISTEN_CACHE_MS) {
     value = listenCache.value;
@@ -297,7 +303,7 @@ async function killTree(pid: number, expectStartedAt: string): Promise<void> {
     "/F",
     ...tree.flatMap((r) => ["/PID", String(r.i)]),
   ]);
-  const deadline = Date.now() + KILL_WAIT_MS;
+  const deadline = performance.now() + KILL_WAIT_MS;
   for (let poll = 0; ; poll++) {
     const now = await processTable();
     const alive = tree.filter((t) => now.some((r) => r.i === t.i && r.c === t.c));
@@ -305,7 +311,7 @@ async function killTree(pid: number, expectStartedAt: string): Promise<void> {
     const rootAlive = alive.some((r) => r.i === pid);
     // taskkill reported an error (exit 128 also covers "some PID already gone") and the root
     // is still there on the 2nd look (~1 s later) → refused (e.g. access denied): fail now
-    if ((poll >= 1 && res.code !== 0 && rootAlive) || Date.now() >= deadline) {
+    if ((poll >= 1 && res.code !== 0 && rootAlive) || performance.now() >= deadline) {
       throw new PlatformError("PROCESS_KILL_FAILED", `could not stop PID ${pid}`, {
         // taskkill text is localized in the OEM codepage → report the exit code only (D14)
         details: [
@@ -349,26 +355,6 @@ async function usage(pids: readonly number[]): Promise<Map<number, Usage>> {
 // ---------- elevate ----------
 
 /**
- * Real path, links resolved. Only a MISSING file falls back to the given path (the existence
- * check then reports it); any other error refuses — checking/launching a link path would
- * reopen security-2 T4 (review-3 E6).
- */
-const realPath = (p: string): string => {
-  try {
-    return realpathSync.native(p);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return p;
-    throw new PlatformError(
-      "ELEVATION_UNSAFE",
-      "cannot resolve the real path of a file webhub would run as administrator",
-      {
-        details: [`${p}: ${(err as NodeJS.ErrnoException).code ?? "error"}`],
-      },
-    );
-  }
-};
-
-/**
  * Absolute REAL paths (links resolved — security-2 T4) of node and of the BUILT,
  * self-contained elevated entry. The same paths are checked and launched; nothing is looked
  * up through PATH. Always `<package>/dist/platform/elevated.mjs`, also when webhub runs from
@@ -382,7 +368,13 @@ export function elevatedCommand(): { exe: string; script: string } {
   };
 }
 
-/** Fixed script; exe, script path and token arrive as stdin fields. */
+/**
+ * Fixed script; exe, script path and token arrive as stdin fields.
+ * `--openssl-config=NUL`: the elevated node reads no OpenSSL config at all — not OPENSSL_CONF
+ * (any spelling), not the default `OPENSSLDIR\openssl.cnf` under Common Files, so no
+ * config-driven provider DLL (security-4 V1; removes accepted limit U4). Verified to start
+ * and run crypto normally.
+ */
 export const ELEVATE_PS = [
   "$ErrorActionPreference = 'Stop'",
   PS_READ_FIELDS,
@@ -390,7 +382,7 @@ export const ELEVATE_PS = [
   "try {",
   "  $si = New-Object Diagnostics.ProcessStartInfo",
   "  $si.FileName = $f[0]",
-  "  $si.Arguments = '\"' + $f[1] + '\" ' + $f[2]",
+  "  $si.Arguments = '--openssl-config=NUL \"' + $f[1] + '\" ' + $f[2]",
   "  $si.Verb = 'runas'",
   "  $si.UseShellExecute = $true",
   "  $si.WorkingDirectory = [Environment]::SystemDirectory",
@@ -417,8 +409,9 @@ export function elevateOutcome(stdout: string, code: number): void {
   if (line === "DENIED") {
     throw new PlatformError("ELEVATION_DENIED", "administrator permission was not granted");
   }
-  if (line === "EXIT:0") {
-    // node exited without running main (e.g. entry not recognised) — never success (E4)
+  if (line === "EXIT:0" || line === "EXIT:10") {
+    // node exited without running main: 0 = entry not recognised (E4), 10 = node's own
+    // bootstrap failure (review-4 G3) — never success
     throw new PlatformError("ELEVATION_FAILED", "the elevated helper did not run", {
       details: [line],
     });
@@ -445,16 +438,17 @@ export function elevateOutcome(stdout: string, code: number): void {
  * ancestor folder.
  */
 export async function elevationProblems(exe: string, script: string): Promise<string[]> {
+  const entries = nodeDirEntries(exe);
   return [
     ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
-    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script, nodeDirEntries(exe))))),
+    ...loaderRedirectProblems(exe, entries),
+    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script, entries)))),
   ];
 }
 
 async function elevate(input: unknown): Promise<void> {
   const task = parseTask(input); // refuse before any UAC prompt
-  const token = encodeTask(task);
-  if (token.length > TOKEN_MAX_LENGTH) {
+  if (encodeTask(task).length > TOKEN_MAX_LENGTH) {
     // the elevated side would refuse it after the user already said Yes (review-3 E7)
     throw new PlatformError("ELEVATION_INVALID", "task data too large for elevation");
   }
@@ -475,6 +469,11 @@ async function elevate(input: unknown): Promise<void> {
         hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* (except NODE_ENV), OPENSSL_*, SSL_CERT_*, UV_*, ICU_* and non-ASCII-named variables from the user/system environment and from the shell that starts webhub (package-manager shims such as pnpm's set NODE_PATH: start webhub directly).",
       },
     );
+  }
+  // issued right before the prompt, so the user really gets the full token lifetime (review-4 G4)
+  const token = encodeTask(task);
+  if (token.length > TOKEN_MAX_LENGTH) {
+    throw new PlatformError("ELEVATION_INVALID", "task data too large for elevation");
   }
   const res = await runPs("elevate", ELEVATE_PS, fields([exe, script, token]), ELEVATE_TIMEOUT_MS);
   elevateOutcome(res.stdout, res.code);

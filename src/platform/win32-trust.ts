@@ -11,9 +11,10 @@
  * user can show its own UAC prompt or tamper with this check — the real fix is the planned
  * Program Files helper (CR).
  */
-import { readdirSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import { z } from "zod";
+import { PlatformError } from "./types.js";
 import { fields, jsonLine, PS_READ_FIELDS, runPs } from "./win32-shell.js";
 
 /** SYSTEM, Administrators, TrustedInstaller. */
@@ -50,9 +51,31 @@ export function trustTargets(files: readonly string[]): [TrustMode, string][] {
 }
 
 /**
+ * Real path, links resolved. Only a MISSING file falls back to the given path (the existence
+ * / trust check then reports it); any other error refuses — checking/launching a link path
+ * would reopen security-2 T4 (review-3 E6). `resolveFn` is injectable for tests (review-4 G8).
+ */
+export function realPath(
+  p: string,
+  resolveFn: (p: string) => string = realpathSync.native,
+): string {
+  try {
+    return resolveFn(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return p;
+    throw new PlatformError(
+      "ELEVATION_UNSAFE",
+      "cannot resolve the real path of a file webhub would run as administrator",
+      { details: [`${p}: ${(err as NodeJS.ErrnoException).code ?? "error"}`] },
+    );
+  }
+}
+
+/**
  * Everything the elevated process loads from disk: node.exe, its folder (DLL search order
- * starts there), every DLL / manifest / `.local` redirection entry already in that folder
- * (security-3 U3), the self-contained elevated.mjs and its folder. Paths must be real paths.
+ * starts there), every DLL / manifest already in that folder (security-3 U3) — by REAL path,
+ * so a linked DLL's target and its ancestors are checked too (security-4 V2) — the
+ * self-contained elevated.mjs and its folder. `exe` / `script` must be real paths.
  */
 export function elevationFiles(
   exe: string,
@@ -60,17 +83,41 @@ export function elevationFiles(
   nodeDirEntries: readonly string[] = [],
 ): string[] {
   const loaderFiles = nodeDirEntries
-    .filter((n) => /\.(dll|manifest|local)$/i.test(n))
-    .map((n) => join(dirname(exe), n));
+    .filter((n) => /\.(dll|manifest)$/i.test(n))
+    .flatMap((n) => {
+      const p = join(dirname(exe), n);
+      const real = realPath(p);
+      return real === p ? [p] : [p, real];
+    });
   return [exe, dirname(exe), ...loaderFiles, script, dirname(script)];
 }
 
-/** Names in node.exe's folder (for `elevationFiles`); unreadable folder → reported by the ACL check. */
+/**
+ * A `node.exe.local` (DotLocal DLL redirection) entry next to node is refused outright: its
+ * contents would redirect DLL loads, and checking a whole folder tree is not worth it for
+ * something a normal Node.js install never has (review-4 G6, security-4 V6).
+ */
+export function loaderRedirectProblems(exe: string, nodeDirEntries: readonly string[]): string[] {
+  return nodeDirEntries
+    .filter((n) => /\.local$/i.test(n))
+    .map((n) => `${join(dirname(exe), n)}: DLL redirection (.local) present`);
+}
+
+/**
+ * Names in node.exe's folder (for `elevationFiles`). A folder that cannot be listed refuses
+ * (fail closed — review-4 G7, security-4 V2); only a missing folder gives `[]` (the trust
+ * check then reports it as missing).
+ */
 export function nodeDirEntries(exe: string): string[] {
   try {
     return readdirSync(dirname(exe));
-  } catch {
-    return [];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new PlatformError(
+      "ELEVATION_UNSAFE",
+      "cannot list the Node.js folder to check what it would load as administrator",
+      { details: [`${dirname(exe)}: ${(err as NodeJS.ErrnoException).code ?? "error"}`] },
+    );
   }
 }
 
@@ -123,8 +170,10 @@ const TRUST_PS = [
   "  $mode = $item.Substring(0, 1); $path = $item.Substring(2)",
   "  $mask = if ($mode -eq 'F') { $full } else { $anc }",
   "  try {",
-  // inside try: an unreadable ancestor makes Test-Path throw → 'unreadable', not a tool error (U6)
-  "    if (-not (Test-Path -LiteralPath $path)) { if ($mode -eq 'F') { $out += @{ p = $path; r = 'missing' } }; continue }",
+  // inside try: an unreadable ancestor makes Test-Path throw → 'unreadable', not a tool error (U6).
+  // A "missing" ancestor is reported too: ancestors of existing files exist, so it can only mean
+  // access denied (Test-Path swallows that) or a race (security-4 V3).
+  "    if (-not (Test-Path -LiteralPath $path)) { $out += @{ p = $path; r = 'missing' }; continue }",
   "    $acl = Get-Acl -LiteralPath $path",
   "    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value",
   "    if ($trusted -notcontains $owner) { $out += @{ p = $path; r = ('owner ' + $owner) } }",
