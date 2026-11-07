@@ -1,0 +1,18 @@
+# dependencies / build
+node_modules/
+dist/
+coverage/
+*.tgz
+
+# secrets / local env
+.env
+.env.*
+
+# webhub runtime state when WEBHUB_HOME points at the repo during development (DESIGN §12)
+/data/
+/logs/
+/runtimes/
+/webhub.config.json
+
+# tooling
+.claude/*.lock

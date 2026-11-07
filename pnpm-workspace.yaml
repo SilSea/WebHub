@@ -1,0 +1,5 @@
+# Supply-chain hardening (WORKFLOW R6)
+# - Dependency lifecycle scripts stay blocked (pnpm default); allow explicitly here only when required.
+onlyBuiltDependencies: []
+# - Do not install versions published less than 24h ago (time to catch compromised releases).
+minimumReleaseAge: 1440
