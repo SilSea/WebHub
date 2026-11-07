@@ -1,4 +1,4 @@
-# webhub — Design v8
+# webhub — Design v9
 
 ศูนย์รวม website ทุกตัวใน **scan roots ที่ผู้ใช้ตั้ง** (เครื่องผู้พัฒนา: `E:\Workspaces\Project`) — เป็นเครื่องมือทั่วไปใช้กับ project ของใครก็ได้:
 scan หา project ที่เป็นเว็บ (ทุกภาษา) → start/stop ให้ → route ผ่าน nginx ไป `http://<name>.localhost` → **แก้ port ได้ทุกตัว** → **รวม database ทุก project ไว้ที่ server เดียว** → **จัดการ SQL / NoSQL / Redis ได้ครบ** — โดย **ไม่แตะ project เลย**
@@ -15,7 +15,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Port | **แก้ได้ทุก port** (web, api, db, nginx, dashboard) ผ่าน dashboard/CLI, Port Map รวม + เช็คชน + rollback |
 | Env / URL | env ตั้งผ่าน webhub, **Env Sets** (เช่น `local`/`remote`) สลับได้, **URL Rewrite** เสนอแล้วกดยืนยัน |
 | Database | **Shared Infra**: postgres / mysql / mariadb / mongo / redis — **1 server ต่อ engine ต่อ major** (ปกติ engine ละตัวเดียว), แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
-| DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight / mongo-express** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase |
+| DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase (MVP-5); **mongo-express** มาพร้อม Mongo infra (phase 8) |
 | ภาษา | **Runtime Profiles** แบบ data-driven (YAML) — built-in หลายภาษา + เพิ่มเองได้ไม่ต้องแก้ code |
 | ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาใช้ repo `_WebHub/` ได้) — `data/`, `runtimes/`, `logs/`, `nginx/`, `docker/` (generated) — path relative ใน config = relative กับ `$WEBHUB_HOME` (§21.4) |
 | Docker project | `docker compose` ด้วย **project name เดิม** + override file; adopt container ที่รันอยู่แล้ว |
@@ -157,7 +157,7 @@ networks:
   "sites": {
     "pos": {
       "frontend": { "port": 4105, "target": 4105, "via": "arg", "portArg": "--port {PORT} --strictPort", "expose": "host", "note": "native: CLI ทับ server.port ใน vite.config" },
-      "backend":  { "port": 4106, "target": 3000, "via": "env", "portEnv": "BACKEND_PORT", "expose": "host" }
+      "backend":  { "port": 4106, "target": 4106, "via": "env", "portEnv": "BACKEND_PORT", "expose": "host", "note": "native: webhub ตั้ง BACKEND_PORT=port" }
     },
     "backend-hobby": {
       "api": { "port": 3000, "target": 3000, "via": "fixed", "expose": "host", "note": "native: port = target บังคับ" }
@@ -174,7 +174,7 @@ networks:
 | `expose` | default `host` ทั้ง site และ `system.*` (nginx/infra/เครื่องมือเสริม publish ที่ 127.0.0.1). **compose/container:** `host` = publish `127.0.0.1:<port>`, `lan` = `0.0.0.0`, `none` = ภายใน network `webhub` เท่านั้น. **native:** webhub คุมได้แค่ args/env (`--host`, `HOST`) — app ที่ bind `0.0.0.0` ใน code → เสนอ Windows Firewall rule กัน LAN (admin) |
 | `locked` | ห้าม auto-reassign |
 
-**`via: fixed` + native:** port บน host = target เสมอ → แก้ไม่ได้, รันพร้อม site อื่นที่ใช้ port เดียวกันไม่ได้ → Port Map ติดป้าย + เสนอสลับเป็น `container` runner (map port ได้)
+**native ทุกแบบ:** process ฟังบน host ตรง → `target` = `port` เสมอ (`via: env|arg` → webhub ส่ง port ใหม่ให้, `target` ตามไปด้วย). **`via: fixed` + native:** port บน host = target เสมอ → แก้ไม่ได้, รันพร้อม site อื่นที่ใช้ port เดียวกันไม่ได้ → Port Map ติดป้าย + เสนอสลับเป็น `container` runner (map port ได้)
 
 ### 4.2 Default ranges (แก้ได้ใน global config)
 
@@ -212,7 +212,7 @@ user แก้ port (dashboard / `webhub port pos frontend=4200`)
 services:
   app:
     container_name: !reset null              # PPRS hardcode container_name
-    ports: !override ["127.0.0.1:4106:3000"]
+    ports: !override ["127.0.0.1:4110:3000"]  # PPRS: host 4110 → container 3000
     environment: { ... }                     # env set + URL rewrite + DB (§5.4)
     # <site>.localhost → resolve เป็น nginx ผ่าน network alias บน `webhub` (§3) — ไม่ต้องใส่ extra_hosts ต่อ site
     networks:
@@ -222,7 +222,7 @@ networks:
   webhub: { external: true }
 ```
 
-รัน: `docker compose -f <project compose> -f data/compose/<site>.<group>.override.yml up -d` (cwd = dir ของ compose file)
+รัน: `docker compose -f <project compose> -f $WEBHUB_HOME/data/compose/<site>.<group>.override.yml up -d` (cwd = dir ของ compose file; path override เป็น absolute)
 - **ใช้ project name เดิม** → volume/network เดิมยังอยู่, container ที่ผู้ใช้รันเองคือชุดเดียวกัน. หา name ด้วย `docker compose config --format json` (`.name`) → ได้ลำดับเดียวกับ compose: `COMPOSE_PROJECT_NAME` (env/`.env` ของ dir) → top-level `name:` → ชื่อโฟลเดอร์
 - **compose หลายไฟล์คนละ dir** (questcloud: `questcloud-frontend/` + `questcloud-backend/`) → **1 compose project ต่อ dir (group)**: override + project name แยกกัน, start/stop/adopt ทีละ group; `-f` รวมกันเฉพาะไฟล์ใน dir เดียวกัน
 - container ใน network `webhub` เรียก `<site>.localhost` → ถึง nginx ผ่าน alias (spike ยืนยันแค่แบบ `extra_hosts` → alias ต้อง spike ซ้ำใน MVP-4; ไม่ผ่าน → fallback `extra_hosts` ต่อ site)
@@ -260,7 +260,7 @@ webhub-redis-7
 | MySQL | `mysql:<major>` (default 8.4) | database + user (GRANT ON db.*) |
 | MariaDB | `mariadb:<major>` (engine แยกจาก MySQL) | database + user |
 | MongoDB | `mongo:<major>` (default 7) | database + user |
-| Redis / Valkey | `redis:7` (หรือ `valkey/valkey:8`) | DB index 0–15 — **เฉพาะ app ที่ระบุ index ได้** (`REDIS_URL=.../N` หรือ `REDIS_DB`); เกิน 16 site หรือระบุไม่ได้ → `isolated`. index **ไม่ใช่ security isolation** (site เข้าถึง index อื่นได้) → พอสำหรับ dev เท่านั้น |
+| Redis / Valkey | `redis:7` (หรือ `valkey/valkey:8`) | DB index 0–15 — **เฉพาะ app ที่รับ `REDIS_URL` (ใส่ user/password/index ได้ครบ) หรือมี env key ของ username**; ใช้แค่ `REDIS_HOST/PORT/DB` (ไม่มี username → ACL ต่อ site ใช้ไม่ได้), เกิน 16 site หรือระบุ index ไม่ได้ → `isolated`. user `default` ปิดใน shared redis. index **ไม่ใช่ security isolation** (site เข้าถึง index อื่นได้) → พอสำหรับ dev เท่านั้น |
 | SQLite | — | ไฟล์อยู่ใน project, Data Hub/Studio แค่ list/เปิด/backup |
 
 เปิดเฉพาะ engine ที่มี site ใช้ (lazy start); **1 server ต่อ engine ต่อ major** ที่มี site ใช้จริง — policy version ดู §19.2
@@ -369,7 +369,7 @@ enable site (mode shared)
 - Streaming result ผ่าน WebSocket
 
 #### เครื่องมือเสริม (เปิดได้ตั้งแต่ Data Hub phase)
-webhub รัน container + เพิ่ม connection ทุก site ให้เอง (เข้าผ่าน nginx + auth เดียวกับ dashboard): **CloudBeaver** → `sql.localhost`, **RedisInsight** → `redis.localhost`, **mongo-express** → `mongo.localhost`. ทำให้ได้เครื่องมือ SQL/NoSQL/Redis ครบตั้งแต่ต้น ระหว่าง DB Studio ของเราทยอยทำ (v1 → v2); ปิดได้เมื่อ Studio ครอบคลุมแล้ว
+webhub รัน container + เพิ่ม connection ทุก site ให้เอง (เข้าผ่าน nginx + auth เดียวกับ dashboard): **CloudBeaver** → `sql.localhost`, **RedisInsight** → `redis.localhost`, **mongo-express** → `mongo.localhost` (พร้อม Mongo infra, phase 8). ทำให้ได้เครื่องมือ SQL/NoSQL/Redis ครบตั้งแต่ต้น ระหว่าง DB Studio ของเราทยอยทำ (v1 → v2); ปิดได้เมื่อ Studio ครอบคลุมแล้ว
 
 ### 5.8 Dev services (optional shared)
 
@@ -465,6 +465,7 @@ Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อ�
   - install แบบ **ไม่แตะ lockfile/manifest**: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable`, `bun install --frozen-lockfile`; ไม่มี lockfile → `npm install --no-package-lock` / แจ้งว่า pnpm/yarn/bun จะสร้าง lockfile → ผู้ใช้ยืนยันก่อน
   - env ทุก process ที่ spawn: `COREPACK_ENABLE_AUTO_PIN=0` (corepack ไม่เขียน `packageManager` ลง package.json), `PYTHONDONTWRITEBYTECODE=1` (ไม่สร้าง `__pycache__`)
   - output ของ dev server (`.next/`, `node_modules/.vite`, `dist/`) = artefact ที่ project gitignore อยู่แล้ว → นับแบบเดียวกับ `node_modules`
+  - **ข้อจำกัดที่รู้แล้ว:** `next dev` เขียน `next-env.d.ts` และอาจแก้ `tsconfig.json` เอง → webhub ตรวจก่อน start (ไฟล์ไม่มี/ไม่ตรง), แจ้งใน run approval; ต้องการ Zero-touch เคร่ง → แนะนำ `container` runner (mount source read-only + overlay)
 - Process บน Windows: kill ทั้ง tree (`taskkill /T /F` / `tree-kill`); log → ring buffer + `logs/<site>.log` (rotate)
 - **Re-adopt** หลัง webhub restart: ตรวจ PID + command line + port ก่อนถือว่าเป็นของเดิม (กัน PID reuse)
 
@@ -543,8 +544,7 @@ server {
     server_name questcloud.localhost;
     resolver 127.0.0.11 valid=10s ipv6=off;
 
-    proxy_intercept_errors on;
-    error_page 502 503 504 = @wake;
+    error_page 502 503 504 = @wake;              # เฉพาะ error ที่ nginx สร้างเอง (upstream ไม่รัน/DNS ไม่เจอ); ไม่เปิด proxy_intercept_errors → 5xx ของ app ส่งถึง client ตามจริง
 
     location / {                                  # next (frontend)
         set $up http://questcloud-frontend-web-1:3000;
@@ -586,10 +586,10 @@ proxy_set_header X-Forwarded-Proto $scheme;
 
 - API bind `127.0.0.1:7400` เท่านั้น; nginx proxy ให้ที่ `hub.localhost` / `db.localhost`
 - `Host` allowlist: `hub.localhost`, `db.localhost`, `127.0.0.1:7400` (+ `:<port>` เมื่อ HTTP port ≠ 80) → กัน DNS rebinding; `webhub.internal` = Host ที่ nginx ตั้งเองตอนเรียก `/_wake`, `/_auth`, `/_webhub/login` → รับเฉพาะ endpoint เหล่านี้
-- เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.` / `http.localhost`) → nginx `auth_request` ไปที่ API ตรวจ cookie token เดียวกัน (ไม่เปิดโล่ง)
+- เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.` / `http.localhost`) → nginx `auth_request` ไปที่ API ตรวจ **session cookie ของ host นั้น** (ไม่เปิดโล่ง); nginx ลบ cookie `webhub_*` ออก (`proxy_set_header Cookie` ที่กรองแล้ว) ก่อนส่งต่อเข้า container ของเครื่องมือ → master token ไม่หลุดไปถึง tool
 - `Origin` check ทุก request ที่แก้ข้อมูล → กัน CSRF
 - Token สุ่มใน `data/auth.json`; `webhub ui` เปิด one-time link → set cookie `HttpOnly; SameSite=Strict`; CLI อ่าน token จากไฟล์
-- cookie เป็น **host-only** ต่อ host (ห้าม `Domain=localhost` → จะรั่วไปทุก `<site>.localhost`): เปิดเครื่องมือเสริม/`db.localhost` จาก dashboard → ลิงก์ `http://<tool>.localhost/_webhub/login?t=<one-time>` → nginx ส่ง path นี้ไป API (Host `webhub.internal` + `X-Forwarded-Host`) → set cookie ของ host นั้น → redirect; `auth_request` ตรวจ cookie ของ host นั้น
+- cookie เป็น **host-only** ต่อ host (ห้าม `Domain=localhost` → จะรั่วไปทุก `<site>.localhost`): เปิดเครื่องมือเสริม/`db.localhost` จาก dashboard → ลิงก์ `http://<tool>.localhost/_webhub/login?t=<one-time>` → nginx ส่ง path นี้ไป API (Host `webhub.internal` + `X-Forwarded-Host`) → set session cookie (id สุ่มต่อ host, หมดอายุได้, ไม่ใช่ master token) ของ host นั้น → redirect; `auth_request` ตรวจ cookie ของ host นั้น
 - เปิด `lan` / tunnel → บังคับ password + เตือน; DB ที่ `expose: lan` ต้อง password แรง
 
 ### 10.4 Static site protection
@@ -830,7 +830,7 @@ webhub reload | ui
 │ system         postgres  5432       5432    —      host    ● in use        ✎   │
 │ questcloud     frontend  4111       3000    fixed  host    ○ free          ✎   │
 │ backend-hobby  api       3000       3000    fixed  host    🔒 fixed native      │
-│ werewolf       backend   4107       4000    env    host    ⚠ conflict(PID 1234)│
+│ werewolf       backend   4107       4107    env    host    ⚠ conflict(PID 1234)│
 │ (Windows)      reserved  50000-50059 —      —      —       ⛔ reserved          │
 
 [Data Hub]
@@ -925,6 +925,7 @@ webhub reload | ui
 | 15 | ใช้กับ project/เครื่องอื่นได้ (generalize) | Windows ก่อน + Platform layer; Lite mode เมื่อไม่มี Docker; npm package; scanRoots หลาย root + nginx mount generated; Add site manual; first-run wizard + doctor; profile schema/fixtures/import-export; run approval โชว์คำสั่ง; config migration; i18n; ผล scan เป็น fixture | §0, §21 |
 | 16 | ยิง API | **API Studio ในตัว** + **Hoppscotch** เสริม (ไม่ทำ Data API / PostgREST) | §22 |
 | 17 | review v7 (goal เดิม) | nginx: `@wake` แบบ rewrite + proxy.conf header ชุดเต็มทุก location; Host `webhub.internal` สำหรับ `/_wake`/`/_auth`; cookie host-only + login handoff ต่อ tool host; nginx/infra bind 127.0.0.1; install frozen lockfile + `COREPACK_ENABLE_AUTO_PIN=0`; sandbox isolated-vm; generated config ใน `$WEBHUB_HOME` (absolute mount); compose group ต่อ dir + project name จาก `compose config`; disable dependents; vite `via: arg`; roadmap (container runner → MVP-3, start modes → MVP-4, backup → MVP-5); HTTP port ≠ 80 ต่อ `:port`; mariadb 3307 + pinned major `15000–15999`; redis ACL แทน rename-command; `<site>.localhost` ใน container = nginx alias; reserved/CLI/ignore/deny-list | §3, §4, §5, §7, §10, §11, §13, §15, §19, §22 |
+| 18 | review v8 (goal เดิม) | session cookie ต่อ tool host + ลบ cookie ก่อนส่งเข้า tool; daemon resolver `*.localhost`; เลิก `proxy_intercept_errors`; redis shared เฉพาะ app ที่มี URL/username; mongo-express → phase 8; native `target` = `port`; override path absolute; `next dev` เป็นข้อจำกัดที่แจ้งใน run approval; git status `--no-optional-locks` | §3, §4, §5, §7, §10, §20, §22 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
 ### Backlog
@@ -1074,7 +1075,7 @@ variants:
 | **Scheduled backup** | ตาม `backups.schedule` (default ทุกวัน 03:00) ทุก DB ใน shared + isolated, เก็บ `keep` ชุดล่าสุด, ไฟล์ใน `data/backups/` |
 | **Cleanup** | `webhub cleanup` ลบเฉพาะของที่ webhub สร้าง (label `webhub.managed=true`): container, network `webhub`, override, nginx conf, runtimes ที่ไม่ใช้ — **ไม่ลบ volume เดิมของ project, ไม่แตะ project**; `--dry-run` ดูก่อน |
 | **Config export/import** | zip `webhub.config.json` + `data/sites`, `ports.json`, `profiles/` (ไม่รวม secrets/backups เว้นแต่ `--with-secrets`) → ย้ายเครื่อง / เตรียม export ไป VPS |
-| **Dev shortcuts** | ปุ่ม VS Code (`code <path>`), terminal (Windows Terminal ที่ cwd ของ site + env ของ site), explorer; git branch/dirty status (อ่านอย่างเดียว) |
+| **Dev shortcuts** | ปุ่ม VS Code (`code <path>`), terminal (Windows Terminal ที่ cwd ของ site + env ของ site), explorer; git branch/dirty status (อ่านอย่างเดียวจริง: `git --no-optional-locks status --porcelain` → ไม่เขียน `.git/index`) |
 | **Alias** | ชื่อเพิ่มต่อ site (`pos.localhost` + `shop.localhost`) → nginx `server_name` + hosts sync |
 
 ทุก resource ที่ webhub สร้าง (container, network, volume ของ shared infra) ติด label `webhub.managed=true` เพื่อแยกจากของ project
@@ -1206,6 +1207,7 @@ Export: collection → Postman v2.1 / OpenAPI / cURL
 ### 22.5 ความปลอดภัย
 
 - request ออกจาก daemon (ไม่ใช่ browser) → ไม่ติด CORS; **จำกัดปลายทาง** ค่าเริ่มต้น = `*.localhost` + `127.0.0.1` + host ใน env set ของ site; host อื่นต้องเพิ่มใน allowlist เอง (กัน SSRF ผ่าน API Studio)
+- HTTP client ของ daemon (undici `connect.lookup`, agent ของ `ws`/socket.io) ใช้ resolver ของตัวเอง: `*.localhost` → `127.0.0.1` → API Studio, `webhub api run`, OpenAPI fetch ใช้ได้แม้ผู้ใช้ข้าม hosts sync
 - ตัวแปรที่เป็น secret (token, password) → เก็บใน `data/secrets.json` ไม่ปนใน collection ที่ export (export แทนด้วย placeholder)
 - script sandbox: ไม่มี filesystem/process access, timeout
 
