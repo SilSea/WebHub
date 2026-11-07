@@ -1,15 +1,34 @@
-import { isAbsolute } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main as elevatedMain } from "../../src/platform/elevated.js";
-import { getPlatform, isPlatformError, unsupportedPlatform } from "../../src/platform/index.js";
-import { decodeTask, describeTask, encodeTask, parseTask } from "../../src/platform/tasks.js";
+import {
+  getPlatform,
+  isPlatformError,
+  setPlatformLog,
+  unsupportedPlatform,
+} from "../../src/platform/index.js";
+import {
+  decodeTask,
+  describeTask,
+  encodeTask,
+  parseTask,
+  TOKEN_MAX_AGE_MS,
+} from "../../src/platform/tasks.js";
 import {
   cleanText,
+  descendants,
+  ELEVATE_PS,
   elevatedCommand,
+  elevateOutcome,
+  NOTIFY_PS,
+  notifyVia,
+  type ProcRow,
   parseExcluded,
   parseListening,
   pickFree,
 } from "../../src/platform/win32.js";
+import { fields, PS_UTF8 } from "../../src/platform/win32-shell.js";
+import { nodeEnvProblems, trustTargets } from "../../src/platform/win32-trust.js";
+import type { ExecResult } from "../../src/proc/exec.js";
 
 const code = async (p: Promise<unknown> | (() => unknown)): Promise<string> => {
   try {
@@ -19,6 +38,15 @@ const code = async (p: Promise<unknown> | (() => unknown)): Promise<string> => {
     return isPlatformError(err) ? err.code : `other:${(err as Error).message}`;
   }
 };
+
+const decodeFields = (input: string): string[] =>
+  input
+    .split("\n")
+    .filter((l) => l !== "")
+    .map((l) => {
+      expect(l).toMatch(/^f:[A-Za-z0-9+/=]*$/);
+      return Buffer.from(l.slice(2), "base64").toString("utf8");
+    });
 
 describe("parsers (fixture output)", () => {
   it("parseListening: JSON line, IPv4/IPv6, empty", () => {
@@ -67,33 +95,35 @@ describe("pickFree", () => {
   });
 
   it("exhausted / invalid range", async () => {
-    expect(
-      await code(
-        pickFree(
-          [4100, 4101],
-          () => true,
-          async () => true,
-        ),
-      ),
-    ).toBe("PORT_EXHAUSTED");
-    expect(
-      await code(
-        pickFree(
-          [5000, 4000],
-          () => false,
-          async () => true,
-        ),
-      ),
-    ).toBe("PORT_INVALID");
-    expect(
-      await code(
-        pickFree(
-          [0, 10],
-          () => false,
-          async () => true,
-        ),
-      ),
-    ).toBe("PORT_INVALID");
+    const no = () => true;
+    const yes = async () => true;
+    expect(await code(pickFree([4100, 4101], no, yes))).toBe("PORT_EXHAUSTED");
+    expect(await code(pickFree([5000, 4000], () => false, yes))).toBe("PORT_INVALID");
+    expect(await code(pickFree([0, 10], () => false, yes))).toBe("PORT_INVALID");
+    expect(await code(pickFree([65535, 65535], () => false, yes))).toBe("ok");
+  });
+});
+
+describe("process input validation", () => {
+  it("bad PIDs → PID_INVALID before any tool runs", async () => {
+    const p = getPlatform("win32").process;
+    expect(await code(p.info(0))).toBe("PID_INVALID");
+    expect(await code(p.killTree(1.5, "x"))).toBe("PID_INVALID");
+    expect(await code(p.usage([1, -3]))).toBe("PID_INVALID");
+  });
+
+  it("descendants: children first, ignores children older than the parent (PID reuse)", () => {
+    const t = (i: number, p: number, c: string): ProcRow => ({ i, p, c });
+    const root = t(10, 1, "2026-11-07T10:00:00.0000000Z");
+    const table = [
+      root,
+      t(11, 10, "2026-11-07T10:00:01.0000000Z"), // child
+      t(12, 11, "2026-11-07T10:00:02.0000000Z"), // grandchild
+      t(13, 10, "2026-11-07T09:00:00.0000000Z"), // parent was an earlier holder of PID 10
+      t(14, 10, ""), // start time unknown → not ours
+      t(15, 99, "2026-11-07T10:00:03.0000000Z"),
+    ];
+    expect(descendants(table, root).map((r) => r.i)).toEqual([12, 11, 10]);
   });
 });
 
@@ -115,24 +145,38 @@ describe("elevated tasks (allowlist)", () => {
     const t = encodeTask({ kind: "noop" });
     expect(t).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(decodeTask(t)).toEqual({ kind: "noop" });
+    const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
     for (const bad of [
       "",
       "has space",
       '"quote"',
       "a".repeat(9000),
       Buffer.from("{").toString("base64url"),
+      enc({ kind: "noop" }), // bare task without envelope
+      enc({ v: 1, iat: Date.now(), task: { kind: "exec", cmd: "x" } }),
+      enc({ v: 1, iat: Date.now(), task: { kind: "noop" }, extra: 1 }),
+      enc({ v: 2, iat: Date.now(), task: { kind: "noop" } }),
     ]) {
       expect(await code(() => decodeTask(bad))).toBe("ELEVATION_INVALID");
     }
-    const evil = Buffer.from(JSON.stringify({ kind: "exec", cmd: "x" })).toString("base64url");
-    expect(await code(() => decodeTask(evil))).toBe("ELEVATION_INVALID");
   });
 
-  it("elevated entry: exit 0 for a valid task, 2 for anything else", async () => {
+  it("token expires (late UAC answer runs nothing)", async () => {
+    const now = 1_800_000_000_000;
+    const t = encodeTask({ kind: "noop" }, now);
+    expect(decodeTask(t, now + TOKEN_MAX_AGE_MS)).toEqual({ kind: "noop" });
+    expect(await code(() => decodeTask(t, now + TOKEN_MAX_AGE_MS + 1))).toBe("ELEVATION_EXPIRED");
+    expect(await code(() => decodeTask(t, now - 120_000))).toBe("ELEVATION_EXPIRED");
+  });
+
+  it("elevated entry: 0 valid, 2 invalid, 3 expired", async () => {
     expect(await elevatedMain([encodeTask({ kind: "noop" })])).toBe(0);
     expect(await elevatedMain([])).toBe(2);
     expect(await elevatedMain(["a", "b"])).toBe(2);
     expect(await elevatedMain([Buffer.from('{"kind":"exec"}').toString("base64url")])).toBe(2);
+    expect(
+      await elevatedMain([encodeTask({ kind: "noop" }, Date.now() - TOKEN_MAX_AGE_MS - 1000)]),
+    ).toBe(3);
   });
 
   it("describeTask gives text for the UAC explanation", () => {
@@ -145,27 +189,110 @@ describe("elevated tasks (allowlist)", () => {
     );
   });
 
-  it("elevated command uses absolute paths (no PATH lookup)", () => {
+  it("elevated command: absolute node + built dist entry (also from source)", () => {
     const { exe, script } = elevatedCommand();
-    expect(isAbsolute(exe)).toBe(true);
-    expect(isAbsolute(script)).toBe(true);
-    expect(script).toMatch(/elevated\.(ts|js)$/);
+    expect(exe).toBe(process.execPath);
+    expect(script).toMatch(/[\\/]dist[\\/]platform[\\/]elevated\.js$/);
+  });
+
+  it("elevate script is fixed text; exe/script/token only as stdin fields", () => {
+    const evil = `C:\\x" & calc & "\n$(calc)`;
+    const input = fields([evil, evil, "tok"]);
+    expect(decodeFields(input)).toEqual([evil, evil, "tok"]);
+    expect(ELEVATE_PS).not.toContain("calc");
+    expect(ELEVATE_PS).toContain("1223");
+  });
+
+  it("elevate outcome: only 1223 is DENIED; expiry, timeout and failures distinct", async () => {
+    expect(await code(() => elevateOutcome("EXIT:0\r\n", 0))).toBe("ok");
+    expect(await code(() => elevateOutcome("DENIED\r\n", 0))).toBe("ELEVATION_DENIED");
+    expect(await code(() => elevateOutcome("EXIT:3", 0))).toBe("ELEVATION_EXPIRED");
+    expect(await code(() => elevateOutcome("EXIT:2", 0))).toBe("ELEVATION_FAILED");
+    expect(await code(() => elevateOutcome("FAIL:Win32Exception 2", 0))).toBe("ELEVATION_FAILED");
+    expect(await code(() => elevateOutcome("", -1))).toBe("ELEVATION_FAILED");
   });
 });
 
-describe("notify text", () => {
-  it("removes control characters and caps length", () => {
+describe("elevation trust checks (pure parts)", () => {
+  it("trustTargets: files full, every ancestor checked once", () => {
+    const t = trustTargets(["C:\\a\\b\\c.js", "C:\\a\\b\\d.js", "C:\\a\\b"]);
+    expect(t).toEqual([
+      ["F", "C:\\a\\b\\c.js"],
+      ["F", "C:\\a\\b\\d.js"],
+      ["F", "C:\\a\\b"],
+      ["A", "C:\\a"],
+      ["A", "C:\\"],
+    ]);
+  });
+
+  it("nodeEnvProblems: any NODE_* except NODE_ENV", () => {
+    expect(nodeEnvProblems(["Path", "TEMP", "NODE_ENV", "node_options", "NODE_PATH"])).toEqual([
+      "environment variable node_options is set (node reads it at startup)",
+      "environment variable NODE_PATH is set (node reads it at startup)",
+    ]);
+  });
+});
+
+describe("notify", () => {
+  const fake = (stdout: string) => {
+    const calls: { script: string; input: string | undefined }[] = [];
+    const run = async (script: string, input?: string): Promise<ExecResult> => {
+      calls.push({ script, input });
+      return { code: 0, stdout, stderr: "" };
+    };
+    return { calls, run };
+  };
+
+  it("script never contains the text; text only as base64 stdin fields", async () => {
+    const f = fake("OK\r\n");
+    const evil = `webhub '"; $(calc) <b>&`;
+    expect(await notifyVia(f.run, evil, "body `n $env:X")).toBe(true);
+    expect(await notifyVia(f.run, "other title", "")).toBe(true);
+    expect(f.calls).toHaveLength(2);
+    for (const c of f.calls) {
+      expect(c.script).toBe(`${PS_UTF8}\n${NOTIFY_PS}`);
+      expect(c.script).not.toContain("calc");
+    }
+    expect(decodeFields(f.calls[0]?.input ?? "")).toEqual([evil, "body `n $env:X"]);
+    expect(decodeFields(f.calls[1]?.input ?? "")).toEqual(["other title", ""]); // empty survives
+  });
+
+  it("failure → false + logged, never throws", async () => {
+    const logs: string[] = [];
+    setPlatformLog((m) => logs.push(m));
+    try {
+      expect(await notifyVia(fake("FAIL:COMException\r\n").run, "t", "b")).toBe(false);
+      const boom = async (): Promise<ExecResult> => {
+        throw new Error("spawn failed");
+      };
+      expect(await notifyVia(boom, "t", "b")).toBe(false);
+    } finally {
+      setPlatformLog(() => {});
+    }
+    expect(logs).toEqual([
+      "notify failed: FAIL:COMException",
+      "notify failed: notify: could not run PowerShell",
+    ]);
+  });
+
+  it("cleanText: control/XML-invalid chars removed, length in code points, no split pairs", () => {
     expect(cleanText("a\u0000b\nc\u001b[31m", 100)).toBe("a b c [31m");
-    expect(cleanText("x".repeat(200), 10)).toHaveLength(10);
+    expect(cleanText("x\uffffy\ud800z", 100)).toBe("x y z");
+    expect(Array.from(cleanText("x".repeat(200), 10))).toHaveLength(10);
+    const emoji = cleanText("😀".repeat(20), 5);
+    expect(emoji).toBe("😀😀😀😀…");
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(emoji)).toBe(false);
   });
 });
 
 describe("unsupported OS", () => {
-  it("every call → PLATFORM_UNSUPPORTED; notify → false", async () => {
+  it("async calls reject with PLATFORM_UNSUPPORTED (never throw synchronously)", async () => {
     const p = unsupportedPlatform("linux");
-    expect(await code(() => p.ports.listening())).toBe("PLATFORM_UNSUPPORTED");
-    expect(await code(() => p.process.killTree(1, "x"))).toBe("PLATFORM_UNSUPPORTED");
-    expect(await code(() => p.elevate({ kind: "noop" }))).toBe("PLATFORM_UNSUPPORTED");
+    const pending = p.ports.listening(); // must not throw here
+    await expect(pending).rejects.toSatisfy((e) => isPlatformError(e, "PLATFORM_UNSUPPORTED"));
+    expect(await code(p.process.killTree(1, "x"))).toBe("PLATFORM_UNSUPPORTED");
+    expect(await code(p.elevate({ kind: "noop" }))).toBe("PLATFORM_UNSUPPORTED");
+    expect(await code(() => p.capabilities())).toBe("PLATFORM_UNSUPPORTED");
     expect(await p.notify("t", "b")).toBe(false);
     expect(getPlatform("darwin").name).toBe("darwin");
   });

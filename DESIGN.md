@@ -1117,9 +1117,10 @@ interface Platform {
 | notify | toast | `osascript` | `notify-send` |
 
 Windows implement แล้ว (F-002, `src/platform/`):
-- ports: CIM `MSFT_NetTCPConnection State=2` (ไม่ขึ้นกับภาษา Windows, cache 2 วิ); reserved จาก `netsh` (เอาเฉพาะตัวเลข); `findFree(range, avoid)` = ตัด listening/reserved/avoid แล้วลอง `canBind` ทีละตัว
-- process: `killTree(pid, expectStartedAt)` ต้องส่ง start time ที่จำไว้ตอน spawn → ไม่ตรง = ไม่ฆ่า (`PROCESS_MISMATCH`, กัน PID reuse)
-- elevate: **allowlist ของ task kind** (zod strict, ไม่มี kind "รันคำสั่ง") → `Start-Process -Verb RunAs` เรียก `node elevated.js <base64url task>` ด้วย path เต็ม; validate ซ้ำใน process admin; ตอนนี้มีแค่ `noop` (MVP-2 เพิ่ม `hosts.writeBlock`)
+- ports: CIM `MSFT_NetTCPConnection State=2` (ไม่ขึ้นกับภาษา Windows, cache 2 วิ / `fresh`); reserved จาก `netsh` (เอาเฉพาะตัวเลข); `canBind(port)` = ไม่มีใครฟังที่ address ไหน (fresh) + bind loopback ได้ทั้ง IPv4/IPv6 (ไม่ bind 0.0.0.0 → ไม่เด้ง firewall); `findFree(range, avoid)` = ตัด listening/reserved/avoid แล้วลอง bind ทีละตัว
+- process: `killTree(pid, expectStartedAt)` ต้องส่ง start time ที่จำไว้ตอน spawn → ไม่ตรง = ไม่ฆ่า (`PROCESS_MISMATCH`, กัน PID reuse); หา descendant เอง (ลูกต้องเกิดหลังพ่อ), รอตายภายใน 5 วิ
+- elevate: **allowlist ของ task kind** (zod strict, ไม่มี kind "รันคำสั่ง") → `runas` เรียก `node dist/platform/elevated.js <token>` ด้วย path เต็ม, cwd = System32; token มีอายุ 5 นาที; validate ซ้ำใน process admin; ตอนนี้มีแค่ `noop` (MVP-2 เพิ่ม `hosts.writeBlock`)
+- **pre-elevation guard**: ถ้า non-admin แก้ไฟล์ที่ process admin โหลดได้ (node.exe, dist, node_modules + ancestor) หรือมี `NODE_*` ใน env ถาวร → `ELEVATION_UNSAFE` ไม่ถาม UAC. ผล: ต้องติดตั้ง Node + webhub ในโฟลเดอร์ที่ admin เท่านั้นแก้ได้ (เช่น `C:\Program Files`) จึงจะ elevate ได้; helper ถาวรใน Program Files = CR ทีหลัง
 - notify: toast ผ่าน PowerShell WinRT (AUMID ของ PowerShell), ข้อความทาง stdin + XML escape, ล้มเหลวคืน `false` ไม่ throw
 - error ใช้ `PlatformError` แยกจาก `WebhubError` (ไม่แก้ F-001, R1)
 | nginx → native | `host.docker.internal` (Docker Desktop, bind 127.0.0.1 ได้ — spike ✅) | น่าจะเหมือน Windows — **ต้อง spike** | Docker native: container **เข้าไม่ถึง** 127.0.0.1 ของ host → nginx `network_mode: host` (ต้อง spike) |

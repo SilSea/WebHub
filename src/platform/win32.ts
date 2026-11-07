@@ -1,25 +1,35 @@
+import { existsSync } from "node:fs";
 import { createServer } from "node:net";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { execFile, powershell, systemExe } from "../proc/exec.js";
-import { processState } from "../store/lock.js";
-import { encodeTask, parseTask } from "./tasks.js";
+import { powershell } from "../proc/exec.js";
+import { encodeTask, parseTask, TOKEN_MAX_AGE_MS } from "./tasks.js";
 import {
-  type BindHost,
   type Platform,
   PlatformError,
   type PortOwner,
   type PortRange,
   type ProcInfo,
+  platformLog,
   type Usage,
 } from "./types.js";
+import { fields, jsonLine, PS_READ_FIELDS, type PsRunner, runExe, runPs } from "./win32-shell.js";
+import {
+  elevationFiles,
+  nodeEnvProblems,
+  pathTrustProblems,
+  persistentEnvNames,
+  trustTargets,
+} from "./win32-trust.js";
 
 const LISTEN_CACHE_MS = 2_000;
-const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+const KILL_WAIT_MS = 5_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function checkPid(pid: number): void {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 0xffffffff) {
-    throw new PlatformError("PROCESS_MISMATCH", `invalid PID: ${String(pid)}`);
+    throw new PlatformError("PID_INVALID", `invalid PID: ${String(pid)}`);
   }
 }
 
@@ -27,24 +37,6 @@ function checkPort(port: number): void {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new PlatformError("PORT_INVALID", `invalid port: ${String(port)}`);
   }
-}
-
-/** Last line starting with `JSON:` → parsed + validated; anything else is a tool failure. */
-function jsonLine<T>(stdout: string, schema: z.ZodType<T>, what: string): T {
-  const line = stdout
-    .split(/\r?\n/)
-    .reverse()
-    .find((l) => l.startsWith("JSON:"));
-  if (line === undefined) throw new PlatformError("PLATFORM_TOOL", `${what}: no output`);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(line.slice(5));
-  } catch {
-    throw new PlatformError("PLATFORM_TOOL", `${what}: malformed output`);
-  }
-  const res = schema.safeParse(raw);
-  if (!res.success) throw new PlatformError("PLATFORM_TOOL", `${what}: unexpected output shape`);
-  return res.data;
 }
 
 // ---------- ports ----------
@@ -77,30 +69,42 @@ export function parseExcluded(stdout: string): PortRange[] {
   return out;
 }
 
-let listenCache: { at: number; value: PortOwner[] } | undefined;
-
-async function listening(): Promise<PortOwner[]> {
-  if (listenCache !== undefined && Date.now() - listenCache.at < LISTEN_CACHE_MS) {
-    return listenCache.value;
-  }
+const LISTEN_PS = [
+  "$ErrorActionPreference = 'Stop'",
   // CIM state 2 = Listen; numeric → independent of the Windows display language
-  const res = await powershell(
-    [
-      "$ErrorActionPreference = 'Stop'",
-      "$r = @(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetTCPConnection -Filter 'State=2' | ForEach-Object { @{ a = [string]$_.LocalAddress; p = [int]$_.LocalPort; o = [int]$_.OwningProcess } })",
-      "'JSON:' + (ConvertTo-Json -InputObject $r -Compress)",
-    ].join("\n"),
-  );
+  "$r = @(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetTCPConnection -Filter 'State=2' | ForEach-Object { @{ a = [string]$_.LocalAddress; p = [int]$_.LocalPort; o = [int64]$_.OwningProcess } })",
+  "'JSON:' + (ConvertTo-Json -InputObject $r -Compress)",
+].join("\n");
+
+let listenCache: { at: number; value: readonly PortOwner[] } | undefined;
+let listenInFlight: Promise<readonly PortOwner[]> | undefined;
+
+async function queryListening(): Promise<readonly PortOwner[]> {
+  const res = await runPs("listening ports", LISTEN_PS);
   if (res.code !== 0) throw new PlatformError("PLATFORM_TOOL", "could not list listening ports");
   const value = parseListening(res.stdout);
   listenCache = { at: Date.now(), value };
   return value;
 }
 
+async function listening(opts: { fresh?: boolean } = {}): Promise<PortOwner[]> {
+  let value: readonly PortOwner[];
+  if (!opts.fresh && listenCache !== undefined && Date.now() - listenCache.at < LISTEN_CACHE_MS) {
+    value = listenCache.value;
+  } else {
+    // concurrent callers share one query
+    listenInFlight ??= queryListening().finally(() => {
+      listenInFlight = undefined;
+    });
+    value = await listenInFlight;
+  }
+  return value.map((o) => ({ ...o })); // callers cannot corrupt the cache
+}
+
 async function reserved(): Promise<PortRange[]> {
   const all: PortRange[] = [];
   for (const family of ["ipv4", "ipv6"]) {
-    const res = await execFile(systemExe("netsh.exe"), [
+    const res = await runExe("excluded ports", "netsh.exe", [
       "int",
       family,
       "show",
@@ -121,13 +125,33 @@ async function reserved(): Promise<PortRange[]> {
   });
 }
 
-function canBind(port: number, host: BindHost = "127.0.0.1"): Promise<boolean> {
-  checkPort(port);
-  return new Promise((resolve) => {
+function tryBind(port: number, host: string): Promise<boolean> {
+  return new Promise((resolvePromise) => {
     const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.listen({ port, host, exclusive: true }, () => srv.close(() => resolve(true)));
+    srv.once("error", (err: NodeJS.ErrnoException) => {
+      // no IPv6 stack → that family cannot conflict
+      resolvePromise(
+        host.includes(":") && (err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT"),
+      );
+    });
+    srv.listen({ port, host, exclusive: true }, () => srv.close(() => resolvePromise(true)));
   });
+}
+
+/**
+ * Loopback bind test for both families. Loopback only: binding 0.0.0.0 can raise a Windows
+ * Firewall prompt. Wildcard listeners (0.0.0.0 / ::) do not block a loopback bind on Windows,
+ * so callers also check `listening()` (review-1 C1).
+ */
+async function bindsOnLoopback(port: number): Promise<boolean> {
+  return (await tryBind(port, "127.0.0.1")) && (await tryBind(port, "::1"));
+}
+
+async function canBind(port: number): Promise<boolean> {
+  checkPort(port);
+  const lis = await listening({ fresh: true });
+  if (lis.some((l) => l.port === port)) return false;
+  return bindsOnLoopback(port);
 }
 
 /** Lowest port in `range` that is not reserved, not listened on, not in `avoid`, and bindable. */
@@ -153,14 +177,18 @@ async function findFree(
   range: readonly [number, number],
   avoid: ReadonlySet<number> = new Set(),
 ): Promise<number> {
-  const [res, lis] = await Promise.all([reserved(), listening()]);
+  const [res, lis] = await Promise.all([reserved(), listening({ fresh: true })]);
   const used = new Set(lis.map((l) => l.port));
   const taken = (p: number) =>
     avoid.has(p) || used.has(p) || res.some((r) => p >= r.start && p <= r.end);
-  return pickFree(range, taken, (p) => canBind(p));
+  return pickFree(range, taken, bindsOnLoopback);
 }
 
 // ---------- process ----------
+
+/** CreationDate as UTC ISO 'o' (same format as F-001 processState); '' when not reported. */
+const PS_CREATED =
+  "c = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { '' }";
 
 const InfoSchema = z.array(
   z.object({
@@ -173,10 +201,11 @@ const InfoSchema = z.array(
 
 async function info(pid: number): Promise<ProcInfo | undefined> {
   checkPid(pid);
-  const res = await powershell(
+  const res = await runPs(
+    "process info",
     [
       "$ErrorActionPreference = 'Stop'",
-      `$r = @(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | ForEach-Object { @{ n = [string]$_.Name; e = $_.ExecutablePath; c = $_.CreationDate.ToUniversalTime().ToString('o'); pp = [int]$_.ParentProcessId } })`,
+      `$r = @(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' | ForEach-Object { @{ n = [string]$_.Name; e = $_.ExecutablePath; ${PS_CREATED}; pp = [int64]$_.ParentProcessId } })`,
       "'JSON:' + (ConvertTo-Json -InputObject $r -Compress)",
     ].join("\n"),
   );
@@ -187,30 +216,90 @@ async function info(pid: number): Promise<ProcInfo | undefined> {
     pid,
     name: r.n,
     exe: r.e ?? undefined,
-    startedAt: r.c,
-    parentPid: r.pp ?? undefined,
+    startedAt: r.c === "" ? undefined : r.c,
+    parentPid: r.pp === null || r.pp === 0 ? undefined : r.pp,
   };
+}
+
+export interface ProcRow {
+  i: number;
+  p: number;
+  c: string;
+}
+
+const ProcRowsSchema = z.array(
+  z.object({ i: z.number().int(), p: z.number().int(), c: z.string() }),
+);
+
+async function processTable(): Promise<ProcRow[]> {
+  const res = await runPs(
+    "process list",
+    [
+      "$ErrorActionPreference = 'Stop'",
+      `$r = @(Get-CimInstance Win32_Process | ForEach-Object { @{ i = [int64]$_.ProcessId; p = [int64]$_.ParentProcessId; ${PS_CREATED} } })`,
+      "'JSON:' + (ConvertTo-Json -InputObject $r -Compress)",
+    ].join("\n"),
+  );
+  if (res.code !== 0) throw new PlatformError("PLATFORM_TOOL", "could not list processes");
+  return jsonLine(res.stdout, ProcRowsSchema, "process list");
+}
+
+/**
+ * `root` and its descendants, children before parents. A child counts only if it started
+ * at/after its parent: a process whose ParentProcessId points at an earlier holder of a
+ * reused PID is not ours (security-1 S5). ISO 'o' UTC strings compare chronologically.
+ */
+export function descendants(table: readonly ProcRow[], root: ProcRow): ProcRow[] {
+  const out: ProcRow[] = [];
+  const seen = new Set<number>([root.i]);
+  const walk = (parent: ProcRow): void => {
+    for (const r of table) {
+      if (r.p !== parent.i || seen.has(r.i) || r.c === "" || r.c < parent.c) continue;
+      seen.add(r.i);
+      walk(r);
+      out.push(r);
+    }
+  };
+  walk(root);
+  out.push(root);
+  return out;
 }
 
 async function killTree(pid: number, expectStartedAt: string): Promise<void> {
   checkPid(pid);
-  const before = await processState(pid);
-  if (before.state === "dead") return;
-  if (before.state !== "alive" || before.startedAt !== expectStartedAt) {
-    // PID reused by another program (or cannot be verified): never kill it
+  const table = await processTable();
+  const root = table.find((r) => r.i === pid);
+  if (root === undefined) return; // already gone
+  if (root.c === "") {
+    throw new PlatformError("PLATFORM_TOOL", `cannot read the start time of PID ${pid}`);
+  }
+  if (root.c !== expectStartedAt) {
+    // PID reused by another program: never kill it
     throw new PlatformError("PROCESS_MISMATCH", `PID ${pid} is not the process webhub started`);
   }
-  const res = await execFile(systemExe("taskkill.exe"), ["/PID", String(pid), "/T", "/F"]);
-  for (let i = 0; i < 50; i++) {
-    const now = await processState(pid);
-    if (now.state === "dead" || (now.state === "alive" && now.startedAt !== expectStartedAt)) {
-      return;
+  const tree = descendants(table, root);
+  const res = await runExe("kill", "taskkill.exe", [
+    "/F",
+    ...tree.flatMap((r) => ["/PID", String(r.i)]),
+  ]);
+  const deadline = Date.now() + KILL_WAIT_MS;
+  for (let first = true; ; first = false) {
+    const now = await processTable();
+    const alive = tree.filter((t) => now.some((r) => r.i === t.i && r.c === t.c));
+    if (alive.length === 0) return;
+    const rootAlive = alive.some((r) => r.i === pid);
+    // taskkill refused (e.g. access denied) and the root survived → fail now, not after 5 s
+    if ((first && res.code !== 0 && rootAlive) || Date.now() >= deadline) {
+      throw new PlatformError("PROCESS_KILL_FAILED", `could not stop PID ${pid}`, {
+        details: [
+          `still running: ${alive.map((r) => r.i).join(", ")}`,
+          res.stdout.trim().split(/\r?\n/)[0] ?? "",
+          res.stderr.trim().split(/\r?\n/)[0] ?? "",
+        ].filter((s) => s !== ""),
+      });
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await sleep(100);
   }
-  throw new PlatformError("PROCESS_KILL_FAILED", `could not stop PID ${pid}`, {
-    details: [res.stdout.trim().split(/\r?\n/)[0] ?? ""],
-  });
 }
 
 const UsageSchema = z.array(
@@ -224,10 +313,11 @@ async function usage(pids: readonly number[]): Promise<Map<number, Usage>> {
   for (let i = 0; i < unique.length; i += 100) {
     const batch = unique.slice(i, i + 100);
     const filter = batch.map((p) => `ProcessId=${p}`).join(" OR ");
-    const res = await powershell(
+    const res = await runPs(
+      "process usage",
       [
         "$ErrorActionPreference = 'Stop'",
-        `$r = @(Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { @{ i = [int]$_.ProcessId; k = [double]$_.KernelModeTime; u = [double]$_.UserModeTime; w = [double]$_.WorkingSetSize } })`,
+        `$r = @(Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { @{ i = [int64]$_.ProcessId; k = [double]$_.KernelModeTime; u = [double]$_.UserModeTime; w = [double]$_.WorkingSetSize } })`,
         "'JSON:' + (ConvertTo-Json -InputObject $r -Compress)",
       ].join("\n"),
     );
@@ -242,47 +332,96 @@ async function usage(pids: readonly number[]): Promise<Map<number, Usage>> {
 
 // ---------- elevate ----------
 
-/** Absolute paths of node and of the elevated entry (never looked up through PATH). */
-export function elevatedCommand(): { exe: string; script: string } {
-  const here = fileURLToPath(import.meta.url);
-  const ext = here.endsWith(".ts") ? ".ts" : ".js";
-  return {
-    exe: process.execPath,
-    script: fileURLToPath(new URL(`./elevated${ext}`, import.meta.url)),
-  };
+/**
+ * Absolute paths of node and of the BUILT elevated entry (never looked up through PATH).
+ * Always `<package>/dist/platform/elevated.js`, also when webhub runs from source: node cannot
+ * run the .ts sources directly (review-1 C6).
+ */
+export function elevatedCommand(): { exe: string; script: string; root: string } {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  return { exe: process.execPath, script: join(root, "dist", "platform", "elevated.js"), root };
+}
+
+/** Fixed script; exe, script path and token arrive as stdin fields. */
+export const ELEVATE_PS = [
+  "$ErrorActionPreference = 'Stop'",
+  PS_READ_FIELDS,
+  "if ($f.Count -ne 3) { [Console]::Out.WriteLine('FAIL:input'); exit 0 }",
+  "try {",
+  "  $si = New-Object Diagnostics.ProcessStartInfo",
+  "  $si.FileName = $f[0]",
+  "  $si.Arguments = '\"' + $f[1] + '\" ' + $f[2]",
+  "  $si.Verb = 'runas'",
+  "  $si.UseShellExecute = $true",
+  "  $si.WorkingDirectory = [Environment]::SystemDirectory",
+  "  $si.WindowStyle = 'Hidden'",
+  "  $p = [Diagnostics.Process]::Start($si)",
+  "  $p.WaitForExit()",
+  "  [Console]::Out.WriteLine('EXIT:' + $p.ExitCode)",
+  "} catch {",
+  "  $e = $_.Exception",
+  "  while ($e -ne $null -and -not ($e -is [ComponentModel.Win32Exception])) { $e = $e.InnerException }",
+  // 1223 = ERROR_CANCELLED: the user answered No. Anything else is a real failure (C3 / S4).
+  "  if ($e -ne $null -and $e.NativeErrorCode -eq 1223) { [Console]::Out.WriteLine('DENIED') }",
+  "  else { [Console]::Out.WriteLine('FAIL:' + $_.Exception.GetType().Name + ' ' + $(if ($e) { $e.NativeErrorCode } else { '' })) }",
+  "}",
+].join("\n");
+
+/** Waits a little longer than a token lives, so a late "Yes" can only hit an expired token. */
+const ELEVATE_TIMEOUT_MS = TOKEN_MAX_AGE_MS + 30_000;
+
+/** Maps the PowerShell result of ELEVATE_PS to success or a PlatformError (exported for tests). */
+export function elevateOutcome(stdout: string, code: number): void {
+  const line = stdout.split(/\r?\n/).find((l) => /^(EXIT:|DENIED|FAIL:)/.test(l)) ?? "";
+  if (line === "EXIT:0") return;
+  if (line === "DENIED") {
+    throw new PlatformError("ELEVATION_DENIED", "administrator permission was not granted");
+  }
+  if (line === "EXIT:3") {
+    throw new PlatformError("ELEVATION_EXPIRED", "the request expired before it was approved", {
+      hint: "Nothing was changed. Try again and answer the Windows prompt within 5 minutes.",
+    });
+  }
+  if (line === "" && code === -1) {
+    throw new PlatformError("ELEVATION_FAILED", "timed out waiting for the Windows prompt", {
+      hint: "Nothing was changed. If the prompt is still open, answering it now does nothing.",
+    });
+  }
+  throw new PlatformError("ELEVATION_FAILED", "the elevated task failed", {
+    details: [line === "" ? `PowerShell exited with code ${code}` : line],
+  });
 }
 
 async function elevate(input: unknown): Promise<void> {
   const task = parseTask(input); // refuse before any UAC prompt
-  const { exe, script } = elevatedCommand();
-  // data travels on stdin (base64): nothing user-controlled is spliced into the script
-  const ps = [
-    "$ErrorActionPreference = 'Stop'",
-    '$in = ([Console]::In.ReadToEnd()).Trim() -split "`n"',
-    "$d = { param($s) [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s.Trim())) }",
-    "$exe = & $d $in[0]; $script = & $d $in[1]; $token = & $d $in[2]",
-    "try {",
-    "  $p = Start-Process -FilePath $exe -ArgumentList ('\"' + $script + '\" ' + $token) -Verb RunAs -Wait -PassThru -WindowStyle Hidden",
-    "  [Console]::Out.WriteLine('EXIT:' + $p.ExitCode)",
-    "} catch [System.InvalidOperationException] {",
-    "  [Console]::Out.WriteLine('DENIED')",
-    "} catch {",
-    "  if ($_.Exception.NativeErrorCode -eq 1223 -or $_.Exception.InnerException.NativeErrorCode -eq 1223) { [Console]::Out.WriteLine('DENIED') } else { [Console]::Out.WriteLine('FAIL:' + $_.Exception.GetType().Name) }",
-    "}",
-  ].join("\n");
-  const res = await powershell(
-    ps,
-    `${b64(exe)}\n${b64(script)}\n${b64(encodeTask(task))}\n`,
-    600_000,
-  );
-  const line = res.stdout.split(/\r?\n/).find((l) => /^(EXIT:|DENIED|FAIL:)/.test(l)) ?? "";
-  if (line === "DENIED") {
-    throw new PlatformError("ELEVATION_DENIED", "administrator permission was not granted");
+  const { exe, script, root } = elevatedCommand();
+  if (!existsSync(exe) || !existsSync(script)) {
+    throw new PlatformError("ELEVATION_FAILED", "webhub's elevated helper was not found", {
+      details: [script],
+      hint: "Reinstall webhub (or run `pnpm build` when working from source).",
+    });
   }
-  if (line === "EXIT:0") return;
-  throw new PlatformError("ELEVATION_FAILED", "the elevated task failed", {
-    details: [line === "" ? `PowerShell exited with code ${res.code}` : line],
-  });
+  const problems = [
+    ...nodeEnvProblems(await persistentEnvNames()),
+    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, root)))),
+  ];
+  if (problems.length > 0) {
+    throw new PlatformError(
+      "ELEVATION_UNSAFE",
+      "refusing to ask for administrator rights: a non-administrator could change what would run",
+      {
+        details: problems.slice(0, 20),
+        hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* variables (except NODE_ENV) from the user/system environment.",
+      },
+    );
+  }
+  const res = await runPs(
+    "elevate",
+    ELEVATE_PS,
+    fields([exe, script, encodeTask(task)]),
+    ELEVATE_TIMEOUT_MS,
+  );
+  elevateOutcome(res.stdout, res.code);
 }
 
 // ---------- notify ----------
@@ -290,35 +429,53 @@ async function elevate(input: unknown): Promise<void> {
 const TOAST_AUMID =
   "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
 
-/** Strips control characters and caps the length (the text is also XML-escaped in PowerShell). */
+/**
+ * Strips control characters, characters XML forbids (U+FFFE/U+FFFF, lone surrogates) and
+ * caps the length in code points (never splits a surrogate pair).
+ */
 export function cleanText(s: string, max: number): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing control characters on purpose
-  const t = s.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  const t = s
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: removing control characters on purpose
+    .replace(/[\u0000-\u001f\u007f\ufffe\uffff]/g, " ")
+    .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, " ")
+    .trim();
+  const cps = Array.from(t);
+  return cps.length > max ? `${cps.slice(0, max - 1).join("")}…` : t;
 }
 
-async function notify(title: string, body: string): Promise<boolean> {
-  const ps = [
-    "$ErrorActionPreference = 'Stop'",
-    "try {",
-    '  $in = ([Console]::In.ReadToEnd()).Trim() -split "`n"',
-    "  $t = [Security.SecurityElement]::Escape([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($in[0].Trim())))",
-    "  $b = [Security.SecurityElement]::Escape([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($in[1].Trim())))",
-    "  [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null",
-    "  [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null",
-    "  $x = New-Object Windows.Data.Xml.Dom.XmlDocument",
-    "  $x.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text>' + $t + '</text><text>' + $b + '</text></binding></visual></toast>')",
-    `  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_AUMID}').Show([Windows.UI.Notifications.ToastNotification]::new($x))`,
-    "  [Console]::Out.WriteLine('OK')",
-    "} catch { [Console]::Out.WriteLine('FAIL') }",
-  ].join("\n");
+/** Fixed script; title/body arrive as stdin fields and are XML-escaped before use. */
+export const NOTIFY_PS = [
+  "$ErrorActionPreference = 'Stop'",
+  "try {",
+  `  ${PS_READ_FIELDS}`,
+  "  if ($f.Count -ne 2) { throw 'input' }",
+  "  $t = [Security.SecurityElement]::Escape($f[0])",
+  "  $b = [Security.SecurityElement]::Escape($f[1])",
+  "  [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null",
+  "  [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null",
+  "  $x = New-Object Windows.Data.Xml.Dom.XmlDocument",
+  "  $x.LoadXml('<toast><visual><binding template=\"ToastGeneric\"><text>' + $t + '</text><text>' + $b + '</text></binding></visual></toast>')",
+  `  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_AUMID}').Show([Windows.UI.Notifications.ToastNotification]::new($x))`,
+  "  [Console]::Out.WriteLine('OK')",
+  "} catch { [Console]::Out.WriteLine('FAIL:' + $_.Exception.GetType().Name) }",
+].join("\n");
+
+/** notify with an injectable runner (tests check the script never contains the text). */
+export async function notifyVia(run: PsRunner, title: string, body: string): Promise<boolean> {
   try {
-    const res = await powershell(
-      ps,
-      `${b64(cleanText(title, 100))}\n${b64(cleanText(body, 500))}\n`,
+    const res = await runPs(
+      "notify",
+      NOTIFY_PS,
+      fields([cleanText(title, 100), cleanText(body, 500)]),
+      undefined,
+      run,
     );
-    return res.stdout.split(/\r?\n/).includes("OK");
-  } catch {
+    const lines = res.stdout.split(/\r?\n/);
+    if (lines.includes("OK")) return true;
+    platformLog(`notify failed: ${lines.find((l) => l.startsWith("FAIL")) ?? `exit ${res.code}`}`);
+    return false;
+  } catch (err) {
+    platformLog(`notify failed: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 }
@@ -328,6 +485,6 @@ export const win32Platform: Platform = {
   ports: { listening, reserved, canBind, findFree },
   process: { info, killTree, usage },
   elevate,
-  notify,
+  notify: (title, body) => notifyVia(powershell, title, body),
   capabilities: () => ({ resolvesLocalhostSubdomains: false, dockerTopology: "host-gateway" }),
 };

@@ -30,16 +30,16 @@
 // src/platform/types.ts
 interface PortOwner { port: number; address: string; pid: number; family: 4 | 6 }
 interface PortRange { start: number; end: number; administered: boolean }
-interface ProcInfo { pid: number; name: string; exe?: string; startedAt: string; parentPid?: number }
+interface ProcInfo { pid: number; name: string; exe?: string; startedAt?: string; parentPid?: number }
 interface Usage { cpuSeconds: number; workingSetBytes: number }
 type ElevatedTask = { kind: "noop" }            // MVP-2 เพิ่ม { kind: "hosts.writeBlock"; entries: HostEntry[] }
 
 interface Platform {
   readonly name: "win32" | "darwin" | "linux";
   ports: {
-    listening(): Promise<PortOwner[]>;
+    listening(opts?: { fresh?: boolean }): Promise<PortOwner[]>;
     reserved(): Promise<PortRange[]>;
-    canBind(port: number, host?: "127.0.0.1" | "0.0.0.0"): Promise<boolean>;
+    canBind(port: number): Promise<boolean>;
     findFree(range: [number, number], avoid?: ReadonlySet<number>): Promise<number>;
   };
   process: {
@@ -47,8 +47,8 @@ interface Platform {
     killTree(pid: number, expectStartedAt: string): Promise<void>;
     usage(pids: readonly number[]): Promise<Map<number, Usage>>;
   };
-  elevate(task: ElevatedTask): Promise<void>;
-  notify(title: string, body: string): Promise<void>;
+  elevate(task: unknown): Promise<void>;          // validate เอง (allowlist) ก่อน UAC
+  notify(title: string, body: string): Promise<boolean>;  // ไม่ throw
   capabilities(): { resolvesLocalhostSubdomains: boolean; dockerTopology: "host-gateway" | "host-network" };
 }
 getPlatform(): Platform   // เลือกตาม process.platform; ไม่ใช่ win32 → stub ที่ throw PLATFORM_UNSUPPORTED
@@ -57,13 +57,15 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 ### 3.1 ports (Windows)
 - `listening()`: CIM `MSFT_NetTCPConnection` `State=2` (Listen) → `{LocalAddress, LocalPort, OwningProcess}` เป็น JSON (~0.4 วิ, **ไม่ขึ้นกับภาษา Windows** — `netstat` แปลคำว่า LISTENING ตามภาษา). cache 2 วิ
 - `reserved()`: `netsh int ipv4 show excludedportrange protocol=tcp` + ipv6 → parse เฉพาะบรรทัดที่เป็นตัวเลข 2 ตัว (`*` = administered) — ตัวเลขไม่ขึ้นกับภาษา
-- `canBind(port, host)`: ลอง `net.createServer().listen({port, host, exclusive: true})` แล้วปิดทันที — ความจริงสุดท้าย (excluded / ถูกใช้ / firewall)
-- `findFree(range, avoid)`: ตัด reserved + listening + avoid → ลอง `canBind` ทีละตัวจากต้นช่วง; ไม่เหลือ → `PORT_EXHAUSTED` (บอกช่วงที่หมด)
+- `listening({fresh})`: cache 2 วิ (ข้ามได้ด้วย `fresh`), คืน copy (caller แก้ cache ไม่ได้), เรียกพร้อมกันใช้ query เดียว
+- `canBind(port)`: true เฉพาะเมื่อ (1) `listening({fresh:true})` ไม่มีใครฟัง port นี้ที่ address ไหนเลย และ (2) bind ได้ทั้ง `127.0.0.1` และ `::1` (ไม่มี IPv6 stack → ข้าม). review-1 C1: บน Windows listener ที่ `0.0.0.0` / `::` / `::1` ไม่ทำให้ bind `127.0.0.1` ล้ม → ต้องเช็ค listening ด้วย. ไม่ bind `0.0.0.0` เพราะเด้ง Windows Firewall prompt (ตัด param `host` ออก)
+- `findFree(range, avoid)`: ตัด reserved + listening (fresh) + avoid → ลอง bind loopback ทีละตัวจากต้นช่วง; ไม่เหลือ → `PORT_EXHAUSTED` (บอกช่วงที่หมด)
 - ไม่ฆ่า/ไม่แตะ process ที่ถือ port อยู่ (แค่รายงาน)
 
 ### 3.2 process (Windows)
 - `info(pid)`: CIM `Win32_Process` (Name, ExecutablePath, CreationDate, ParentProcessId); ไม่มี → `undefined`
-- `killTree(pid, expectStartedAt)`: **ต้องส่ง start time ที่จำไว้ตอน spawn** → ตรวจด้วย `processState` ก่อนว่ายังเป็น process เดิม (กัน PID reuse ฆ่าผิดตัว) → `taskkill.exe /PID n /T /F` (path เต็ม) → ตรวจซ้ำว่าตายจริง; process เดิมหายไปแล้ว = สำเร็จ; start time ไม่ตรง = ไม่ฆ่า + `PROCESS_MISMATCH`
+- `killTree(pid, expectStartedAt)`: **ต้องส่ง start time ที่จำไว้ตอน spawn** (caller เอาจาก record ของ webhub เท่านั้น ไม่ใช่จาก `info()` ของ PID ใดๆ — S6) → อ่านตาราง process ทั้งหมด (CIM 1 ครั้ง) → root ไม่มี = สำเร็จ; start time อ่านไม่ได้ = `PLATFORM_TOOL` (C7); ไม่ตรง = ไม่ฆ่า + `PROCESS_MISMATCH` → หา descendant เอง โดยนับเฉพาะลูกที่เกิด**หลัง**พ่อ (กัน ParentProcessId ที่ชี้ PID reuse — S5) → `taskkill.exe /F /PID a /PID b …` (ไม่ใช้ `/T`) → รอจนตายทั้ง tree ภายใน **5 วิ (deadline จริง — C2)**; taskkill ล้ม + root ยังอยู่ = ล้มทันที `PROCESS_KILL_FAILED`
+- format start time = UTC ISO `'o'` เหมือน F-001 `processState` (test ยืนยันตรงกัน)
 - `usage(pids)`: CIM `Win32_PerfFormattedData_PerfProc_Process` ไม่แม่น/ช้า → ใช้ `Win32_Process` (KernelModeTime + UserModeTime, WorkingSetSize) batch เดียว
 - ทุก PID ผ่าน `Number.isInteger` ก่อนเข้า script (เหมือน F-001)
 
@@ -73,7 +75,14 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
   - elevated.js: parse + validate ด้วย zod strict ตาม kind → ทำงาน → exit code; ไม่อ่านไฟล์ที่ user เขียนได้เพื่อตัดสินใจ (ข้อมูลทั้งหมดมาใน arg ที่ validate แล้ว)
   - task ห้ามมี secret (อยู่ใน argv ของ process admin)
   - path ของ node/elevated.js = path เต็มจาก `process.execPath` + ตำแหน่ง package (ไม่หาใน PATH)
-- ผู้ใช้กด No ใน UAC → `ELEVATION_DENIED` (ไม่ retry เอง)
+- ผู้ใช้กด No ใน UAC → `ELEVATION_DENIED` (ไม่ retry เอง) — เฉพาะ Win32 error 1223 เท่านั้น; error อื่น = `ELEVATION_FAILED` (C3/S4). เปิดด้วย `ProcessStartInfo{Verb=runas, UseShellExecute, WorkingDirectory=System32}` (S2 กัน DLL planting จาก cwd)
+- script ที่รันแบบ admin = `<package>/dist/platform/elevated.js` เสมอ (แม้รันจาก source — node รัน .ts ไม่ได้, C6); ไม่มีไฟล์ → `ELEVATION_FAILED` + hint
+- **Token มีอายุ 5 นาที** (`{v:1, iat, task}`); elevated.js เจอ token หมดอายุ → exit 3 ไม่ทำอะไร → `ELEVATION_EXPIRED`. PowerShell รอ 5.5 นาที → หมดเวลา = `ELEVATION_FAILED` "timed out" — กด Yes ทีหลังก็ไม่มีผล (S3/C9)
+- **Pre-elevation guard (S1, ผู้ใช้เลือก 2026-11-07 "Guards now + CR later")**: ก่อนเด้ง UAC ตรวจ → ถ้าเจอปัญหา = `ELEVATION_UNSAFE` (ไม่ถาม UAC) พร้อมรายการ + hint ให้ติดตั้งใน `C:\Program Files`:
+  - ไฟล์/โฟลเดอร์ที่ process admin โหลด (`node.exe` + โฟลเดอร์, package root, `package.json`, `dist`, `dist/platform/{elevated,tasks,types}.js`, `node_modules`, zod ตัวจริง) ต้องมี owner = SYSTEM/Administrators/TrustedInstaller และไม่มี ACE Allow ของคนอื่นที่เขียน/ลบ/เปลี่ยนสิทธิ์ได้
+  - ทุก ancestor ของ path ข้างบน: คนอื่นต้องลบ/rename/เปลี่ยนสิทธิ์ไม่ได้ (เพิ่มไฟล์ได้ ok)
+  - env ถาวรใน `HKCU\Environment` + `HKLM\...\Session Manager\Environment` ห้ามมี `NODE_*` (ยกเว้น `NODE_ENV`) — process admin ได้ env จาก registry, `NODE_OPTIONS=--import` ฯลฯ ทำงานก่อน elevated.js
+  - ผล: dev checkout / npm global ใต้โฟลเดอร์ user = elevate ไม่ได้ (ตั้งใจ). CR ทีหลัง: helper ติดตั้งใน Program Files
 - ก่อนเรียก: ส่งคืน `describe(task)` ข้อความบอกผู้ใช้ว่าจะทำอะไร (dashboard/CLI แสดงก่อนกด) — ตาม PLAN "แสดงสิ่งที่จะทำ"
 
 ### 3.4 notify (Windows)
@@ -81,7 +90,12 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 - ล้มเหลว (Focus Assist, policy, Windows Server ไม่มี WinRT) → ไม่ throw, คืน `false` + log; การแจ้งเตือนไม่ใช่ทางเดียวที่ข้อมูลไปถึงผู้ใช้ (dashboard มีเสมอ)
 
 ### 3.5 Errors เพิ่ม
-`PLATFORM_UNSUPPORTED`, `PLATFORM_TOOL` (output ของ CIM/netsh ผิดรูป / tool ล้ม), `PORT_INVALID` (port/ช่วงไม่ถูก), `PORT_EXHAUSTED`, `PROCESS_MISMATCH`, `PROCESS_KILL_FAILED` (taskkill แล้วยังไม่ตายใน 5 วิ), `ELEVATION_INVALID` (task ไม่อยู่ใน allowlist), `ELEVATION_DENIED`, `ELEVATION_FAILED`
+`PLATFORM_UNSUPPORTED`, `PLATFORM_TOOL` (output ของ CIM/netsh ผิดรูป / tool เริ่มไม่ได้ / start time อ่านไม่ได้), `PORT_INVALID` (port/ช่วงไม่ถูก), `PORT_EXHAUSTED`, `PID_INVALID` (PID ไม่ใช่จำนวนเต็มบวก), `PROCESS_MISMATCH`, `PROCESS_KILL_FAILED` (taskkill แล้วยังไม่ตายใน 5 วิ), `ELEVATION_INVALID` (task ไม่อยู่ใน allowlist), `ELEVATION_EXPIRED`, `ELEVATION_UNSAFE`, `ELEVATION_DENIED`, `ELEVATION_FAILED`
+
+- error จาก tool ที่เริ่มไม่ได้ (spawn / `SYSTEM_TOOL` ของ F-001) ถูกห่อเป็น `PLATFORM_TOOL` เสมอ (C10)
+- stub OS อื่น: method async คืน Promise ที่ reject (ไม่ throw ตรง — C8); `capabilities()` throw
+- ทุก PowerShell script ตั้ง `[Console]::OutputEncoding` = UTF-8 (S8: path ภาษาไทยไม่เป็น `??`); ข้อมูลเข้าทาง stdin เป็นบรรทัด `f:<base64>` (ค่าว่างไม่หาย — C5/S7)
+- `notify` ล้มเหลว → `false` + ส่งข้อความเข้า `setPlatformLog()` (C10); `cleanText` ตัดอักขระที่ XML ห้าม + surrogate เดี่ยว, นับความยาวเป็น code point (C16/S10)
 
 - ใช้ class `PlatformError` (`src/platform/types.ts`) แยกจาก `WebhubError` ของ F-001 — เพราะเพิ่ม code ใน `src/errors.ts` = แก้ feature ที่ done (R1). รวมเป็นตัวเดียวทีหลังผ่าน CR
 - รายละเอียด implement ที่ต่างจากร่าง: `notify()` คืน `Promise<boolean>` (ไม่ throw); `elevate()` รับ `unknown` แล้ว validate เอง; exe/script/token ส่งเข้า PowerShell ทาง stdin (script คงที่) → `Start-Process -Verb RunAs -Wait`; exit code ของ elevated.js: 0 ok / 2 task ไม่ถูก / 1 ล้ม
@@ -113,6 +127,15 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 | shell | ชื่อ/ข้อความ notify มีอักขระพิเศษ → injection ใน PowerShell | ข้อมูลทาง stdin + XML escape; script คงที่ | test ข้อความมี `'";$(...)<>` |
 | ข้อมูล | output ของ CIM/netsh ผิดรูป → parse พลาด | parse เข้ม (JSON / regex ตัวเลข), ผิดรูป = error ไม่เดา | test fixture output |
 
+| สิทธิ์ admin | **โปรแกรมที่รันเป็น user** (malware / user อื่นในเครื่อง) แก้ `dist/*.js`, `node_modules`, `node.exe` หรือตั้ง `NODE_OPTIONS` ใน HKCU → รอผู้ใช้กด Yes ใน UAC ครั้งถัดไป (S1) | **in scope.** pre-elevation guard: ACL/owner ของทุกไฟล์ที่โหลด + ancestor, env `NODE_*` → `ELEVATION_UNSAFE` | test temp folder → owner ไม่ trusted; repo dev → `ELEVATION_UNSAFE` ไม่เด้ง UAC |
+| สิทธิ์ admin | UAC ค้างเกิน timeout แล้วกด Yes ทีหลัง (S3) | token อายุ 5 นาที, timeout 5.5 นาที | test expiry |
+| สิทธิ์ admin | DLL planting จาก cwd ของ process admin (S2) | WorkingDirectory = System32 | review |
+
+ข้อจำกัดที่รู้ (ยอมรับ, บันทึกไว้):
+- guard ไม่ไล่ทุกไฟล์ข้างในโฟลเดอร์ที่ตรวจ (ไฟล์ที่มี ACE ของตัวเองแยก) และมีช่วงเวลาระหว่างตรวจกับ UAC (TOCTOU) — แก้ถาวรด้วย helper ใน Program Files (CR ทีหลัง)
+- killTree ยังเป็นแบบ PID: ช่วงสั้นๆ ระหว่างอ่านตารางกับ taskkill; หลาน ที่พ่อตายไปก่อน (orphan) หาไม่เจอ (C11) → Job Object ตอน spawn (CR / feature daemon)
+- เทียบ start time เป็น string จาก CIM local → UTC ใน F-001 `processState` — เปลี่ยน timezone / DST ช่วง fall-back อาจทำให้ไม่ตรง (fail safe = ไม่ฆ่า) (C12, ต้อง CR ของ F-001)
+
 Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 
 ## 7. คำถามถึงผู้ใช้
@@ -138,10 +161,17 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 11 | notify: ข้อความมีอักขระพิเศษ → script ไม่ถูกแทรก (ตรวจ stdin/script แยกกัน); ล้มเหลวไม่ throw | unit + integration |
 | 12 | non-win32 → `PLATFORM_UNSUPPORTED` | unit |
 | 13 | regression F-000 + F-001 | regression |
+| 14 | `canBind` false เมื่อ process อื่นฟัง `::1` / `0.0.0.0` / `::`; findFree ข้าม listener IPv6 ของ process อื่น; ข้าม excluded range | integration |
+| 15 | killTree: deadline < 10 วิ; descendant ที่เกิดก่อนพ่อไม่นับ; start time format = F-001 | unit + integration |
+| 16 | elevate: token หมดอายุ / อนาคต → `ELEVATION_EXPIRED`, elevated exit 3; outcome: เฉพาะ 1223 = DENIED, timeout แยก | unit |
+| 17 | pre-elevation guard: system file ผ่าน; temp folder ของ user ไม่ผ่าน; ไฟล์หาย = missing; `NODE_*` ถูกจับ; repo dev → `ELEVATION_UNSAFE` (ไม่เด้ง UAC) | unit + integration |
+| 18 | notify: script คงที่ทุก input, text อยู่ใน stdin base64 เท่านั้น, ค่าว่างไม่หาย, ล้มเหลว → log | unit (runner ปลอม) |
 
 ## 9. Reports
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-002/test-1.md) | [review-1](../reports/F-002/review-1.md) | [security-1](../reports/F-002/security-1.md) | major C1–C4 + S1; ผู้ใช้: S1 guard now + CR later, แก้ minor/nit ทั้งหมดที่แก้ได้ |
+| 2 | [test-2](../reports/F-002/test-2.md) | | | รอ review รอบ 2 |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [ ] DESIGN.md §21.1 (elevate allowlist + กลไก, findFree, toast)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
@@ -151,3 +181,5 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
 | 2026-11-07 | W1 ②③④⑤ | Q1 CIM, Q2 UAC + allowlist, Q3 toast PowerShell; อนุมัติ + ทำต่อเลย → W3 |
+| 2026-11-07 | W3 รอบ 1 | implement + test-1; review-1 (C1–C16), security-1 (S1–S11) |
+| 2026-11-07 | W3 รอบ 2 | ผู้ใช้: S1 "Guards now + CR later", minor/nit "Fix all fixable" (เว้น C11 Job Object, C12 CR F-001) → แก้ + test-2 |

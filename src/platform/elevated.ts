@@ -3,7 +3,7 @@
  * Entry point run WITH administrator rights (via UAC) by `elevate()`.
  * Takes exactly one argument: a base64url task token. Reads no files and no environment to
  * decide what to do — everything comes from the validated token (spec F-002 §3.3, §6).
- * Exit codes: 0 done, 2 invalid task, 1 task failed.
+ * Exit codes: 0 done, 2 invalid task, 3 expired token (nothing done), 1 task failed.
  */
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     task = decodeTask(argv[0]);
   } catch (err) {
+    if (isPlatformError(err, "ELEVATION_EXPIRED")) return 3;
     return isPlatformError(err, "ELEVATION_INVALID") ? 2 : 1;
   }
   try {

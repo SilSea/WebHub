@@ -5,9 +5,12 @@ export type PlatformErrorCode =
   | "PLATFORM_TOOL"
   | "PORT_INVALID"
   | "PORT_EXHAUSTED"
+  | "PID_INVALID"
   | "PROCESS_MISMATCH"
   | "PROCESS_KILL_FAILED"
   | "ELEVATION_INVALID"
+  | "ELEVATION_EXPIRED"
+  | "ELEVATION_UNSAFE"
   | "ELEVATION_DENIED"
   | "ELEVATION_FAILED";
 
@@ -56,7 +59,9 @@ export interface ProcInfo {
   name: string;
   /** Undefined when the path cannot be read (other user / elevated process). */
   exe: string | undefined;
-  startedAt: string;
+  /** UTC ISO time; undefined when Windows does not report it (protected / exiting process). */
+  startedAt: string | undefined;
+  /** Undefined for processes without a parent (PID 0 / system). */
   parentPid: number | undefined;
 }
 
@@ -70,19 +75,25 @@ export interface Capabilities {
   dockerTopology: "host-gateway" | "host-network";
 }
 
-export type BindHost = "127.0.0.1" | "0.0.0.0";
-
 export interface Platform {
   readonly name: NodeJS.Platform;
   ports: {
-    listening(): Promise<PortOwner[]>;
+    /** Listening TCP sockets. Cached 2 s unless `fresh`. Returns a copy. */
+    listening(opts?: { fresh?: boolean }): Promise<PortOwner[]>;
     reserved(): Promise<PortRange[]>;
-    canBind(port: number, host?: BindHost): Promise<boolean>;
+    /**
+     * True only if nothing listens on the port on any address (fresh check) and it can be
+     * bound on loopback for both IPv4 and IPv6 (IPv6 skipped when the stack is absent).
+     */
+    canBind(port: number): Promise<boolean>;
     findFree(range: readonly [number, number], avoid?: ReadonlySet<number>): Promise<number>;
   };
   process: {
     info(pid: number): Promise<ProcInfo | undefined>;
-    /** Kills `pid` and its descendants, only if it is still the process that started at `expectStartedAt`. */
+    /**
+     * Kills `pid` and its descendants, only if it is still the process that started at
+     * `expectStartedAt`. Callers must take (pid, startedAt) from webhub's own spawn records.
+     */
     killTree(pid: number, expectStartedAt: string): Promise<void>;
     usage(pids: readonly number[]): Promise<Map<number, Usage>>;
   };
@@ -90,4 +101,17 @@ export interface Platform {
   /** Best effort: false when the notification could not be shown. Never throws. */
   notify(title: string, body: string): Promise<boolean>;
   capabilities(): Capabilities;
+}
+
+/** Diagnostic sink for best-effort failures (notify). Default: discard. */
+let logSink: (msg: string) => void = () => {};
+export function setPlatformLog(fn: (msg: string) => void): void {
+  logSink = fn;
+}
+export function platformLog(msg: string): void {
+  try {
+    logSink(msg);
+  } catch {
+    // a broken logger never breaks the platform call
+  }
 }
