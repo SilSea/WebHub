@@ -1112,9 +1112,11 @@ interface Platform {
 | hosts | `drivers\etc\hosts` + UAC | `/etc/hosts` + sudo | ไม่ต้อง ถ้า systemd-resolved (resolve `*.localhost` เอง) ไม่งั้น `/etc/hosts` + pkexec |
 | port owner | `Get-NetTCPConnection` | `lsof -iTCP -sTCP:LISTEN` | `ss -ltnp` |
 | reserved ports | `netsh … excludedportrange` | — | `ip_local_reserved_ports` |
-| kill tree | `taskkill /T /F` | process group `kill -PGID` | process group |
+| kill tree | tree จาก CIM (ลูกเกิดหลังพ่อ) + `taskkill /F /PID …` | process group `kill -PGID` | process group |
 | autostart | Task Scheduler (user) | launchd agent | `systemd --user` |
 | notify | toast | `osascript` | `notify-send` |
+| nginx → native | `host.docker.internal` (Docker Desktop, bind 127.0.0.1 ได้ — spike ✅) | น่าจะเหมือน Windows — **ต้อง spike** | Docker native: container **เข้าไม่ถึง** 127.0.0.1 ของ host → nginx `network_mode: host` (ต้อง spike) |
+| port 80 | ได้ | Docker Desktop ได้ | rootless Docker/Podman bind < 1024 ไม่ได้ → fallback `8080` |
 
 Windows implement แล้ว (F-002, `src/platform/`):
 - ports: CIM `MSFT_NetTCPConnection State=2` (ไม่ขึ้นกับภาษา Windows, cache 2 วิ / `fresh`); reserved จาก `netsh` (เอาเฉพาะตัวเลข); `canBind(port)` = ไม่มีใครฟังที่ address ไหน (fresh) + bind loopback ได้ทั้ง IPv4/IPv6 (ไม่ bind 0.0.0.0 → ไม่เด้ง firewall); `findFree(range, avoid)` = ตัด listening/reserved/avoid แล้วลอง bind ทีละตัว
@@ -1123,8 +1125,6 @@ Windows implement แล้ว (F-002, `src/platform/`):
 - **pre-elevation guard**: ถ้า non-admin แก้ node.exe / elevated.mjs / โฟลเดอร์ของมัน / ancestor ได้ หรือมี env `NODE_*` (ยกเว้น NODE_ENV) / `OPENSSL_*` / `SSL_CERT_*` / `UV_*` (registry ถาวร + volatile + process) → `ELEVATION_UNSAFE` ไม่ถาม UAC. กัน user อื่น/การติดตั้งไม่ปลอดภัย; malware ที่รันเป็น user เดียวกันกันไม่ได้จริง (ต้อง helper แยก). ผล: ต้องติดตั้ง Node + webhub ในโฟลเดอร์ที่ admin เท่านั้นแก้ได้ (เช่น `C:\Program Files`) จึงจะ elevate ได้; helper ถาวรใน Program Files = CR ทีหลัง
 - notify: toast ผ่าน PowerShell WinRT (AUMID ของ PowerShell), ข้อความทาง stdin + XML escape, ล้มเหลวคืน `false` ไม่ throw
 - error ใช้ `PlatformError` แยกจาก `WebhubError` (ไม่แก้ F-001, R1)
-| nginx → native | `host.docker.internal` (Docker Desktop, bind 127.0.0.1 ได้ — spike ✅) | น่าจะเหมือน Windows — **ต้อง spike** | Docker native: container **เข้าไม่ถึง** 127.0.0.1 ของ host → nginx `network_mode: host` (ต้อง spike) |
-| port 80 | ได้ | Docker Desktop ได้ | rootless Docker/Podman bind < 1024 ไม่ได้ → fallback `8080` |
 
 Browser: Chrome/Edge/Firefox resolve `*.localhost` เอง; **Safari ไม่** → พึ่ง hosts sync (macOS ทำอยู่แล้ว)
 
