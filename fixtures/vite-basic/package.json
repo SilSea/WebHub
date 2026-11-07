@@ -1,0 +1,7 @@
+{
+  "name": "vite-basic",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite", "build": "vite build" },
+  "devDependencies": { "vite": "^7.0.0" }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "webhub",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local hub that runs every web project on your machine at http://<name>.localhost without touching the projects",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "webhub": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "profiles"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@12.9.1",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --project unit",
+    "test:full": "vitest run",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "audit": "pnpm audit --audit-level high"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.5",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}
