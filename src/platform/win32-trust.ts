@@ -11,7 +11,8 @@
  * user can show its own UAC prompt or tamper with this check — the real fix is the planned
  * Program Files helper (CR).
  */
-import { dirname, parse } from "node:path";
+import { readdirSync } from "node:fs";
+import { dirname, join, parse } from "node:path";
 import { z } from "zod";
 import { fields, jsonLine, PS_READ_FIELDS, runPs } from "./win32-shell.js";
 
@@ -49,21 +50,44 @@ export function trustTargets(files: readonly string[]): [TrustMode, string][] {
 }
 
 /**
- * Everything the elevated process loads from disk: node.exe, its folder (DLL search), the
- * self-contained elevated.mjs and its folder. Both must already be real paths.
+ * Everything the elevated process loads from disk: node.exe, its folder (DLL search order
+ * starts there), every DLL / manifest / `.local` redirection entry already in that folder
+ * (security-3 U3), the self-contained elevated.mjs and its folder. Paths must be real paths.
  */
-export function elevationFiles(exe: string, script: string): string[] {
-  return [exe, dirname(exe), script, dirname(script)];
+export function elevationFiles(
+  exe: string,
+  script: string,
+  nodeDirEntries: readonly string[] = [],
+): string[] {
+  const loaderFiles = nodeDirEntries
+    .filter((n) => /\.(dll|manifest|local)$/i.test(n))
+    .map((n) => join(dirname(exe), n));
+  return [exe, dirname(exe), ...loaderFiles, script, dirname(script)];
+}
+
+/** Names in node.exe's folder (for `elevationFiles`); unreadable folder → reported by the ACL check. */
+export function nodeDirEntries(exe: string): string[] {
+  try {
+    return readdirSync(dirname(exe));
+  } catch {
+    return [];
+  }
 }
 
 /**
  * Environment variables node (or its OpenSSL / libuv) acts on at startup, before any JS:
  * NODE_OPTIONS (--import/--require), NODE_PATH, NODE_ICU_DATA, NODE_COMPILE_CACHE …,
- * OPENSSL_CONF / OPENSSL_MODULES (provider DLL load — T1), SSL_CERT_*, UV_*.
+ * OPENSSL_CONF / OPENSSL_MODULES (provider DLL load — T1), SSL_CERT_*, UV_*, ICU_* (ICU data
+ * files — security-3 U2).
  * Denylist by prefix, not an allowlist: unrelated variables (JAVA_HOME, GOPATH …) are common
  * on dev machines and do not affect node.exe (decision recorded in spec §3.3).
+ *
+ * Any name with a non-ASCII character is refused too (security-3 U1): OpenSSL reads its
+ * variables through the narrow CRT `getenv`, where Windows "best-fit" maps look-alikes
+ * (fullwidth Ｏ, Ś, Ō, ＿ …) onto ASCII — `ＯPENSSL_CONF` acts as `OPENSSL_CONF`.
  */
-const RISKY_ENV = /^(NODE_|OPENSSL_|SSL_CERT_|UV_)/i;
+const RISKY_ENV = /^(NODE_|OPENSSL_|SSL_CERT_|UV_|ICU_)/i;
+const NON_ASCII = /[^\x20-\x7e]/;
 const ENV_ALLOWED = new Set(["NODE_ENV"]);
 
 export function nodeEnvProblems(names: readonly string[]): string[] {
@@ -71,7 +95,15 @@ export function nodeEnvProblems(names: readonly string[]): string[] {
   const out: string[] = [];
   for (const n of names) {
     const key = n.toUpperCase();
-    if (!RISKY_ENV.test(n) || ENV_ALLOWED.has(key) || seen.has(key)) continue;
+    if (seen.has(key)) continue;
+    if (NON_ASCII.test(n)) {
+      seen.add(key);
+      out.push(
+        `environment variable ${JSON.stringify(n)} has non-ASCII characters (Windows may map it to a variable node reads)`,
+      );
+      continue;
+    }
+    if (!RISKY_ENV.test(n) || ENV_ALLOWED.has(key)) continue;
     seen.add(key);
     out.push(`environment variable ${n} is set (node reads it at startup)`);
   }
@@ -90,8 +122,9 @@ const TRUST_PS = [
   "foreach ($item in $f) {",
   "  $mode = $item.Substring(0, 1); $path = $item.Substring(2)",
   "  $mask = if ($mode -eq 'F') { $full } else { $anc }",
-  "  if (-not (Test-Path -LiteralPath $path)) { if ($mode -eq 'F') { $out += @{ p = $path; r = 'missing' } }; continue }",
   "  try {",
+  // inside try: an unreadable ancestor makes Test-Path throw → 'unreadable', not a tool error (U6)
+  "    if (-not (Test-Path -LiteralPath $path)) { if ($mode -eq 'F') { $out += @{ p = $path; r = 'missing' } }; continue }",
   "    $acl = Get-Acl -LiteralPath $path",
   "    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value",
   "    if ($trusted -notcontains $owner) { $out += @{ p = $path; r = ('owner ' + $owner) } }",
@@ -127,7 +160,7 @@ export async function pathTrustProblems(
  * Every registry source CreateEnvironmentBlock merges into a new logon environment (T2):
  * machine, user, and the user's volatile keys incl. per-session subkeys.
  */
-const ENV_PS = [
+export const ENV_PS = [
   "$ErrorActionPreference = 'Stop'",
   "$n = @()",
   "$keys = @('HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'HKCU:\\Environment', 'HKCU:\\Volatile Environment')",

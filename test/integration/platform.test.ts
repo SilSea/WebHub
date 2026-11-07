@@ -8,6 +8,7 @@ import { getPlatform, isPlatformError } from "../../src/platform/index.js";
 import { elevatedCommand } from "../../src/platform/win32.js";
 import {
   elevationFiles,
+  nodeDirEntries,
   nodeEnvProblems,
   pathTrustProblems,
   persistentEnvNames,
@@ -202,19 +203,18 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     expect(problems.some((x) => x.includes(": owner "))).toBe(false);
   });
 
-  it("environment sources include the volatile keys (T2)", async () => {
+  it("environment sources include the volatile keys (T2, E1)", async () => {
     const names = (await persistentEnvNames()).map((n) => n.toUpperCase());
-    // USERDOMAIN / SESSIONNAME / LOGONSERVER exist only in HKCU\Volatile Environment (+ session subkey)
-    expect(
-      names.some((n) => ["USERDOMAIN", "SESSIONNAME", "LOGONSERVER", "USERNAME"].includes(n)),
-    ).toBe(true);
+    // APPDATA / LOCALAPPDATA / HOMEPATH live only in HKCU\Volatile Environment (not in HKLM or
+    // HKCU\Environment), so this fails if the volatile key stops being read
+    expect(names.some((n) => ["APPDATA", "LOCALAPPDATA", "HOMEPATH"].includes(n))).toBe(true);
   });
 
   it("elevate refuses (ELEVATION_UNSAFE) when webhub's files are user-writable — no UAC shown", async (ctx) => {
     const { exe, script } = elevatedCommand();
     const problems = [
       ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
-      ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script)))),
+      ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script, nodeDirEntries(exe))))),
     ];
     // a dev checkout is user-owned; if this machine is fully trusted, skip (would show UAC)
     if (problems.length === 0) return ctx.skip();
@@ -223,27 +223,32 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     );
   });
 
-  it("built elevated.mjs runs standalone and loads nothing but node built-ins", async () => {
+  it("built elevated.mjs runs standalone and loads nothing but node built-ins", async (ctx) => {
+    const mod = await import("node:module");
+    // module.registerHooks exists from Node 22.15 / 23.5 (engines allow 22.12) — E2
+    if (typeof (mod as { registerHooks?: unknown }).registerHooks !== "function") return ctx.skip();
     const { script } = elevatedCommand();
     const { encodeTask } = await import("../../src/platform/tasks.js");
+    const { EXIT } = await import("../../src/platform/elevated.mjs");
     // trace every module node loads for the real entry (no UAC: run as the current user)
     const hook =
       "data:text/javascript,import{registerHooks}from'node:module';registerHooks({resolve(s,c,n){const r=n(s,c);if(!r.url.startsWith('node:'))process.stderr.write('LOAD '+r.url+'\\n');return r}})";
-    const child = spawn(
-      process.execPath,
-      ["--import", hook, script, encodeTask({ kind: "noop" })],
-      {
+    const run = async (token: string) => {
+      const child = spawn(process.execPath, ["--import", hook, script, token], {
         stdio: ["ignore", "ignore", "pipe"],
-      },
-    );
-    let err = "";
-    child.stderr.on("data", (b: Buffer) => {
-      err += b.toString();
-    });
-    const exit = await new Promise<number | null>((r) => child.once("exit", r));
-    expect(exit).toBe(0);
-    const loaded = err.split(/\r?\n/).filter((l) => l.startsWith("LOAD "));
-    expect(loaded.every((l) => l.endsWith("/elevated.mjs"))).toBe(true);
+      });
+      let err = "";
+      child.stderr.on("data", (b: Buffer) => {
+        err += b.toString();
+      });
+      const exit = await new Promise<number | null>((r) => child.once("exit", r));
+      return { exit, loaded: err.split(/\r?\n/).filter((l) => l.startsWith("LOAD ")) };
+    };
+    const ok = await run(encodeTask({ kind: "noop" }));
+    expect(ok.exit).toBe(EXIT.ok); // main really ran (0 would mean it did not — E3)
+    expect(ok.loaded).toHaveLength(1); // the hook fired, for exactly one non-builtin module
+    expect(ok.loaded[0]).toMatch(/\/elevated\.mjs$/);
+    expect((await run("bad")).exit).toBe(EXIT.invalid);
   });
 
   it("notify never throws (special characters stay data)", async () => {

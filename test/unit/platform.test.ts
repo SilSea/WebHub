@@ -1,7 +1,12 @@
 import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { main as elevatedMain, validateTask } from "../../src/platform/elevated.mjs";
+import {
+  EXIT,
+  main as elevatedMain,
+  TOKEN_MAX_LENGTH,
+  validateTask,
+} from "../../src/platform/elevated.mjs";
 import {
   getPlatform,
   isPlatformError,
@@ -11,6 +16,7 @@ import {
 import {
   decodeTask,
   describeTask,
+  ElevatedTaskSchema,
   encodeTask,
   parseTask,
   TOKEN_MAX_AGE_MS,
@@ -29,7 +35,12 @@ import {
   pickFree,
 } from "../../src/platform/win32.js";
 import { fields, PS_UTF8 } from "../../src/platform/win32-shell.js";
-import { nodeEnvProblems, trustTargets } from "../../src/platform/win32-trust.js";
+import {
+  ENV_PS,
+  elevationFiles,
+  nodeEnvProblems,
+  trustTargets,
+} from "../../src/platform/win32-trust.js";
 import type { ExecResult } from "../../src/proc/exec.js";
 
 const code = async (p: Promise<unknown> | (() => unknown)): Promise<string> => {
@@ -173,9 +184,28 @@ describe("elevated tasks (allowlist)", () => {
       })();
       // the admin side may be stricter than zod, never looser
       if (validateTask(input) !== undefined) expect(zodOk, String(input)).toBe(true);
+      // and on every value AFTER the JSON trip the token makes, both sides agree exactly
+      // (zod also accepts an inherited `kind`; JSON drops it, so compare on the tripped value)
+      const json = JSON.stringify(input);
+      if (json !== undefined) {
+        const tripped: unknown = JSON.parse(json);
+        const zodTripped = ElevatedTaskSchema.safeParse(tripped).success;
+        expect(validateTask(tripped) !== undefined, json).toBe(zodTripped);
+      }
     }
-    expect(validateTask({ kind: "noop" })).toEqual({ kind: "noop" });
     expect(validateTask(evilProto)).toBeUndefined();
+  });
+
+  it("parity: every allowlisted kind has a valid sample accepted by BOTH validators (E5)", () => {
+    const samples: Record<string, unknown> = { noop: { kind: "noop" } };
+    const kinds = ElevatedTaskSchema.options.map((o) => o.shape.kind.value as string);
+    expect(kinds.length).toBeGreaterThan(0);
+    for (const k of kinds) {
+      const s = samples[k];
+      expect(s, `add a sample for kind ${k}`).toBeDefined();
+      expect(parseTask(s)).toEqual(s);
+      expect(validateTask(JSON.parse(JSON.stringify(s)))).toEqual(s);
+    }
   });
 
   it("elevated.mts is self-contained: imports only node: built-ins (security-2 T3)", async () => {
@@ -215,8 +245,10 @@ describe("elevated tasks (allowlist)", () => {
     expect(await code(() => decodeTask(t, now - 120_000))).toBe("ELEVATION_EXPIRED");
   });
 
-  it("elevated entry: 0 valid, 2 invalid, 3 expired", async () => {
-    expect(await elevatedMain([encodeTask({ kind: "noop" })])).toBe(0);
+  it("elevated entry: 10 valid (never 0), 2 invalid, 3 expired", async () => {
+    expect(EXIT.ok).not.toBe(0);
+    expect(await elevatedMain([encodeTask({ kind: "noop" })])).toBe(EXIT.ok);
+    expect(await elevatedMain(["a".repeat(TOKEN_MAX_LENGTH + 1)])).toBe(2);
     expect(await elevatedMain([])).toBe(2);
     expect(await elevatedMain(["a", "b"])).toBe(2);
     expect(await elevatedMain([Buffer.from('{"kind":"exec"}').toString("base64url")])).toBe(2);
@@ -250,7 +282,8 @@ describe("elevated tasks (allowlist)", () => {
   });
 
   it("elevate outcome: only 1223 is DENIED; expiry, timeout and failures distinct", async () => {
-    expect(await code(() => elevateOutcome("EXIT:0\r\n", 0))).toBe("ok");
+    expect(await code(() => elevateOutcome(`EXIT:${EXIT.ok}\r\n`, 0))).toBe("ok");
+    expect(await code(() => elevateOutcome("EXIT:0\r\n", 0))).toBe("ELEVATION_FAILED"); // main never ran
     expect(await code(() => elevateOutcome("DENIED\r\n", 0))).toBe("ELEVATION_DENIED");
     expect(await code(() => elevateOutcome("EXIT:3", 0))).toBe("ELEVATION_EXPIRED");
     expect(await code(() => elevateOutcome("EXIT:2", 0))).toBe("ELEVATION_FAILED");
@@ -283,6 +316,7 @@ describe("elevation trust checks (pure parts)", () => {
       "OPENSSL_MODULES",
       "SSL_CERT_FILE",
       "UV_THREADPOOL_SIZE",
+      "ICU_DATA",
       "NODE_OPTIONS", // same as node_options (Windows env names are case-insensitive)
     ];
     expect(nodeEnvProblems(names).map((s) => s.split(" ")[2])).toEqual([
@@ -292,7 +326,48 @@ describe("elevation trust checks (pure parts)", () => {
       "OPENSSL_MODULES",
       "SSL_CERT_FILE",
       "UV_THREADPOOL_SIZE",
+      "ICU_DATA",
     ]);
+  });
+
+  it("nodeEnvProblems: non-ASCII look-alike names refused (best-fit → OPENSSL_CONF, U1)", () => {
+    const lookAlikes = [
+      "\uff2fPENSSL_CONF",
+      "OPEN\u015aSL_CONF",
+      "\u014cPENSSL_CONF",
+      "OPENSSL\uff3fCONF",
+      "\u0e17\u0e14\u0e2a\u0e2d\u0e1a",
+    ];
+    const problems = nodeEnvProblems(lookAlikes);
+    expect(problems).toHaveLength(lookAlikes.length);
+    for (const p of problems) expect(p).toMatch(/non-ASCII/);
+  });
+
+  it("elevationFiles: node.exe, its folder, DLL/manifest/.local in it, script + folder (U3)", () => {
+    expect(
+      elevationFiles("C:\\n\\node.exe", "C:\\w\\elevated.mjs", [
+        "node.exe",
+        "evil.DLL",
+        "node.exe.manifest",
+        "node.exe.local",
+        "README.md",
+      ]),
+    ).toEqual([
+      "C:\\n\\node.exe",
+      "C:\\n",
+      "C:\\n\\evil.DLL",
+      "C:\\n\\node.exe.manifest",
+      "C:\\n\\node.exe.local",
+      "C:\\w\\elevated.mjs",
+      "C:\\w",
+    ]);
+  });
+
+  it("environment script reads machine, user and volatile keys incl. session subkeys (T2/E1)", () => {
+    expect(ENV_PS).toContain("Session Manager\\Environment");
+    expect(ENV_PS).toContain("HKCU:\\Environment");
+    expect(ENV_PS).toContain("HKCU:\\Volatile Environment");
+    expect(ENV_PS).toMatch(/Get-ChildItem -LiteralPath 'HKCU:\\Volatile Environment'/);
   });
 });
 

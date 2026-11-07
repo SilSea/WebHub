@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { powershell } from "../proc/exec.js";
+import { EXIT, TOKEN_MAX_LENGTH } from "./elevated.mjs";
 import { encodeTask, parseTask, TOKEN_MAX_AGE_MS } from "./tasks.js";
 import {
   type Platform,
@@ -17,6 +18,7 @@ import {
 import { fields, jsonLine, PS_READ_FIELDS, type PsRunner, runExe, runPs } from "./win32-shell.js";
 import {
   elevationFiles,
+  nodeDirEntries,
   nodeEnvProblems,
   pathTrustProblems,
   persistentEnvNames,
@@ -79,11 +81,14 @@ const LISTEN_PS = [
 let listenCache: { at: number; value: readonly PortOwner[] } | undefined;
 let listenInFlight: { at: number; promise: Promise<readonly PortOwner[]> } | undefined;
 
-async function queryListening(): Promise<readonly PortOwner[]> {
+/** `at` = when the query STARTED; an older overlapping query never replaces a newer snapshot (E8). */
+async function queryListening(startedAt: number): Promise<readonly PortOwner[]> {
   const res = await runPs("listening ports", LISTEN_PS);
   if (res.code !== 0) throw new PlatformError("PLATFORM_TOOL", "could not list listening ports");
   const value = parseListening(res.stdout);
-  listenCache = { at: Date.now(), value };
+  if (listenCache === undefined || listenCache.at <= startedAt) {
+    listenCache = { at: startedAt, value };
+  }
   return value;
 }
 
@@ -100,7 +105,7 @@ async function listening(opts: { fresh?: boolean } = {}): Promise<PortOwner[]> {
   } else {
     let q = listenInFlight;
     if (q === undefined || (opts.fresh && q.at < calledAt)) {
-      const promise = queryListening().finally(() => {
+      const promise = queryListening(calledAt).finally(() => {
         if (listenInFlight?.promise === promise) listenInFlight = undefined;
       });
       q = { at: calledAt, promise };
@@ -343,11 +348,23 @@ async function usage(pids: readonly number[]): Promise<Map<number, Usage>> {
 
 // ---------- elevate ----------
 
+/**
+ * Real path, links resolved. Only a MISSING file falls back to the given path (the existence
+ * check then reports it); any other error refuses — checking/launching a link path would
+ * reopen security-2 T4 (review-3 E6).
+ */
 const realPath = (p: string): string => {
   try {
     return realpathSync.native(p);
-  } catch {
-    return p; // missing → reported by the existence check
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return p;
+    throw new PlatformError(
+      "ELEVATION_UNSAFE",
+      "cannot resolve the real path of a file webhub would run as administrator",
+      {
+        details: [`${p}: ${(err as NodeJS.ErrnoException).code ?? "error"}`],
+      },
+    );
   }
 };
 
@@ -396,11 +413,17 @@ const ELEVATE_TIMEOUT_MS = TOKEN_MAX_AGE_MS + 30_000;
 /** Maps the PowerShell result of ELEVATE_PS to success or a PlatformError (exported for tests). */
 export function elevateOutcome(stdout: string, code: number): void {
   const line = stdout.split(/\r?\n/).find((l) => /^(EXIT:|DENIED|FAIL:)/.test(l)) ?? "";
-  if (line === "EXIT:0") return;
+  if (line === `EXIT:${EXIT.ok}`) return;
   if (line === "DENIED") {
     throw new PlatformError("ELEVATION_DENIED", "administrator permission was not granted");
   }
-  if (line === "EXIT:3") {
+  if (line === "EXIT:0") {
+    // node exited without running main (e.g. entry not recognised) — never success (E4)
+    throw new PlatformError("ELEVATION_FAILED", "the elevated helper did not run", {
+      details: [line],
+    });
+  }
+  if (line === `EXIT:${EXIT.expired}`) {
     throw new PlatformError("ELEVATION_EXPIRED", "the request expired before it was approved", {
       hint: "Nothing was changed. Try again and answer the Windows prompt within 5 minutes.",
     });
@@ -424,12 +447,17 @@ export function elevateOutcome(stdout: string, code: number): void {
 export async function elevationProblems(exe: string, script: string): Promise<string[]> {
   return [
     ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
-    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script)))),
+    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script, nodeDirEntries(exe))))),
   ];
 }
 
 async function elevate(input: unknown): Promise<void> {
   const task = parseTask(input); // refuse before any UAC prompt
+  const token = encodeTask(task);
+  if (token.length > TOKEN_MAX_LENGTH) {
+    // the elevated side would refuse it after the user already said Yes (review-3 E7)
+    throw new PlatformError("ELEVATION_INVALID", "task data too large for elevation");
+  }
   const { exe, script } = elevatedCommand();
   if (!existsSync(exe) || !existsSync(script)) {
     throw new PlatformError("ELEVATION_FAILED", "webhub's elevated helper was not found", {
@@ -444,16 +472,11 @@ async function elevate(input: unknown): Promise<void> {
       "refusing to ask for administrator rights: a non-administrator could change what would run",
       {
         details: problems.slice(0, 20),
-        hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* (except NODE_ENV), OPENSSL_*, SSL_CERT_* and UV_* variables from the user/system environment and from the shell that starts webhub.",
+        hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* (except NODE_ENV), OPENSSL_*, SSL_CERT_*, UV_*, ICU_* and non-ASCII-named variables from the user/system environment and from the shell that starts webhub (package-manager shims such as pnpm's set NODE_PATH: start webhub directly).",
       },
     );
   }
-  const res = await runPs(
-    "elevate",
-    ELEVATE_PS,
-    fields([exe, script, encodeTask(task)]),
-    ELEVATE_TIMEOUT_MS,
-  );
+  const res = await runPs("elevate", ELEVATE_PS, fields([exe, script, token]), ELEVATE_TIMEOUT_MS);
   elevateOutcome(res.stdout, res.code);
 }
 
