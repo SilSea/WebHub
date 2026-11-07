@@ -1,5 +1,5 @@
 /** Tests for F-001 review round 3 (F1, F5). See docs/reports/F-001/review-3.md. */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -31,6 +31,35 @@ describe("F1: an existing home with a loose ACL is locked before the audit", {
       .filter((l) => l !== "" && !/^Successfully/.test(l));
     expect(entries).toHaveLength(2);
     for (const e of entries) expect(e).toMatch(/\(I\)/);
+  });
+});
+
+describe("G1/G3: an existing folder that is not a webhub home is refused untouched", {
+  timeout: 120_000,
+}, () => {
+  it("foreign content → HOME_INVALID, ACL and content unchanged; checks run before any restrict", async () => {
+    await mkdir(h.paths.home, { recursive: true });
+    await writeFile(join(h.paths.home, "notes.txt"), "mine");
+    const acl = async () =>
+      process.platform === "win32"
+        ? (await execFile(systemExe("icacls.exe"), [h.paths.home])).stdout
+        : String((await import("node:fs/promises").then((f) => f.stat(h.paths.home))).mode);
+    const before = await acl();
+    try {
+      await ensureHome(h.paths);
+      expect.unreachable();
+    } catch (err) {
+      expect(isWebhubError(err, "HOME_INVALID")).toBe(true);
+      if (isWebhubError(err)) expect(err.details).toContain("notes.txt");
+    }
+    expect(await acl()).toBe(before);
+    expect((await readdir(h.paths.home)).sort()).toEqual(["notes.txt"]);
+  });
+
+  it("an empty existing folder or webhub layout is accepted", async () => {
+    await mkdir(join(h.paths.home, "data"), { recursive: true });
+    await writeFile(h.paths.config, "{}");
+    await expect(ensureHome(h.paths)).resolves.toBeUndefined();
   });
 });
 

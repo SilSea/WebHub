@@ -1166,7 +1166,8 @@ webhub doctor              # ตรวจซ้ำได้ตลอด
 - **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน (`data/backups/migrate/<ts>/`); ไฟล์จาก webhub เวอร์ชันใหม่กว่า → ไม่แตะ + error (กันข้อมูลหายตอน downgrade)
 - **Store** (F-001): เขียนแบบ atomic (tmp + fsync + rename, เก็บ `.bak`), lock `data/.lock` ให้ daemon เป็นผู้เขียนคนเดียว, ปฏิเสธ symlink + ไฟล์ > 5 MB, validate ด้วย zod (strict) — config ผิด/key ไม่รู้จัก = ไม่ start + บอกทุกจุดที่ผิด
 - **Secrets at rest**: `data/secrets.json` เข้ารหัสด้วย **DPAPI (CurrentUser)** + ACL เฉพาะ user; ไม่ fallback เป็น plaintext; macOS/Linux → Keychain / libsecret (phase 13)
-- `$WEBHUB_HOME`: env `WEBHUB_HOME` (absolute) → default ต่อ OS; ห้ามเป็น symlink, root ของ drive หรืออยู่ใน scan root
+- `$WEBHUB_HOME`: env `WEBHUB_HOME` (absolute) → default ต่อ OS; ห้ามเป็น symlink, root ของ drive หรืออยู่ใน scan root; home + parent ต้องเป็นของ user ตัวเอง (หรือ SYSTEM/Administrators); โฟลเดอร์ที่มีอยู่แล้วต้องว่างหรือเป็น home ของ webhub (ไม่ใช่ → ปฏิเสธโดยไม่แตะ); ตรวจทั้ง tree ครั้งแรก (ไม่ตาม junction, ไม่ยอม entry ของ user อื่น) แล้วเขียน marker (รายละเอียด F-001 §3.1)
+- เครื่องมือ OS เรียกด้วย path เต็มเสมอ (`%SystemRoot%\System32\…`) ไม่หาใน PATH
 - **i18n**: UI/CLI ข้อความผ่าน locale file (`th` default, `en`)
 - ไม่มี telemetry / ไม่ส่งข้อมูลออกนอกเครื่อง (ยกเว้นโหลด runtime/image ที่ผู้ใช้สั่ง)
 

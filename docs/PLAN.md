@@ -9,7 +9,7 @@
 | ลำดับ | งาน | Status | Spec |
 |---|---|---|---|
 | 1 | F-000 Repo scaffolding | `done` | [spec](features/F-000-scaffolding.md) |
-| 2 | F-001 Config + `$WEBHUB_HOME` + migration | `in-progress` | [spec](features/F-001-config.md) |
+| 2 | F-001 Config + `$WEBHUB_HOME` + migration | `done` | [spec](features/F-001-config.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 

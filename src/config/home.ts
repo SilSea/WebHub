@@ -126,11 +126,17 @@ export async function ensureHome(paths: Paths): Promise<void> {
     throw new WebhubError("HOME_INVALID", `WEBHUB_HOME is not a directory`, { file: paths.home });
   }
   if (process.platform === "win32") await currentUserSid(); // resolve before the dir exists
+  if (st !== null) {
+    // read-only checks first: a folder that is not ours / not a webhub home is refused
+    // WITHOUT changing anything in it (review-4 G1 — e.g. WEBHUB_HOME set to Documents)
+    await assertTrustedOwner(paths.home);
+    await assertLooksLikeHome(paths.home);
+  }
   await mkdir(paths.home, { recursive: true, mode: 0o700 });
-  // lock the home down BEFORE auditing it: afterwards nobody else can add entries, so the
-  // audit sees everything that will ever be inside (review-3 F1). New home: at once.
+  // lock the home down BEFORE auditing it: afterwards nobody else can add entries at the top
+  // level, so the audit sees everything (review-3 F1). New home: at once.
   if (st === null || !(await homeIsExact(paths.home))) await restrictToCurrentUser(paths.home);
-  await assertTrustedOwner(paths.home);
+  if (st === null) await assertTrustedOwner(paths.home);
   await secureTree(paths.home);
   for (const key of DIRS) {
     await assertSafePath(paths.home, paths[key]);
@@ -218,6 +224,8 @@ interface Audit {
   unreadable: string[];
   /** Windows: entries with their own (explicit or protected) ACL → reset to inherited. */
   reset: string[];
+  /** POSIX: entries whose group/other bits were stripped during the walk. */
+  fixedModes: number;
 }
 
 /**
@@ -234,6 +242,51 @@ async function secureTree(home: string): Promise<void> {
     () => false,
   );
   if (hasMarker && (await homeIsExact(home))) return;
+  await auditAndFix(home);
+  // second pass: entries created inside children that still had their own ACL during the
+  // first pass would be missed; after the resets every child inherits from the locked home,
+  // so this pass is complete. It must find nothing left to fix (review-4 G2).
+  const left = await auditAndFix(home);
+  if (left > 0) {
+    throw new WebhubError("HOME_INVALID", "WEBHUB_HOME changed while it was being secured", {
+      file: home,
+      hint: "Another process is writing into the home. Stop it and start webhub again.",
+    });
+  }
+  await writeFile(marker, "1\n", { mode: 0o600 });
+}
+
+const HOME_ENTRIES = new Set([
+  "webhub.config.json",
+  "webhub.config.json.bak",
+  SECURED_MARKER,
+  "data",
+  "logs",
+  "runtimes",
+  "nginx",
+  "docker",
+]);
+
+/** An existing home must be empty, already secured by webhub, or contain only webhub's layout. */
+async function assertLooksLikeHome(home: string): Promise<void> {
+  const names = await readdir(home);
+  if (names.includes(SECURED_MARKER)) return;
+  const foreign = names.filter((n) => !HOME_ENTRIES.has(n) && !n.startsWith("webhub.config.json."));
+  if (foreign.length > 0) {
+    throw new WebhubError(
+      "HOME_INVALID",
+      "WEBHUB_HOME points to a folder that is not a webhub home",
+      {
+        file: home,
+        details: foreign.slice(0, 10),
+        hint: "Use an empty folder (or the default %APPDATA%\\webhub). webhub did not change this folder.",
+      },
+    );
+  }
+}
+
+/** One audit pass: refuses links / foreign owners / unreadable entries, fixes the rest. Returns how many entries needed fixing. */
+async function auditAndFix(home: string): Promise<number> {
   const audit = process.platform === "win32" ? await auditWindows(home) : await auditPosix(home);
   if (audit.reparse.length > 0) {
     throw new WebhubError("SYMLINK_REFUSED", "WEBHUB_HOME contains junctions/symlinks", {
@@ -263,7 +316,7 @@ async function secureTree(home: string): Promise<void> {
   } else {
     await chmod(home, 0o700);
   }
-  await writeFile(marker, "1\n", { mode: 0o600 });
+  return audit.reset.length + audit.fixedModes;
 }
 
 async function homeIsExact(home: string): Promise<boolean> {
@@ -324,13 +377,14 @@ async function auditWindows(home: string): Promise<Audit> {
     foreignOwner: pick("OWNER"),
     unreadable: pick("ERR"),
     reset: pick("RESET"),
+    fixedModes: 0,
   };
 }
 
 /** POSIX: symlinks are not followed (left as is); foreign owners refused; group/other stripped. */
 async function auditPosix(home: string): Promise<Audit> {
   const uid = process.getuid?.() ?? -1;
-  const audit: Audit = { reparse: [], foreignOwner: [], unreadable: [], reset: [] };
+  const audit: Audit = { reparse: [], foreignOwner: [], unreadable: [], reset: [], fixedModes: 0 };
   const walk = async (dir: string): Promise<void> => {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       const p = join(dir, entry.name);
@@ -340,7 +394,10 @@ async function auditPosix(home: string): Promise<Audit> {
         audit.foreignOwner.push(p);
         continue;
       }
-      if ((st.mode & 0o077) !== 0) await chmod(p, st.mode & 0o700);
+      if ((st.mode & 0o077) !== 0) {
+        await chmod(p, st.mode & 0o700);
+        audit.fixedModes++;
+      }
       if (entry.isDirectory()) await walk(p);
     }
   };
