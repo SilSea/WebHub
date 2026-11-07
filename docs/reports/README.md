@@ -13,8 +13,8 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 |---|---|---|---|---|---|
 | F-000 | 3 | [test-3](F-000/test-3.md) | [review-3](F-000/review-3.md) | [security-3](F-000/security-3.md) | done — critical/major/security 0 |
 | F-001 | 5 | [test-5](F-001/test-5.md) | [review-4](F-001/review-4.md) | (รวมใน review-2…4; [security-1](F-001/security-1.md)) | done — critical/major 0; minor/nit แก้ครบตามผู้ใช้สั่ง |
-| F-002 | 5 | [test-5](F-002/test-5.md) | [review-4](F-002/review-4.md) | [security-4](F-002/security-4.md) | review-4 / security-4: critical/major 0; minor/nit แก้ทั้งหมดตามผู้ใช้สั่ง (test-5) |
-| CR-001 | 1 | [test-1](CR-001/test-1.md) | [F-002 review-3](F-002/review-3.md) — OK | [F-002 security-3](F-002/security-3.md) — OK | review ผ่าน, รอ merge พร้อม F-002 |
+| F-002 | 5 | [test-5](F-002/test-5.md) | [review-4](F-002/review-4.md) | [security-4](F-002/security-4.md) | done — review-4 / security-4: critical/major 0; minor/nit แก้ทั้งหมดตามผู้ใช้สั่ง (test-5); ผู้ใช้ไม่ขอ review รอบ 5 |
+| CR-001 | 1 | [test-1](CR-001/test-1.md) | [F-002 review-3](F-002/review-3.md) — OK | [F-002 security-3](F-002/security-3.md) — OK | done — merge พร้อม F-002 |
 
 ## Regression
 | วันที่ | ผล |

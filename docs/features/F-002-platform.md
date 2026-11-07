@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `in-progress` |
+| Status | `done` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §21.1 (Platform layer), §2 (daemon), §15 (ports), §20 (security) |
 | Depends on | F-000, F-001 (`execFile`, `powershell`, `systemExe`, `processState`, `WebhubError`) |
@@ -185,10 +185,10 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 2 | [test-2](../reports/F-002/test-2.md) | [review-2](../reports/F-002/review-2.md) | [security-2](../reports/F-002/security-2.md) | critical T1/T2 (=D1/D2), major T3/T4 → แก้ + CR-001 |
 | 3 | [test-3](../reports/F-002/test-3.md) | [review-3](../reports/F-002/review-3.md) | [security-3](../reports/F-002/security-3.md) | code: 0 crit/major; security: critical U1 → ครบ 3 loop, ผู้ใช้: แก้ + review รอบ 4, แก้ minor/nit ทั้งหมด |
 | 4 | [test-4](../reports/F-002/test-4.md) | [review-4](../reports/F-002/review-4.md) | [security-4](../reports/F-002/security-4.md) | code + security: 0 crit/major; ผู้ใช้: แก้ minor/nit ทั้งหมด (G1–G9, V1–V6) |
-| 5 | [test-5](../reports/F-002/test-5.md) | | | แก้ตาม review-4 / security-4 |
+| 5 | [test-5](../reports/F-002/test-5.md) | — | — | แก้ตาม review-4 / security-4; ผู้ใช้: ไม่ review รอบ 5, merge เลย → `done` |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [ ] DESIGN.md §21.1 (elevate allowlist + กลไก, findFree, toast)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §21.1 (elevate allowlist + กลไก, findFree, toast)  - [x] PLAN.md queue  - [x] features/README.md  - [x] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
@@ -200,3 +200,4 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 2026-11-07 | W3 รอบ 3 | review-2/security-2 → self-contained elevated.mjs, real path, env denylist + volatile, kill root ก่อน; ผู้ใช้อนุญาต CR-001 → test-3 |
 | 2026-11-07 | W3 รอบ 4 | ครบ 3 loop: ผู้ใช้ "Fix + review round 4", minor/nit "Fix all" → U1 non-ASCII env, ICU_, DLL ในโฟลเดอร์ node, exit 10, E1–E10 → test-4 |
 | 2026-11-07 | W3 รอบ 5 | review-4 / security-4: 0 crit/major; ผู้ใช้ "แก้ทั้งหมด" → `--openssl-config=NUL`, exit 40–43, `.local` ปฏิเสธ, readdir fail closed, DLL real path, ancestor หาย = ปัญหา, monotonic clock, token สร้างก่อน UAC, test G1/G5/G8/G9 → test-5 |
+| 2026-11-07 | done | ผู้ใช้ "Merge เลย" (ไม่ review รอบ 5) → merge CR-001 + F-002 เข้า `develop`. ค้าง: #10 UAC จริง (manual), helper Program Files (CR), C11 Job Object, C12 (CR F-001) |

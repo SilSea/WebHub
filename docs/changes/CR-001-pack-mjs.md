@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (merged into `develop` with F-002, 2026-11-07) |
 | Feature ที่แก้ | F-000 (locked) |
 | ประเภท | change (test ของ F-000 รับนามสกุลเพิ่ม 1 คู่) |
 | **อนุญาตโดย (R1)** | ผู้ใช้ / 2026-11-07 ("Approve mini-CR") |

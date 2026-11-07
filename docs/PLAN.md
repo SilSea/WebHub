@@ -10,7 +10,7 @@
 |---|---|---|---|
 | 1 | F-000 Repo scaffolding | `done` | [spec](features/F-000-scaffolding.md) |
 | 2 | F-001 Config + `$WEBHUB_HOME` + migration | `done` | [spec](features/F-001-config.md) |
-| 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `in-progress` | [spec](features/F-002-platform.md) |
+| 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
