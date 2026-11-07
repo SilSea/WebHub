@@ -19,13 +19,24 @@ function npmCli(): string {
   return found;
 }
 
-/** dist/<name>.js(.map) is allowed only when src/<name>.ts exists. */
+/**
+ * dist/<name>.js(.map) is allowed only when src/<name>.ts exists, and dist/<name>.mjs(.map)
+ * only when src/<name>.mts exists (CR-001).
+ */
 function expectedDist(): Set<string> {
-  const names = readdirSync(join(ROOT, "src"), { recursive: true, encoding: "utf8" })
-    .map((f) => f.replaceAll("\\", "/"))
-    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
-    .map((f) => f.slice(0, -3));
-  return new Set(names.flatMap((n) => [`dist/${n}.js`, `dist/${n}.js.map`]));
+  const files = readdirSync(join(ROOT, "src"), { recursive: true, encoding: "utf8" }).map((f) =>
+    f.replaceAll("\\", "/"),
+  );
+  const out = new Set<string>();
+  for (const f of files) {
+    if (f.endsWith(".d.ts") || f.endsWith(".d.mts")) continue;
+    const ext = f.endsWith(".mts") ? ".mjs" : f.endsWith(".ts") ? ".js" : undefined;
+    if (ext === undefined) continue;
+    const n = f.slice(0, f.lastIndexOf("."));
+    out.add(`dist/${n}${ext}`);
+    out.add(`dist/${n}${ext}.map`);
+  }
+  return out;
 }
 
 beforeAll(() => {
