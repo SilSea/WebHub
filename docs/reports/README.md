@@ -19,3 +19,4 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 ## Regression
 | วันที่ | ผล |
 |---|---|
+| 2026-11-07 | `develop` หลัง merge CR-001 + F-002 (`ad7988d`): lint, typecheck, build, test:full 173 pass / 5 skip, audit — ผ่าน (Windows, Node 24.20; CI ถูกบล็อกจาก billing) |
