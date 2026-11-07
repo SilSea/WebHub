@@ -8,7 +8,7 @@
 
 | ลำดับ | งาน | Status | Spec |
 |---|---|---|---|
-| — | (ยังไม่มีงาน `planned`) | | |
+| 1 | F-000 Repo scaffolding | `planned` | [spec](features/F-000-scaffolding.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 

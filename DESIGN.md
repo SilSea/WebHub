@@ -716,6 +716,9 @@ _WebHub/                      # repo (npm package source)
 ├── package.json
 ├── profiles/                 # built-in runtime profiles (*.yml)
 ├── fixtures/                 # project ตัวอย่างสำหรับทดสอบ detector/profile (§21.5)
+├── test/{unit,integration,helpers/fixture.ts}   # Vitest; helper ตรวจ Zero-touch (hash ก่อน/หลัง)
+├── .github/workflows/ci.yml  # Windows + Linux × Node 22/24: lint, typecheck, test, audit, pack check
+├── tsconfig.json  tsconfig.build.json  vitest.config.ts  biome.json  pnpm-lock.yaml
 ├── src/
 │   ├── cli.ts                # thin client → API (token)
 │   ├── daemon.ts             # entry ของ core
