@@ -1,4 +1,4 @@
-# webhub — Design v6
+# webhub — Design v7
 
 ศูนย์รวม website ทุกตัวใน **scan roots ที่ผู้ใช้ตั้ง** (เครื่องผู้พัฒนา: `E:\Workspaces\Project`) — เป็นเครื่องมือทั่วไปใช้กับ project ของใครก็ได้:
 scan หา project ที่เป็นเว็บ (ทุกภาษา) → start/stop ให้ → route ผ่าน nginx ไป `http://<name>.localhost` → **แก้ port ได้ทุกตัว** → **รวม database ทุก project ไว้ที่ server เดียว** → **จัดการ SQL / NoSQL / Redis ได้ครบ** — โดย **ไม่แตะ project เลย**
@@ -30,6 +30,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Operations | CPU/RAM ต่อ site, แจ้งเตือน crash, backup ตามเวลา + retention, cleanup ของที่ webhub สร้าง, export/import config (§20) |
 | Security | API bind `127.0.0.1`, Host/Origin check, **token อัตโนมัติ** ใน cookie; static deny-list |
 | nginx | Docker container, resolve upstream ตอน request |
+| API tools | **API Studio** ในตัว (แบบ Postman) ผูกกับ site: base URL/env อัตโนมัติ, import OpenAPI/cURL/Postman, REST/GraphQL/WebSocket/socket.io/SSE, ดูผลกระทบใน DB/Redis; เสริม **Hoppscotch** self-hosted ได้ (§22) |
 | Version ภาษา | **Runtime Manager**: detect version ที่ project ต้องการ → ใช้ของบนเครื่องถ้าผ่าน range, ไม่ผ่าน → โหลด portable เก็บใน `$WEBHUB_HOME/runtimes/` (ไม่ admin, ไม่แตะ PATH ระบบ), ทำไม่ได้ → `container` (§19.1) |
 | Version DB | **server ต่อ major**: pg/redis default ย้ายขึ้น major ล่าสุดตัวเดียว, mysql/mongo default pin major เดิม, ทุก site pin ได้ (site ที่ pin major เดียวกันแชร์ server), ห้าม downgrade (§19.2) |
 | Redis engine | `redis:7` default, สลับเป็น **Valkey** ได้ใน config (§19.3) |
@@ -519,7 +520,7 @@ Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อ�
 
 ### 10.1 Hostnames
 
-`http://<name>.localhost` (Chrome/Edge resolve เอง). Reserved (ห้ามเป็นชื่อ site, validate ตอน approve): `hub`, `db`, `sql`, `redis`, `mongo`, `mail`, `s3`, `api`
+`http://<name>.localhost` (Chrome/Edge resolve เอง). Reserved (ห้ามเป็นชื่อ site, validate ตอน approve): `hub`, `db`, `sql`, `redis`, `mongo`, `mail`, `s3`, `api`, `http`
 
 - ใน container: `extra_hosts` ทุก site → `host-gateway` (§4.4) → server-side เรียก `<site>.localhost` ผ่าน nginx ได้
 - native: **hosts file sync จำเป็น** (`127.0.0.1 <site>.localhost`, admin) — spike พบว่า Node / Bun / Python บน Windows resolve `*.localhost` ไม่ได้ (`ENOTFOUND`); webhub เขียน block `# webhub:begin … # webhub:end` ใน `C:\Windows\System32\drivers\etc\hosts` (ทุก `<site>.localhost` + `api.<site>.localhost` ที่เปิด subdomain) ผ่าน UAC prompt ครั้งเดียวตอนเพิ่ม/ลบ site; ไม่ให้สิทธิ์ admin → site ที่มี server-side call ไป `<site>.localhost` ติดป้ายเตือน
@@ -565,7 +566,7 @@ server {
 
 - API bind `127.0.0.1:7400` เท่านั้น; nginx proxy ให้ที่ `hub.localhost` / `db.localhost`
 - `Host` allowlist: `hub.localhost`, `db.localhost`, `127.0.0.1:7400` → กัน DNS rebinding
-- เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.localhost`) → nginx `auth_request` ไปที่ API ตรวจ cookie token เดียวกัน (ไม่เปิดโล่ง)
+- เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.` / `http.localhost`) → nginx `auth_request` ไปที่ API ตรวจ cookie token เดียวกัน (ไม่เปิดโล่ง)
 - `Origin` check ทุก request ที่แก้ข้อมูล → กัน CSRF
 - Token สุ่มใน `data/auth.json`; `webhub ui` เปิด one-time link → set cookie `HttpOnly; SameSite=Strict`; CLI อ่าน token จากไฟล์
 - เปิด `lan` / tunnel → บังคับ password + เตือน; DB ที่ `expose: lan` ต้อง password แรง
@@ -616,7 +617,7 @@ server {
   "maxDepth": 3,
   "ignore": ["node_modules", ".git", "dist", "build", "venv", ".venv", "target", "_WebHub", "Library", "Intermediate", "DerivedDataCache"],
   "domainSuffix": "localhost",
-  "reservedNames": ["hub", "db", "sql", "redis", "mongo", "mail", "s3", "api"],
+  "reservedNames": ["hub", "db", "sql", "redis", "mongo", "mail", "s3", "api", "http"],
   "ports": { "web": [4100, 4999], "isolatedInfra": [14100, 14999] },
   "infra": {
     "postgres": { "default": "17", "policy": "latest", "images": { "17": "postgres:17", "15": "postgres:15" } },
@@ -624,7 +625,7 @@ server {
     "mariadb":  { "default": "11", "policy": "pin" },
     "mongo":    { "default": "7", "policy": "pin" },
     "redis":    { "default": "7", "policy": "latest", "flavor": "redis" },
-    "optional": { "mailpit": false, "minio": false, "cloudbeaver": false, "redisinsight": false, "mongoExpress": false }
+    "optional": { "mailpit": false, "minio": false, "cloudbeaver": false, "redisinsight": false, "mongoExpress": false, "hoppscotch": false }
   },
   "runtimes": { "dir": "./runtimes", "policy": "range", "verifyChecksum": true },
   "daemon": { "autostart": true, "tray": true },
@@ -700,6 +701,7 @@ _WebHub/                      # repo (npm package source)
 │   │   ├── manager.ts
 │   │   ├── provision/{postgres,mysql,mongo,redis}.ts
 │   │   └── transfer.ts       # import / backup / restore
+│   ├── apistudio/{collections.ts, runner.ts, importers/, ws.ts, db-diff.ts}   # §22
 │   ├── studio/
 │   │   ├── adapter.ts        # DbAdapter interface
 │   │   ├── adapters/{postgres,mysql,sqlite,mongo,redis}.ts
@@ -758,7 +760,9 @@ webhub db export <n> [table] --format csv|json|sql | studio
 webhub runtimes [list|prune]        # runtime ที่โหลดไว้ + site ที่ใช้
 webhub db version <n> <engine> latest|pin <major>   # ย้าย/pin major (dump→restore)
 webhub profiles [--check]
-webhub infra up|down|status | enable mailpit|minio|cloudbeaver|redisinsight|mongo-express
+webhub infra up|down|status | enable mailpit|minio|cloudbeaver|redisinsight|mongo-express|hoppscotch
+webhub api import <n> [openapi|curl|postman|har] [file|url]   # สร้าง collection
+webhub api run <n> <collection>[/<request>] [--env <set>]    # รัน request/collection (ใช้ใน script/CI ได้)
 webhub stats [<n>]                   # CPU/RAM ต่อ site
 webhub cleanup [--dry-run]           # ลบ container/network/override ที่ webhub สร้าง (ไม่แตะ volume เดิมของ project)
 webhub config export <file> | import <file>
@@ -777,7 +781,7 @@ webhub reload | ui
 ## 14. Dashboard
 
 ```
-┌ webhub ─ [Sites] [Port Map] [Data Hub] [DB Studio] [Runtimes] [Profiles] ─ [Rescan] ┐
+┌ webhub ─ [Sites] [Port Map] [Data Hub] [DB Studio] [API Studio] [Runtimes] [Profiles] ─ [Rescan] ┐
 │ nginx ● :80   infra ● pg17 redis7   docker ●   sites 12 · running 5 · RAM 2.1 GB    │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │ Name        Lang         Runner   Mode       URL                 Status   Act │
@@ -831,11 +835,11 @@ webhub reload | ui
 2. **MVP-2** — nginx container (mount จาก scanRoots) + generator (resolver/variables, validate/swap) + static (publicDir, deny-list) + hosts sync (UAC) + **Lite mode proxy**
 3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + Runtime Manager (Node/Bun/Python portable) + env resolver + env sets + URL rewrite
 4. **MVP-4** — compose runner (project name เดิม, adopt, override, extra_hosts, rebuild) + hybrid
-5. **MVP-5** — Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม + **เปิด CloudBeaver / RedisInsight** (connection อัตโนมัติ, auth_request) → ได้เครื่องมือ DB ครบตั้งแต่ phase นี้
+5. **MVP-5** — (เครื่องมือเสริม Hoppscotch เปิดได้พร้อม CloudBeaver/RedisInsight) Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม + **เปิด CloudBeaver / RedisInsight** (connection อัตโนมัติ, auth_request) → ได้เครื่องมือ DB ครบตั้งแต่ phase นี้
 6. **MVP-6** — Dashboard (Sites, Port Map, Data Hub, Runtimes) + autostart/tray + CPU/RAM + แจ้งเตือน crash
-7. **DB Studio v1** — SQL (pg): browser, data grid + edit, SQL editor + autocomplete, history, export; Redis: key browser, value editor, TTL, console; guard
+7. **DB Studio v1 + API Studio v1** (REST, collections, OpenAPI import, env ต่อ site, history) — SQL (pg): browser, data grid + edit, SQL editor + autocomplete, history, export; Redis: key browser, value editor, TTL, console; guard
 8. backup/restore + backup ตามเวลา, mysql + mariadb + mongo (infra + studio), start modes `auto`/`on-demand` + `dependsOn`, Mailpit + MinIO
-9. **DB Studio v2** — EXPLAIN, schema/DDL editor, ER diagram, Mongo aggregation builder, Redis pub/sub + slowlog + memory, sqlite → ครอบคลุมเครื่องมือเสริม (ปิดได้)
+9. **DB Studio v2 + API Studio v2** (WebSocket/socket.io/SSE/GraphQL, DB/Redis diff, pre/post script, collection runner) — EXPLAIN, schema/DDL editor, ER diagram, Mongo aggregation builder, Redis pub/sub + slowlog + memory, sqlite → ครอบคลุมเครื่องมือเสริม (ปิดได้)
 10. Profiles เพิ่ม (PHP, Ruby, Go, Java, .NET, Elixir, SSG) + Runtime Manager รองรับภาษาเพิ่ม + container runner fallback
 11. watch mode (rescan), cleanup, export/import config, ปุ่ม VS Code/terminal, git status, alias
 12. mkcert HTTPS, export config ไป VPS
@@ -885,6 +889,7 @@ webhub reload | ui
 | 13 | version ภาษา / DB / Redis ต่างกัน | Runtime Manager portable; DB server ต่อ major (pg/redis → ล่าสุด, mysql/mongo → pin); Redis 7 + Valkey option; profile variant ตาม version framework | §19 |
 | 14 | review v5 (goal เดิม) | DB server ต่อ major ทุกจุด (ชื่อ `webhub-postgres-17`, ports, config); MariaDB แยก engine; เครื่องมือเสริมเปิดตั้งแต่ MVP-5; venv ไป `data/venvs`; Runtime Manager ใน architecture/runners/dashboard; backlog ที่แนะนำ → design (Mailpit, MinIO, autostart/tray, metrics, notify, backup ตามเวลา, cleanup, config export, ปุ่ม VS Code); auth ของเครื่องมือเสริมผ่าน `auth_request`; werewolf redis ตรวจแล้วใช้ `REDIS_URL` → shared ถูกต้อง | ทั้งเอกสาร, §5.8, §20 |
 | 15 | ใช้กับ project/เครื่องอื่นได้ (generalize) | Windows ก่อน + Platform layer; Lite mode เมื่อไม่มี Docker; npm package; scanRoots หลาย root + nginx mount generated; Add site manual; first-run wizard + doctor; profile schema/fixtures/import-export; run approval โชว์คำสั่ง; config migration; i18n; ผล scan เป็น fixture | §0, §21 |
+| 16 | ยิง API | **API Studio ในตัว** + **Hoppscotch** เสริม (ไม่ทำ Data API / PostgREST) | §22 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
 ### Backlog
@@ -1117,3 +1122,63 @@ webhub doctor              # ตรวจซ้ำได้ตลอด
 - **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน
 - **i18n**: UI/CLI ข้อความผ่าน locale file (`th` default, `en`)
 - ไม่มี telemetry / ไม่ส่งข้อมูลออกนอกเครื่อง (ยกเว้นโหลด runtime/image ที่ผู้ใช้สั่ง)
+
+---
+
+## 22. API Studio — ยิง API ของ site
+
+แท็บ **API Studio** ใน dashboard (auth เดียวกับ dashboard). เก็บทุกอย่างใน `$WEBHUB_HOME/data/api/<site>/` — ไม่เขียนลง project (Zero-touch)
+
+### 22.1 ผูกกับ site อัตโนมัติ
+
+- ตัวแปรสำเร็จรูปต่อ site: `{{baseUrl}}` = `http://<site>.localhost`, `{{apiUrl}}` = route backend (`/api` หรือ `api.<site>.localhost`), port ตรงของแต่ละ service, + env ใน env set ที่ active (เลือกเปิดเผยทีละ key)
+- สลับ env set (`local` / `remote`) → request ทั้ง collection เปลี่ยนเป้าตาม
+- port/route เปลี่ยนใน Port Map → ตัวแปรอัปเดตเอง
+
+### 22.2 สร้าง collection
+
+| แหล่ง | ทำยังไง |
+|---|---|
+| **OpenAPI / Swagger** | detector หา endpoint spec (`/swagger/json`, `/openapi.json`, `/docs-json`, `/api-docs`, ไฟล์ `openapi.y(a)ml`) → เสนอ import (Elysia `@elysiajs/swagger`: Backend-Hobby, WowMusic, cloudvps, questcloud) |
+| cURL | paste → แปลงเป็น request |
+| Postman / Insomnia / HAR | import ไฟล์ |
+| จาก log | request ที่ผ่าน nginx (access log) → "save as request" |
+
+Export: collection → Postman v2.1 / OpenAPI / cURL
+
+### 22.3 Request
+
+| หมวด | Feature |
+|---|---|
+| Protocol | REST (ทุก method), GraphQL (introspection + autocomplete), **WebSocket**, **socket.io** (emit/listen event — werewolf), SSE |
+| Body | JSON (validate กับ schema จาก OpenAPI), form-data + file upload, x-www-form-urlencoded, raw, binary |
+| Auth | Bearer, Basic, API key, cookie jar ต่อ site, **login flow**: request login → ดึง token จาก response → ใส่ request อื่นอัตโนมัติ (refresh เมื่อ 401) |
+| Response | pretty JSON/HTML/image, headers, cookies, timing (DNS/connect/TTFB), ขนาด, เทียบกับ response ก่อนหน้า |
+| Script | pre-request / post-response (JS sandbox): set ตัวแปร, assert (`status == 200`, JSON path) |
+| Runner | รันทั้ง collection ตามลำดับ + assert → รายงานผ่าน/ไม่ผ่าน; CLI `webhub api run` ใช้ใน script ได้ |
+| History | ทุก request ที่ยิง + response ย้อนดูได้, ค้นหา |
+
+### 22.4 เชื่อมกับ DB Studio / Redis
+
+- **DB/Redis diff**: เปิด "Track data" ก่อนยิง → snapshot table/key ที่เลือก (หรือทั้ง DB ขนาดเล็ก) → ยิง → แสดง row ที่ insert/update/delete และ key ที่เปลี่ยน/TTL — ใช้ debug ว่า API แก้อะไรใน DB
+  - pg: เทียบ snapshot ของ table ที่เลือก (limit ขนาด) หรือใช้ logical decoding (ต่อยอด)
+  - redis: `MONITOR` ช่วงสั้นระหว่างยิง (เฉพาะ DB index ของ site) + เทียบค่า key ที่เปลี่ยน
+- จาก response → คลิก id → เปิด row ใน DB Studio
+
+### 22.5 ความปลอดภัย
+
+- request ออกจาก daemon (ไม่ใช่ browser) → ไม่ติด CORS; **จำกัดปลายทาง** ค่าเริ่มต้น = `*.localhost` + `127.0.0.1` + host ใน env set ของ site; host อื่นต้องเพิ่มใน allowlist เอง (กัน SSRF ผ่าน API Studio)
+- ตัวแปรที่เป็น secret (token, password) → เก็บใน `data/secrets.json` ไม่ปนใน collection ที่ export (export แทนด้วย placeholder)
+- script sandbox: ไม่มี filesystem/process access, timeout
+
+### 22.6 Hoppscotch (เครื่องมือเสริม)
+
+- `webhub infra enable hoppscotch` → container self-hosted ที่ `http.localhost` (ผ่าน `auth_request` เหมือนเครื่องมือเสริมอื่น)
+- webhub gen environment ของทุก site (`baseUrl`, `apiUrl`) ให้ import ได้
+- ใช้ได้ตั้งแต่ MVP-5 ระหว่าง API Studio ยังไม่ครบ; ปิดได้เมื่อไม่ใช้
+
+### 22.7 Implementation
+
+- Backend: `undici` (HTTP), `ws` + `socket.io-client`, `graphql` (introspection), OpenAPI parser (`@apidevtools/swagger-parser`), Postman/HAR importer
+- Frontend: Monaco (body/script), viewer เดียวกับ DB Studio
+- Sandbox: `node:vm` / isolated-vm สำหรับ pre/post script
