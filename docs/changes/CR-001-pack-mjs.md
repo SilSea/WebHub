@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (merged into `develop` with F-002, 2026-11-07) |
 | Feature ที่แก้ | F-000 (locked) |
 | ประเภท | change (test ของ F-000 รับนามสกุลเพิ่ม 1 คู่) |
 | **อนุญาตโดย (R1)** | ผู้ใช้ / 2026-11-07 ("Approve mini-CR") |
@@ -45,7 +45,7 @@
 ## 8. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/CR-001/test-1.md) | (รวมใน F-002 review-3) | (รวมใน F-002 security-3) | |
+| 1 | [test-1](../reports/CR-001/test-1.md) | [F-002 review-3](../reports/F-002/review-3.md) — OK | [F-002 security-3](../reports/F-002/security-3.md) — OK | ผ่าน |
 
 ## 9. เอกสารที่อัปเดต (R4)
 - [x] spec F-000 (หมายเหตุ CR-001)  - [x] features/README.md  - [x] reports/README.md
