@@ -1,6 +1,6 @@
-# webhub — Design v5
+# webhub — Design v6
 
-ศูนย์รวม website ทุกตัวใน `E:\Workspaces\Project`:
+ศูนย์รวม website ทุกตัวใน **scan roots ที่ผู้ใช้ตั้ง** (เครื่องผู้พัฒนา: `E:\Workspaces\Project`) — เป็นเครื่องมือทั่วไปใช้กับ project ของใครก็ได้:
 scan หา project ที่เป็นเว็บ (ทุกภาษา) → start/stop ให้ → route ผ่าน nginx ไป `http://<name>.localhost` → **แก้ port ได้ทุกตัว** → **รวม database ทุก project ไว้ที่ server เดียว** → **จัดการ SQL / NoSQL / Redis ได้ครบ** — โดย **ไม่แตะ project เลย**
 
 ---
@@ -34,6 +34,10 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Version DB | **server ต่อ major**: pg/redis default ย้ายขึ้น major ล่าสุดตัวเดียว, mysql/mongo default pin major เดิม, ทุก site pin ได้ (site ที่ pin major เดียวกันแชร์ server), ห้าม downgrade (§19.2) |
 | Redis engine | `redis:7` default, สลับเป็น **Valkey** ได้ใน config (§19.3) |
 | Stack ของ webhub | Node + TypeScript (Fastify + Vite/React) |
+| ใช้กับ project ใดก็ได้ | ไม่มีอะไรผูกกับ project/path ของผู้พัฒนา; detect ไม่ได้ → **Add site manual** + แก้ทุก field ได้ (§21.3) |
+| OS | **Windows ก่อน** แต่ทุกอย่างที่ขึ้นกับ OS ผ่าน **Platform layer** → เพิ่ม macOS/Linux ทีหลังไม่ต้องรื้อ (§21.1) |
+| ไม่มี Docker | **Lite mode**: proxy ในตัว (Node) แทน nginx, รัน static/native ได้, DB แค่ external/SQLite; มี Docker → Full mode (§21.2) |
+| Distribution | **npm package** (`npm i -g webhub`) ก่อน, single binary ทีหลัง; first-run wizard (§21.4) |
 
 สภาพเครื่อง (2026-11-07): Node 24.20, Bun 1.3.11, pnpm 12.9.1, Python 3.14.3, Docker 29.3.1 + Compose 5.1.1, ไม่มี `trunk`; port 80/443/8080 ว่าง; Windows excluded TCP ranges `50000–50059`, `54288`, `62828–63127`, dynamic range `49152–65535`
 
@@ -111,7 +115,7 @@ services:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ../nginx/sites:/etc/nginx/sites:ro
       - ../nginx/errors:/etc/nginx/errors:ro      # หน้า 502/503/504 ของ webhub
-      - E:/Workspaces/Project:/projects:ro
+      - E:/Workspaces/Project:/projects/0:ro    # generated: 1 บรรทัดต่อ scan root (`/projects/<index>`)
       - ../logs/nginx:/var/log/nginx
     extra_hosts: ["host.docker.internal:host-gateway"]
     networks: [webhub]
@@ -122,7 +126,9 @@ networks:
 
 - native app → `host.docker.internal:<port>`; compose app (join network `webhub`) → proxy ด้วยชื่อ container ตรง
 - **resolve upstream ตอน request** (`resolver 127.0.0.11` + ตัวแปร) → container ที่ยังไม่รันไม่ทำให้ nginx ทั้งตัวพัง (§10.2)
-- Static → `root /projects/<folder>/<publicDir>` + deny-list (§10.4)
+- Static → `root /projects/<rootIndex>/<folder>/<publicDir>` + deny-list (§10.4)
+- ไฟล์นี้ **generate จาก `scanRoots`** (ไม่ hardcode path); เพิ่ม/ลบ root → regen + restart nginx
+- ผล spike (§18) เป็นของ Docker Desktop บน Windows — Linux ใช้ topology ต่าง (§21.1)
 - HTTP port (80) แก้ได้ใน Port Map → regen + restart nginx
 
 ---
@@ -442,7 +448,7 @@ Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อ�
 
 | Runner | ใช้เมื่อ | ทำอะไร |
 |---|---|---|
-| `static` | static site | nginx serve จาก `/projects/<folder>/<publicDir>` ไม่มี process |
+| `static` | static site | nginx serve จาก `/projects/<rootIndex>/<folder>/<publicDir>` ไม่มี process (Lite mode: proxy ในตัว serve ตรงจาก disk) |
 | `native` | runtime จาก Runtime Manager (system/portable) | spawn ตาม profile, inject env/port/DB/URL + `PATH` ของ runtime ที่เลือก, เก็บ PID + log |
 | `compose` | compose ที่ **build image** (PPRS, cloudvps, questcloud) | override → `compose up -d`; ปุ่ม **Rebuild** + เตือนเมื่อ source/build-time env เปลี่ยน |
 | `hybrid` | compose ที่ **mount source + dev server** (werewolf, Pos) หรือ compose มีแค่ infra (herotime) | app → native (hot reload ไว); DB → shared หรือ compose (isolated) |
@@ -484,7 +490,9 @@ Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อ�
 - **Runtime version**: `.nvmrc`, `engines`, `packageManager`, `.python-version`, `requires-python`, Dockerfile `FROM` (hint) … (§19.1)
 - **Dev services**: env key แนว `EMAIL_HOST`/`SMTP_*`, `S3_*`/`AWS_*` → เสนอ Mailpit / MinIO (§5.8)
 
-### ผล scan จริง (2026-11-07)
+### ตัวอย่าง: ผล scan เครื่องผู้พัฒนา (2026-11-07)
+
+> ตารางนี้เป็น **ตัวอย่าง/fixture** สำหรับทดสอบ detector เท่านั้น — design ไม่ผูกกับ project เหล่านี้
 
 | Site | Path | Profile | Runner | Port เดิม (via) | Routes | DB เดิม → mode | หมายเหตุ |
 |---|---|---|---|---|---|---|---|
@@ -601,6 +609,9 @@ server {
 ### 11.3 Global — `webhub.config.json`
 ```json
 {
+  "schemaVersion": 1,
+  "mode": "auto",
+  "locale": "th",
   "scanRoots": ["E:/Workspaces/Project"],
   "maxDepth": 3,
   "ignore": ["node_modules", ".git", "dist", "build", "venv", ".venv", "target", "_WebHub", "Library", "Intermediate", "DerivedDataCache"],
@@ -675,6 +686,7 @@ _WebHub/
 ├── webhub.config.json
 ├── package.json
 ├── profiles/                 # built-in runtime profiles (*.yml)
+├── fixtures/                 # project ตัวอย่างสำหรับทดสอบ detector/profile (§21.5)
 ├── src/
 │   ├── cli.ts                # thin client → API (token)
 │   ├── daemon.ts             # entry ของ core
@@ -696,7 +708,14 @@ _WebHub/
 │   ├── runners/{static,native,compose,hybrid,container}.ts
 │   ├── supervisor.ts         # start modes, dependsOn, idle, restart, health
 │   ├── ops/{metrics.ts, notify.ts, backup-schedule.ts, cleanup.ts, config-io.ts}   # §20
-│   ├── system/{hosts.ts, autostart.ts, tray.ts}   # hosts sync (UAC), Task Scheduler, tray
+│   ├── platform/             # Platform layer (§21.1)
+│   │   ├── index.ts          # interface Platform
+│   │   ├── windows.ts        # hosts+UAC, netsh, Get-NetTCPConnection, taskkill, Task Scheduler, toast, tray
+│   │   ├── darwin.ts         # (ทีหลัง) /etc/hosts+sudo, lsof, launchd, osascript notify
+│   │   └── linux.ts          # (ทีหลัง) systemd-resolved, ss, systemd --user, notify-send
+│   ├── proxy/lite.ts         # Lite mode reverse proxy (§21.2)
+│   ├── setup/wizard.ts       # first-run (§21.4)
+│   ├── migrate/              # data/ schema migrations (§21.6)
 │   └── server/{api.ts, auth.ts}               # REST + WS + /_wake + Host/Origin/token
 ├── dashboard/                # Vite + React
 ├── docker/{nginx.compose.yml, infra.compose.yml, tools.compose.yml}
@@ -743,6 +762,11 @@ webhub cleanup [--dry-run]           # ลบ container/network/override ที�
 webhub config export <file> | import <file>
 webhub autostart on|off
 webhub code <n> | term <n> | folder <n>   # เปิด VS Code / terminal / explorer
+webhub setup                         # first-run wizard (รันซ้ำได้)
+webhub add <path> [--profile <id>]   # เพิ่ม site manual (detect ไม่เจอ/ผิด)
+webhub roots add|remove|list <path>
+webhub doctor                        # ตรวจ Docker/runtime/ports/hosts/สิทธิ์ + บอกวิธีแก้
+webhub profiles import|export <file>
 webhub reload | ui
 ```
 
@@ -801,8 +825,8 @@ webhub reload | ui
 ## 15. Roadmap
 
 0. ~~Spike~~ ✅ เสร็จ 2026-11-07 (ผลใน §18)
-1. **MVP-1** — profiles loader + scanner + detector (routes, via, URL env, DB) + dedupe + `scan/approve/list`; daemon + CLI client + auth (token, Host/Origin)
-2. **MVP-2** — nginx container + generator (resolver/variables, validate/swap) + static (publicDir, deny-list) + hosts sync (UAC)
+1. **MVP-1** — Platform layer (Windows) + config/schema version + profiles loader + scanner + detector (routes, via, URL env, DB) + dedupe + `scan/approve/list/add` + fixtures; daemon + CLI client + auth (token, Host/Origin) + `setup` wizard + `doctor`
+2. **MVP-2** — nginx container (mount จาก scanRoots) + generator (resolver/variables, validate/swap) + static (publicDir, deny-list) + hosts sync (UAC) + **Lite mode proxy**
 3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + Runtime Manager (Node/Bun/Python portable) + env resolver + env sets + URL rewrite
 4. **MVP-4** — compose runner (project name เดิม, adopt, override, extra_hosts, rebuild) + hybrid
 5. **MVP-5** — Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม + **เปิด CloudBeaver / RedisInsight** (connection อัตโนมัติ, auth_request) → ได้เครื่องมือ DB ครบตั้งแต่ phase นี้
@@ -813,6 +837,7 @@ webhub reload | ui
 10. Profiles เพิ่ม (PHP, Ruby, Go, Java, .NET, Elixir, SSG) + Runtime Manager รองรับภาษาเพิ่ม + container runner fallback
 11. watch mode (rescan), cleanup, export/import config, ปุ่ม VS Code/terminal, git status, alias
 12. mkcert HTTPS, export config ไป VPS
+13. macOS + Linux (implement platform, spike ซ้ำ, nginx `network_mode: host` บน Linux), single binary + installer, i18n อังกฤษ
 
 ---
 
@@ -830,6 +855,8 @@ webhub reload | ui
 - Windows excluded port ranges เปลี่ยนทุก reboot → probe ทุกครั้ง
 - Scope: DB Studio ใหญ่ → เครื่องมือเสริมเปิดตั้งแต่ MVP-5 ให้ใช้ได้ครบก่อน, Studio ทำ v1/v2 ตามหลัง
 - Secret ใน `data/` → ห้าม commit
+- ผู้ใช้อื่น: repo ที่ไม่ไว้ใจ — Enable = รัน code ของ repo → โชว์คำสั่ง/compose ที่จะรันก่อนยืนยันเสมอ
+- macOS/Linux ยังไม่ spike → ห้ามประกาศรองรับจนผ่าน §21.1
 
 ---
 
@@ -855,6 +882,7 @@ webhub reload | ui
 | 12 | redis index ระบุไม่ได้ (cloudvps/questcloud) | detect → `isolated` อัตโนมัติ (เทคนิค) | §5.2, §9 |
 | 13 | version ภาษา / DB / Redis ต่างกัน | Runtime Manager portable; DB server ต่อ major (pg/redis → ล่าสุด, mysql/mongo → pin); Redis 7 + Valkey option; profile variant ตาม version framework | §19 |
 | 14 | review v5 (goal เดิม) | DB server ต่อ major ทุกจุด (ชื่อ `webhub-postgres-17`, ports, config); MariaDB แยก engine; เครื่องมือเสริมเปิดตั้งแต่ MVP-5; venv ไป `data/venvs`; Runtime Manager ใน architecture/runners/dashboard; backlog ที่แนะนำ → design (Mailpit, MinIO, autostart/tray, metrics, notify, backup ตามเวลา, cleanup, config export, ปุ่ม VS Code); auth ของเครื่องมือเสริมผ่าน `auth_request`; werewolf redis ตรวจแล้วใช้ `REDIS_URL` → shared ถูกต้อง | ทั้งเอกสาร, §5.8, §20 |
+| 15 | ใช้กับ project/เครื่องอื่นได้ (generalize) | Windows ก่อน + Platform layer; Lite mode เมื่อไม่มี Docker; npm package; scanRoots หลาย root + nginx mount generated; Add site manual; first-run wizard + doctor; profile schema/fixtures/import-export; run approval โชว์คำสั่ง; config migration; i18n; ผล scan เป็น fixture | §0, §21 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
 ### Backlog
@@ -1005,3 +1033,85 @@ variants:
 | **Alias** | ชื่อเพิ่มต่อ site (`pos.localhost` + `shop.localhost`) → nginx `server_name` + hosts sync |
 
 ทุก resource ที่ webhub สร้าง (container, network, volume ของ shared infra) ติด label `webhub.managed=true` เพื่อแยกจากของ project
+
+---
+
+## 21. Generalization — ใช้กับ project / เครื่องอื่น
+
+### 21.1 Platform layer
+
+ทุกอย่างที่ขึ้นกับ OS ผ่าน interface เดียว — core ไม่เรียก PowerShell/netsh ตรง
+
+```ts
+interface Platform {
+  hosts:     { read(): Entry[]; writeBlock(entries: Entry[]): Promise<void> }   // ต้องยกสิทธิ์
+  ports:     { listening(): PortOwner[]; reserved(): Range[]; canBind(p: number): Promise<boolean> }
+  process:   { killTree(pid: number): Promise<void>; info(pid: number): ProcInfo; usage(pid: number): Usage }
+  autostart: { enable(cmd: string): Promise<void>; disable(): Promise<void> }
+  notify(title: string, body: string): void
+  tray?:     TrayApi
+  elevate(task: ElevatedTask): Promise<void>      // UAC / sudo / pkexec
+  dockerTopology(): 'host-gateway' | 'host-network'
+  resolvesLocalhostSubdomains(): boolean          // ต้อง hosts sync ไหม
+}
+```
+
+| เรื่อง | Windows (ทำก่อน) | macOS (ทีหลัง) | Linux (ทีหลัง) |
+|---|---|---|---|
+| hosts | `drivers\etc\hosts` + UAC | `/etc/hosts` + sudo | ไม่ต้อง ถ้า systemd-resolved (resolve `*.localhost` เอง) ไม่งั้น `/etc/hosts` + pkexec |
+| port owner | `Get-NetTCPConnection` | `lsof -iTCP -sTCP:LISTEN` | `ss -ltnp` |
+| reserved ports | `netsh … excludedportrange` | — | `ip_local_reserved_ports` |
+| kill tree | `taskkill /T /F` | process group `kill -PGID` | process group |
+| autostart | Task Scheduler (user) | launchd agent | `systemd --user` |
+| notify | toast | `osascript` | `notify-send` |
+| nginx → native | `host.docker.internal` (Docker Desktop, bind 127.0.0.1 ได้ — spike ✅) | น่าจะเหมือน Windows — **ต้อง spike** | Docker native: container **เข้าไม่ถึง** 127.0.0.1 ของ host → nginx `network_mode: host` (ต้อง spike) |
+| port 80 | ได้ | Docker Desktop ได้ | rootless Docker/Podman bind < 1024 ไม่ได้ → fallback `8080` |
+
+Browser: Chrome/Edge/Firefox resolve `*.localhost` เอง; **Safari ไม่** → พึ่ง hosts sync (macOS ทำอยู่แล้ว)
+
+### 21.2 Modes
+
+| | **Full** (มี Docker) | **Lite** (ไม่มี Docker) |
+|---|---|---|
+| Proxy | nginx container | reverse proxy ใน daemon (Node `http-proxy` + ws) ฟัง port 80 / 8080 — routes/strip/hostRewrite/deny-list/หน้า error ใช้ logic เดียวกัน |
+| Runners | ทั้ง 5 | `static`, `native` (compose/container → ปิด + บอกเหตุผล) |
+| Data Hub | shared infra ต่อ major | `external` + SQLite เท่านั้น; DB Studio ใช้ได้กับ connection เหล่านั้น |
+| Runtime Manager | system / portable / container | system / portable |
+
+`mode: "auto"` = เลือกตามว่าเจอ Docker ไหม; ติด Docker ทีหลัง → `webhub doctor` เสนอสลับเป็น Full
+
+### 21.3 Site ที่ detect ไม่เจอ / detect ผิด
+
+- `webhub add <path>` / ปุ่ม "Add site" → เลือก profile (หรือ `custom`) → กรอก services, start command, port + via, routes, publicDir
+- ทุก field ที่ detect ได้ **แก้ทับได้** (บันทึกเป็น override ใน `data/sites/<name>.json`, rescan ไม่ทับค่าที่ผู้ใช้แก้)
+- "Save as profile" → สร้าง profile ใหม่ใน `data/profiles/` ให้ project แบบเดียวกันครั้งหน้า detect เจอเอง
+
+### 21.4 Install + first-run
+
+```
+npm i -g webhub            # ต้องมี Node ≥ 22 (ตัว webhub เอง; ไม่เกี่ยวกับ runtime ของ project)
+webhub setup
+  1. เลือก scan roots (หลายโฟลเดอร์ได้)
+  2. ตรวจ Docker → Full / Lite
+  3. เลือก HTTP port (80 → ไม่ว่าง/ไม่มีสิทธิ์ → 8080)
+  4. hosts sync: ขอสิทธิ์ (UAC/sudo) หรือข้าม (แจ้งข้อจำกัด)
+  5. autostart / tray (option)
+  6. scan ครั้งแรก → pending list
+webhub doctor              # ตรวจซ้ำได้ตลอด
+```
+- data dir: ค่าเริ่มต้น `%APPDATA%\webhub` (Windows) / `~/Library/Application Support/webhub` / `~/.local/share/webhub` — แยกจากโฟลเดอร์ติดตั้ง npm; ตั้ง `WEBHUB_HOME` ได้
+- uninstall: `webhub cleanup --all` (ลบ container/network/hosts block/autostart ที่ webhub สร้าง) → `npm rm -g webhub`
+- single binary (Node SEA / `bun build --compile`) + installer: phase หลัง
+
+### 21.5 Profiles สำหรับทุกคน
+
+- profile มี `schemaVersion`; loader validate (JSON Schema) + แจ้ง error ชัดเจน
+- `fixtures/<case>/`: project ตัวอย่างขนาดเล็ก (vite, next, elysia, fastapi, compose+pg, monorepo…) + ผลที่คาดหวัง → test ของ detector ทุก profile (ผล scan เครื่องผู้พัฒนาใน §9 เป็น fixture ชุดแรก)
+- `webhub profiles export/import` → แชร์ profile ระหว่างเครื่อง/ทีม; profile ที่ import มา **ไม่รันอะไรจนผู้ใช้ approve site**
+
+### 21.6 ความปลอดภัย + ความเข้ากันได้
+
+- **Run approval**: Enable / Start ครั้งแรก → โชว์สิ่งที่จะรันจริง (start command, compose files + override, image ที่จะ pull, install command) → ยืนยัน; เปลี่ยนคำสั่งภายหลัง → ยืนยันใหม่
+- **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน
+- **i18n**: UI/CLI ข้อความผ่าน locale file (`th` default, `en`)
+- ไม่มี telemetry / ไม่ส่งข้อมูลออกนอกเครื่อง (ยกเว้นโหลด runtime/image ที่ผู้ใช้สั่ง)
