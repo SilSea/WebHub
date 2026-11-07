@@ -21,3 +21,4 @@ Read before any work:
 ## Communication
 - Talk to the user in Thai; never decide on their behalf at "ask for feedback", "proceed now?" or feature-change permission.
 - Branches: `develop` (main), `feat/F-xxx-<name>`, `fix/CR-xxx-<name>`; commits reference F-xxx / CR-xxx / M-x.
+- When an item is done, merge its branch into `develop` yourself (`--no-ff`), re-run all checks, push.

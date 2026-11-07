@@ -120,6 +120,7 @@ Bug severity:
 - W3: do not ask mid-item except for the "Stop when" conditions; give short progress updates.
 - E4 uses a reviewer that has not seen the author's reasoning (fresh agent / `/code-review`), then **verify each finding against the real code** before fixing.
 - Commit / push only after a step's gate passes; commit messages reference `F-xxx` / `CR-xxx` / `M-x`.
+- **Merge**: when an item meets the Definition of Done, Claude merges its branch into `develop` itself (`git merge --no-ff`), re-runs lint/typecheck/build/full tests on the merged result, then pushes; CI runs on the `develop` push. If CI fails, fix it as part of the same item before starting the next one.
 
 ---
 
