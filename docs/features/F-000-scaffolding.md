@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` |
+| Status | `review` |
 | Phase | MVP-0 (PLAN.md) |
 | DESIGN.md | §0 (Stack), §12 (Folder structure), §21.4 (npm package), §21.5 (fixtures) |
 | Depends on | — |
@@ -126,6 +126,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 ## 9. Reports
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-000/test-1.md) | [review-1](../reports/F-000/review-1.md) | [security-1](../reports/F-000/security-1.md) | critical 0 / major 0; minor 7+2 sec, nit 2+2 sec |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §12  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
@@ -134,5 +135,6 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
+| 2026-11-07 | W3 E1–E4 | implement (`bb0fba1`), test-1 ผ่าน 22/22, review-1 + security-1 ไม่มี critical/major |
 | 2026-11-07 | W1 ③④⑤ | อนุมัติ spec, เข้า queue, ผู้ใช้สั่งทำต่อ (W3 เฉพาะ F-000) |
 | 2026-11-07 | W1 ② | Q1 Node 22, Q2 pnpm, Q3 Biome, Q4 Actions + PR |
