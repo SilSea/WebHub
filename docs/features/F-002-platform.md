@@ -71,17 +71,17 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 
 ### 3.3 elevate (Windows)
 - งานที่ยกสิทธิ์ได้ = **allowlist ของ `kind`** ที่ define ในโค้ด webhub เท่านั้น; ไม่มี "รันคำสั่งนี้แบบ admin"
-- กลไก (ตาม Q2): `Start-Process -Verb RunAs -Wait` เรียก `node <dist>/platform/elevated.js <base64-json>` → UAC แสดงชื่อ Node.js
-  - elevated.js: parse + validate ด้วย zod strict ตาม kind → ทำงาน → exit code; ไม่อ่านไฟล์ที่ user เขียนได้เพื่อตัดสินใจ (ข้อมูลทั้งหมดมาใน arg ที่ validate แล้ว)
+- กลไก (ตาม Q2): `ProcessStartInfo{Verb=runas, UseShellExecute}` (PowerShell, script คงที่, ข้อมูลทาง stdin) เรียก `node <dist>/platform/elevated.mjs <token>` → UAC แสดงชื่อ Node.js
+  - elevated.mjs **self-contained** (security-2 T3): import ได้แค่ `node:*` (test บังคับ + trace การโหลดจริง) — ไม่มี zod / ไม่มี package.json lookup; validate allowlist ด้วยโค้ดเขียนเอง (เข้มกว่าหรือเท่า zod schema ฝั่ง user — parity test) → ทำงาน → exit code 0 ok / 2 task ไม่ถูก / 3 token หมดอายุ / 1 ล้ม; ไม่อ่านไฟล์ที่ user เขียนได้เพื่อตัดสินใจ
   - task ห้ามมี secret (อยู่ใน argv ของ process admin)
-  - path ของ node/elevated.js = path เต็มจาก `process.execPath` + ตำแหน่ง package (ไม่หาใน PATH)
+  - path ของ node/elevated.mjs = **real path** (`realpathSync.native`, resolve link — T4) ของ `process.execPath` + ตำแหน่ง package; path เดียวกันใช้ทั้งตรวจและเปิด (ไม่หาใน PATH)
 - ผู้ใช้กด No ใน UAC → `ELEVATION_DENIED` (ไม่ retry เอง) — เฉพาะ Win32 error 1223 เท่านั้น; error อื่น = `ELEVATION_FAILED` (C3/S4). เปิดด้วย `ProcessStartInfo{Verb=runas, UseShellExecute, WorkingDirectory=System32}` (S2 กัน DLL planting จาก cwd)
-- script ที่รันแบบ admin = `<package>/dist/platform/elevated.js` เสมอ (แม้รันจาก source — node รัน .ts ไม่ได้, C6); ไม่มีไฟล์ → `ELEVATION_FAILED` + hint
-- **Token มีอายุ 5 นาที** (`{v:1, iat, task}`); elevated.js เจอ token หมดอายุ → exit 3 ไม่ทำอะไร → `ELEVATION_EXPIRED`. PowerShell รอ 5.5 นาที → หมดเวลา = `ELEVATION_FAILED` "timed out" — กด Yes ทีหลังก็ไม่มีผล (S3/C9)
+- script ที่รันแบบ admin = `<package>/dist/platform/elevated.mjs` เสมอ (แม้รันจาก source, C6); ไม่มีไฟล์ → `ELEVATION_FAILED` + hint. `.mjs` ทำให้ต้องแก้ pack test ของ F-000 → [CR-001](../changes/CR-001-pack-mjs.md) (ผู้ใช้อนุญาต)
+- **Token มีอายุ 5 นาที** (`{v:1, iat, task}`); elevated.mjs เจอ token หมดอายุ → exit 3 ไม่ทำอะไร → `ELEVATION_EXPIRED`. PowerShell รอ 5.5 นาที → หมดเวลา = `ELEVATION_FAILED` "timed out" — กด Yes ทีหลังก็ไม่มีผล (S3/C9). MVP-2 (`hosts.writeBlock`): timeout นี้รวมเวลารันงานด้วย → ต้องแยกเวลารอ prompt กับเวลารันงาน (review-2 D12)
 - **Pre-elevation guard (S1, ผู้ใช้เลือก 2026-11-07 "Guards now + CR later")**: ก่อนเด้ง UAC ตรวจ → ถ้าเจอปัญหา = `ELEVATION_UNSAFE` (ไม่ถาม UAC) พร้อมรายการ + hint ให้ติดตั้งใน `C:\Program Files`:
-  - ไฟล์/โฟลเดอร์ที่ process admin โหลด (`node.exe` + โฟลเดอร์, package root, `package.json`, `dist`, `dist/platform/{elevated,tasks,types}.js`, `node_modules`, zod ตัวจริง) ต้องมี owner = SYSTEM/Administrators/TrustedInstaller และไม่มี ACE Allow ของคนอื่นที่เขียน/ลบ/เปลี่ยนสิทธิ์ได้
+  - ไฟล์ที่ process admin โหลด = `node.exe` + โฟลเดอร์ของมัน (DLL search) + `elevated.mjs` + โฟลเดอร์ของมัน (real path): owner ต้องเป็น SYSTEM/Administrators/TrustedInstaller และไม่มี ACE Allow ของคนอื่นที่เขียน/เพิ่มไฟล์/แก้ attribute/EA/ลบ/เปลี่ยนสิทธิ์ได้ (T5)
   - ทุก ancestor ของ path ข้างบน: คนอื่นต้องลบ/rename/เปลี่ยนสิทธิ์ไม่ได้ (เพิ่มไฟล์ได้ ok)
-  - env ถาวรใน `HKCU\Environment` + `HKLM\...\Session Manager\Environment` ห้ามมี `NODE_*` (ยกเว้น `NODE_ENV`) — process admin ได้ env จาก registry, `NODE_OPTIONS=--import` ฯลฯ ทำงานก่อน elevated.js
+  - env ห้ามมีชื่อขึ้นต้น `NODE_` (ยกเว้น `NODE_ENV`), `OPENSSL_` (provider DLL — T1), `SSL_CERT_`, `UV_` — ตรวจจาก `HKLM\...\Session Manager\Environment`, `HKCU\Environment`, `HKCU\Volatile Environment` + subkey ทุก session (T2) และ env ของ process webhub เอง (กันกรณีสืบทอด). **ใช้ denylist ตาม prefix ไม่ใช่ allowlist** (R3): ตัวแปรอื่น (JAVA_HOME, GOPATH …) มีทั่วไปในเครื่อง dev และ node.exe ไม่อ่าน — allowlist จะปฏิเสธเกือบทุกเครื่อง
   - ผล: dev checkout / npm global ใต้โฟลเดอร์ user = elevate ไม่ได้ (ตั้งใจ). CR ทีหลัง: helper ติดตั้งใน Program Files
 - ก่อนเรียก: ส่งคืน `describe(task)` ข้อความบอกผู้ใช้ว่าจะทำอะไร (dashboard/CLI แสดงก่อนกด) — ตาม PLAN "แสดงสิ่งที่จะทำ"
 
@@ -98,7 +98,7 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 - `notify` ล้มเหลว → `false` + ส่งข้อความเข้า `setPlatformLog()` (C10); `cleanText` ตัดอักขระที่ XML ห้าม + surrogate เดี่ยว, นับความยาวเป็น code point (C16/S10)
 
 - ใช้ class `PlatformError` (`src/platform/types.ts`) แยกจาก `WebhubError` ของ F-001 — เพราะเพิ่ม code ใน `src/errors.ts` = แก้ feature ที่ done (R1). รวมเป็นตัวเดียวทีหลังผ่าน CR
-- รายละเอียด implement ที่ต่างจากร่าง: `notify()` คืน `Promise<boolean>` (ไม่ throw); `elevate()` รับ `unknown` แล้ว validate เอง; exe/script/token ส่งเข้า PowerShell ทาง stdin (script คงที่) → `Start-Process -Verb RunAs -Wait`; exit code ของ elevated.js: 0 ok / 2 task ไม่ถูก / 1 ล้ม
+- รายละเอียด implement ที่ต่างจากร่าง: `notify()` คืน `Promise<boolean>` (ไม่ throw); `elevate()` รับ `unknown` แล้ว validate เอง; exe/script/token ส่งเข้า PowerShell ทาง stdin (script คงที่); exit code ของ elevated.mjs ดู §3.3
 
 ## 4. ผลดี / ผลเสีย (R3)
 | | รายละเอียด |
@@ -120,19 +120,20 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 ## 6. Threat model
 | Asset | ผู้โจมตี / ช่องทาง | ป้องกันด้วย | เทส |
 |---|---|---|---|
-| สิทธิ์ admin | ข้อมูลจาก project/config ถูกส่งเข้า elevate → รันคำสั่งเป็น admin | allowlist kind + zod strict ใน process admin; ไม่มี kind ที่รับคำสั่ง/path อิสระ | test task ไม่รู้จัก / field เกิน → ปฏิเสธ (ทั้งฝั่ง user และ elevated) |
-| สิทธิ์ admin | ไฟล์ที่ user เขียนได้ถูกสลับระหว่าง validate กับ execute (TOCTOU) | elevated.js ไม่อ่านไฟล์ตัดสินใจ — ข้อมูลมาใน argv เท่านั้น | review |
+| สิทธิ์ admin | ข้อมูลจาก project/config ถูกส่งเข้า elevate → รันคำสั่งเป็น admin | allowlist kind: zod strict ฝั่ง user + validator เขียนเองใน elevated.mjs (parity test); ไม่มี kind ที่รับคำสั่ง/path อิสระ | test task ไม่รู้จัก / field เกิน / `__proto__` → ปฏิเสธ (ทั้งสองฝั่ง) |
+| สิทธิ์ admin | ไฟล์ที่ user เขียนได้ถูกสลับระหว่าง validate กับ execute (TOCTOU) | elevated.mjs ไม่อ่านไฟล์ตัดสินใจ — ข้อมูลมาใน argv เท่านั้น | review |
 | สิทธิ์ admin | PATH hijack ตอนเรียก node/powershell แบบ admin | path เต็ม (`process.execPath`, `systemExe`) | test path absolute |
 | process อื่นของผู้ใช้ | PID reuse → killTree ฆ่าโปรแกรมอื่น | ต้องส่ง start time, ตรวจก่อนฆ่า | test start time ไม่ตรง → ไม่ฆ่า |
 | shell | ชื่อ/ข้อความ notify มีอักขระพิเศษ → injection ใน PowerShell | ข้อมูลทาง stdin + XML escape; script คงที่ | test ข้อความมี `'";$(...)<>` |
 | ข้อมูล | output ของ CIM/netsh ผิดรูป → parse พลาด | parse เข้ม (JSON / regex ตัวเลข), ผิดรูป = error ไม่เดา | test fixture output |
 
-| สิทธิ์ admin | **โปรแกรมที่รันเป็น user** (malware / user อื่นในเครื่อง) แก้ `dist/*.js`, `node_modules`, `node.exe` หรือตั้ง `NODE_OPTIONS` ใน HKCU → รอผู้ใช้กด Yes ใน UAC ครั้งถัดไป (S1) | **in scope.** pre-elevation guard: ACL/owner ของทุกไฟล์ที่โหลด + ancestor, env `NODE_*` → `ELEVATION_UNSAFE` | test temp folder → owner ไม่ trusted; repo dev → `ELEVATION_UNSAFE` ไม่เด้ง UAC |
+| สิทธิ์ admin | **user อื่นในเครื่อง / ติดตั้งแบบไม่ปลอดภัย**: แก้ `elevated.mjs`, `node.exe`/โฟลเดอร์ หรือตั้ง `NODE_OPTIONS`/`OPENSSL_CONF` ใน env → รอผู้ใช้กด Yes ใน UAC (S1, T1–T5) | pre-elevation guard: owner/ACL ของ node.exe + elevated.mjs + โฟลเดอร์ + ancestor (real path), env denylist ทุกแหล่ง → `ELEVATION_UNSAFE` | test temp folder / `C:\Users\Public` ไม่ผ่าน; volatile env ถูกอ่าน; repo dev → `ELEVATION_UNSAFE` ไม่เด้ง UAC; elevated.mjs โหลดแค่ตัวเอง |
 | สิทธิ์ admin | UAC ค้างเกิน timeout แล้วกด Yes ทีหลัง (S3) | token อายุ 5 นาที, timeout 5.5 นาที | test expiry |
 | สิทธิ์ admin | DLL planting จาก cwd ของ process admin (S2) | WorkingDirectory = System32 | review |
 
 ข้อจำกัดที่รู้ (ยอมรับ, บันทึกไว้):
-- guard ไม่ไล่ทุกไฟล์ข้างในโฟลเดอร์ที่ตรวจ (ไฟล์ที่มี ACE ของตัวเองแยก) และมีช่วงเวลาระหว่างตรวจกับ UAC (TOCTOU) — แก้ถาวรด้วย helper ใน Program Files (CR ทีหลัง)
+- **โปรแกรมที่รันเป็น user เดียวกันอยู่แล้ว ป้องกันไม่ได้จริง (T6)**: มันเด้ง UAC ของ node.exe (signed ของจริง) พร้อม argument ของมันเองได้ หรือแก้ตัว guard ที่รันด้วยสิทธิ์ user (PSModulePath, HKCU SystemRoot → `systemExe` ของ F-001). guard นี้กัน user อื่น + การติดตั้งที่ไม่ปลอดภัย ไม่ใช่ malware ที่ได้สิทธิ์ user แล้ว — แก้จริงด้วย helper ใน Program Files ที่มี identity ของตัวเอง (CR ทีหลัง). ช่วงระหว่างตรวจกับ UAC (TOCTOU) ยอมรับ
+- `canBind` แต่ละครั้งใช้ CIM สด (~1 วิ): เช็คหลาย port ให้เรียกพร้อมกัน (แชร์ query) หรือใช้ `findFree` (review-2 D6)
 - killTree ยังเป็นแบบ PID: ช่วงสั้นๆ ระหว่างอ่านตารางกับ taskkill; หลาน ที่พ่อตายไปก่อน (orphan) หาไม่เจอ (C11) → Job Object ตอน spawn (CR / feature daemon)
 - เทียบ start time เป็น string จาก CIM local → UTC ใน F-001 `processState` — เปลี่ยน timezone / DST ช่วง fall-back อาจทำให้ไม่ตรง (fail safe = ไม่ฆ่า) (C12, ต้อง CR ของ F-001)
 
@@ -156,7 +157,7 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 6 | `info` ของตัวเอง / PID ไม่มี → undefined | integration |
 | 7 | `killTree` ฆ่า child + grandchild ที่ spawn เอง; start time ไม่ตรง → ไม่ฆ่า + `PROCESS_MISMATCH` | integration |
 | 8 | `usage` คืนค่าตัวเลขของ PID ตัวเอง | integration |
-| 9 | elevate: task ไม่รู้จัก / field เกิน → ปฏิเสธก่อนเรียก UAC และใน elevated.js; argv ไม่มี path ที่หาจาก PATH | unit |
+| 9 | elevate: task ไม่รู้จัก / field เกิน → ปฏิเสธก่อนเรียก UAC และใน elevated.mjs; argv ไม่มี path ที่หาจาก PATH | unit |
 | 10 | elevate จริง (UAC) | **manual** (CI กด UAC ไม่ได้) — บันทึกใน test report |
 | 11 | notify: ข้อความมีอักขระพิเศษ → script ไม่ถูกแทรก (ตรวจ stdin/script แยกกัน); ล้มเหลวไม่ throw | unit + integration |
 | 12 | non-win32 → `PLATFORM_UNSUPPORTED` | unit |
@@ -171,7 +172,8 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-002/test-1.md) | [review-1](../reports/F-002/review-1.md) | [security-1](../reports/F-002/security-1.md) | major C1–C4 + S1; ผู้ใช้: S1 guard now + CR later, แก้ minor/nit ทั้งหมดที่แก้ได้ |
-| 2 | [test-2](../reports/F-002/test-2.md) | | | รอ review รอบ 2 |
+| 2 | [test-2](../reports/F-002/test-2.md) | [review-2](../reports/F-002/review-2.md) | [security-2](../reports/F-002/security-2.md) | critical T1/T2 (=D1/D2), major T3/T4 → แก้ + CR-001 |
+| 3 | [test-3](../reports/F-002/test-3.md) | | | รอ review รอบ 3 |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [ ] DESIGN.md §21.1 (elevate allowlist + กลไก, findFree, toast)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
@@ -183,3 +185,4 @@ Checklist ที่เกี่ยว: Input, Privilege, Process, Zero-touch
 | 2026-11-07 | W1 ②③④⑤ | Q1 CIM, Q2 UAC + allowlist, Q3 toast PowerShell; อนุมัติ + ทำต่อเลย → W3 |
 | 2026-11-07 | W3 รอบ 1 | implement + test-1; review-1 (C1–C16), security-1 (S1–S11) |
 | 2026-11-07 | W3 รอบ 2 | ผู้ใช้: S1 "Guards now + CR later", minor/nit "Fix all fixable" (เว้น C11 Job Object, C12 CR F-001) → แก้ + test-2 |
+| 2026-11-07 | W3 รอบ 3 | review-2/security-2 → self-contained elevated.mjs, real path, env denylist + volatile, kill root ก่อน; ผู้ใช้อนุญาต CR-001 → test-3 |
