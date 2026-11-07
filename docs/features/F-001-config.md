@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `draft` |
+| Status | `draft` (รออนุมัติ) |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §0 (ที่เก็บ config), §2 Registry, §11.3, §12, §21.4, §21.6 |
 | Depends on | F-000 |
@@ -78,7 +78,8 @@ Lock.release(): Promise<void>
 ตาม DESIGN §11.3 ทุก key: `mode`, `locale`, `scanRoots`, `maxDepth`, `ignore`, `domainSuffix`, `reservedNames`, `ports`, `infra`, `runtimes`, `daemon`, `backups`, `defaultEnv`, `onDemand`, `profilesDir`
 - ไม่มีไฟล์ → ใช้ default ในหน่วยความจำ (ไม่เขียนจนกว่าจะ save — `setup` F-008 เป็นคนสร้าง)
 - validate เพิ่ม: `scanRoots` เป็น absolute + มีอยู่จริง (warning ถ้าไม่มี), ห้ามซ้อนกับ `$WEBHUB_HOME`; ช่วง port 1–65535 และ start ≤ end; `domainSuffix` เป็น hostname label ที่ถูกต้อง; path relative → resolve กับ home และต้องอยู่ใน home
-- key ไม่รู้จัก / ค่าผิด → ตาม Q3
+- key ไม่รู้จัก / ค่าผิด → **error `CONFIG_INVALID` ไม่ start** พร้อมรายการทุกจุดที่ผิด (path ของ key, ค่าที่ได้, ที่คาด) — zod `strict()` ทุก object
+- schema เขียนด้วย zod 4 → export JSON Schema (`schemas/webhub.config.schema.json`) ไว้ให้ editor autocomplete
 
 ### 3.5 Secrets (`src/store/secrets.ts`)
 ```ts
@@ -87,7 +88,9 @@ generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 ```
 - key รูปแบบ `<scope>/<name>` เช่น `postgres-17/pos`, `auth/master`
 - ค่าไม่ปรากฏใน error/log (`toString`/`inspect` ของ object ที่ถือ secret → `***`)
-- at-rest ตาม Q2
+- at-rest: **DPAPI (CurrentUser scope)** — ไฟล์ `data/secrets.json` = `{ schemaVersion, entries: { <key>: <base64 ciphertext> } }`; daemon ถอดครั้งเดียวตอนเปิดผ่าน PowerShell (`System.Security.Cryptography.ProtectedData`, spawn แบบ args array, ข้อมูลส่งทาง stdin ไม่ผ่าน argv) แล้ว cache ในหน่วยความจำ; เขียน = เข้ารหัสค่าใหม่ทีละค่า
+- interface `SecretBackend { protect(buf): Promise<Buffer>; unprotect(buf): Promise<Buffer> }` → Windows = DPAPI; macOS/Linux (phase 13) = Keychain / libsecret; test ใช้ backend จำลอง + test จริงบน Windows
+- DPAPI ใช้ไม่ได้ (เช่น PowerShell ถูกบล็อก) → error `SECRET_BACKEND` ไม่ fallback เป็น plaintext เงียบๆ
 
 ### 3.6 Errors
 ทุก error เป็น `WebhubError { code, message, file?, hint? }` — code: `HOME_INVALID`, `CONFIG_INVALID`, `CONFIG_FROM_NEWER_VERSION`, `JSON_PARSE`, `LOCKED`, `SYMLINK_REFUSED`, `FILE_TOO_LARGE`, `SECRET_BACKEND`
@@ -128,10 +131,10 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 ## 7. คำถามถึงผู้ใช้
 | # | คำถาม | ทางเลือก | แนะนำ | คำตอบ |
 |---|---|---|---|---|
-| Q1 | library validate schema | zod 4 / ajv (JSON Schema) / เขียนเอง | **zod 4** — dependency เดียวไม่มี dep ย่อย, ได้ type TS อัตโนมัติ, gen JSON Schema ให้ editor/profile (§21.5) ได้ | |
-| Q2 | เก็บ secret บนดิสก์ยังไง | DPAPI (เข้ารหัสผูกกับ user Windows) + ACL / ACL อย่างเดียว (plain JSON) | **DPAPI + ACL** — ไฟล์ secrets หลุด (backup, copy, sync cloud) แล้วอ่านไม่ได้บนเครื่อง/user อื่น; ช้าเฉพาะตอนเปิด daemon (เรียก PowerShell ครั้งเดียวแล้ว cache ในหน่วยความจำ) | |
-| Q3 | config มี key ไม่รู้จัก / ค่าผิด | ไม่ start + บอกจุดผิดชัดเจน / ข้าม key แปลก + เตือน | **ไม่ start + บอกจุดผิด** — กันพิมพ์ผิดแล้วระบบทำงานด้วยค่าที่ไม่ได้ตั้งใจ (เช่น expose LAN); `doctor` ชี้วิธีแก้ | |
-| Q4 | รูปแบบไฟล์ config | JSON / JSONC (ใส่ comment ได้) | **JSON** — ตรง DESIGN, ไม่ต้องมี parser เพิ่ม; แก้ผ่าน dashboard/CLI เป็นหลัก | |
+| Q1 | library validate schema | zod 4 / ajv (JSON Schema) / เขียนเอง | **zod 4** — dependency เดียวไม่มี dep ย่อย, ได้ type TS อัตโนมัติ, gen JSON Schema ให้ editor/profile (§21.5) ได้ | **zod 4** |
+| Q2 | เก็บ secret บนดิสก์ยังไง | DPAPI (เข้ารหัสผูกกับ user Windows) + ACL / ACL อย่างเดียว (plain JSON) | **DPAPI + ACL** — ไฟล์ secrets หลุด (backup, copy, sync cloud) แล้วอ่านไม่ได้บนเครื่อง/user อื่น; ช้าเฉพาะตอนเปิด daemon (เรียก PowerShell ครั้งเดียวแล้ว cache ในหน่วยความจำ) | **DPAPI + ACL** |
+| Q3 | config มี key ไม่รู้จัก / ค่าผิด | ไม่ start + บอกจุดผิดชัดเจน / ข้าม key แปลก + เตือน | **ไม่ start + บอกจุดผิด** — กันพิมพ์ผิดแล้วระบบทำงานด้วยค่าที่ไม่ได้ตั้งใจ (เช่น expose LAN); `doctor` ชี้วิธีแก้ | **ไม่ start + บอกจุดผิด** |
+| Q4 | รูปแบบไฟล์ config | JSON / JSONC (ใส่ comment ได้) | **JSON** — ตรง DESIGN, ไม่ต้องมี parser เพิ่ม; แก้ผ่าน dashboard/CLI เป็นหลัก | **JSON** |
 
 ## 8. Test plan
 | # | กรณี | ประเภท |
@@ -157,9 +160,10 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 |---|---|---|---|---|
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [ ] DESIGN.md §21.4/§21.6 (home, lock, atomic, secrets at rest, newer-version)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
+| 2026-11-07 | W1 ② | Q1 zod 4, Q2 DPAPI + ACL, Q3 ไม่ start + บอกจุดผิด, Q4 JSON |

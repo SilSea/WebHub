@@ -1163,7 +1163,10 @@ webhub doctor              # ตรวจซ้ำได้ตลอด
 ### 21.6 ความปลอดภัย + ความเข้ากันได้
 
 - **Run approval**: Enable / Start ครั้งแรก → โชว์สิ่งที่จะรันจริง (start command, compose files + override, image ที่จะ pull, install command) → ยืนยัน; เปลี่ยนคำสั่งภายหลัง → ยืนยันใหม่
-- **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน
+- **Config migration**: `data/*.json` + `webhub.config.json` มี `schemaVersion` → อัปเดต webhub แล้ว `migrate/` แปลงอัตโนมัติ + backup ไฟล์เดิมก่อน (`data/backups/migrate/<ts>/`); ไฟล์จาก webhub เวอร์ชันใหม่กว่า → ไม่แตะ + error (กันข้อมูลหายตอน downgrade)
+- **Store** (F-001): เขียนแบบ atomic (tmp + fsync + rename, เก็บ `.bak`), lock `data/.lock` ให้ daemon เป็นผู้เขียนคนเดียว, ปฏิเสธ symlink + ไฟล์ > 5 MB, validate ด้วย zod (strict) — config ผิด/key ไม่รู้จัก = ไม่ start + บอกทุกจุดที่ผิด
+- **Secrets at rest**: `data/secrets.json` เข้ารหัสด้วย **DPAPI (CurrentUser)** + ACL เฉพาะ user; ไม่ fallback เป็น plaintext; macOS/Linux → Keychain / libsecret (phase 13)
+- `$WEBHUB_HOME`: env `WEBHUB_HOME` (absolute) → default ต่อ OS; ห้ามเป็น symlink, root ของ drive หรืออยู่ใน scan root
 - **i18n**: UI/CLI ข้อความผ่าน locale file (`th` default, `en`)
 - ไม่มี telemetry / ไม่ส่งข้อมูลออกนอกเครื่อง (ยกเว้นโหลด runtime/image ที่ผู้ใช้สั่ง)
 
