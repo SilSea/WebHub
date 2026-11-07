@@ -28,6 +28,9 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Interface | Dashboard + CLI (CLI คุยผ่าน API ของ daemon) |
 | Security | API bind `127.0.0.1`, Host/Origin check, **token อัตโนมัติ** ใน cookie; static deny-list |
 | nginx | Docker container, resolve upstream ตอน request |
+| Version ภาษา | **Runtime Manager**: detect version ที่ project ต้องการ → ใช้ของบนเครื่องถ้าผ่าน range, ไม่ผ่าน → โหลด portable เก็บใน `_WebHub/runtimes/` (ไม่ admin, ไม่แตะ PATH ระบบ), ทำไม่ได้ → `container` (§19.1) |
+| Version DB | **server ต่อ major**: pg/redis default ย้ายขึ้น major ล่าสุดตัวเดียว, mysql/mongo default pin major เดิม, ทุก site pin ได้ (site ที่ pin major เดียวกันแชร์ server), ห้าม downgrade (§19.2) |
+| Redis engine | `redis:7` default, สลับเป็น **Valkey** ได้ใน config (§19.3) |
 | Stack ของ webhub | Node + TypeScript (Fastify + Vite/React) |
 
 สภาพเครื่อง (2026-11-07): Node 24.20, Bun 1.3.11, pnpm 12.9.1, Python 3.14.3, Docker Compose 5.1.1 (daemon ยังไม่เปิด), ไม่มี `trunk`; port 80/443/8080 ว่าง; Windows excluded TCP ranges `50000–50059`, `54288`, `62828–63127`, dynamic range `49152–65535`
@@ -239,10 +242,10 @@ webhub-redis (7)
 | PostgreSQL | `postgres:17` | database + role (owner, `CREATEDB` สำหรับ Prisma shadow DB) |
 | MySQL / MariaDB | `mysql:8.4` | database + user (GRANT ON db.*) |
 | MongoDB | `mongo:7` | database + user |
-| Redis | `redis:7` | DB index 0–15 — **เฉพาะ app ที่ระบุ index ได้** (`REDIS_URL=.../N` หรือ `REDIS_DB`); เกิน 16 site หรือระบุไม่ได้ → `isolated` |
+| Redis / Valkey | `redis:7` (หรือ `valkey/valkey:8`) | DB index 0–15 — **เฉพาะ app ที่ระบุ index ได้** (`REDIS_URL=.../N` หรือ `REDIS_DB`); เกิน 16 site หรือระบุไม่ได้ → `isolated` |
 | SQLite | — | ไฟล์อยู่ใน project, Data Hub/Studio แค่ list/เปิด/backup |
 
-เปิดเฉพาะ engine ที่มี site ใช้ (lazy start); ล็อก major version (upgrade = dump/restore ผ่าน Data Hub)
+เปิดเฉพาะ engine ที่มี site ใช้ (lazy start); **1 server ต่อ engine ต่อ major** ที่มี site ใช้จริง — policy version ดู §19.2
 
 ### 5.3 Mode ต่อ site
 
@@ -651,6 +654,7 @@ _WebHub/
 │   ├── daemon.ts             # entry ของ core
 │   ├── scanner/{walk.ts, detector.ts, dedupe.ts, routes.ts}
 │   ├── profiles/{loader.ts, schema.ts, match.ts}
+│   ├── runtimes/{detect.ts, resolve.ts, fetch.ts}   # Runtime Manager (§19.1)
 │   ├── registry/store.ts     # single writer (daemon)
 │   ├── ports/{manager.ts, probe.ts}            # probe: excluded ranges + netstat + bind
 │   ├── env/{resolver.ts, url-rewrite.ts, env-sets.ts}
@@ -669,8 +673,9 @@ _WebHub/
 ├── dashboard/                # Vite + React
 ├── docker/{nginx.compose.yml, infra.compose.yml}
 ├── nginx/{nginx.conf, sites/, errors/}
+├── runtimes/                 # gitignored: portable runtimes <lang>/<ver>/
 ├── data/                     # gitignored
-│   ├── sites/  compose/  profiles/  backups/
+│   ├── sites/  compose/  profiles/  backups/  venvs/
 │   ├── ports.json  infra.json  secrets.json  auth.json  state.json
 └── logs/
 ```
@@ -701,6 +706,8 @@ webhub db backup <n|all> | restore <n> <file> | clone <n> <new> | reset <n>
 webhub db url <n> | shell <n> [--engine redis] | query <n> "<sql>" [--json|--csv]
 webhub db export <n> [table] --format csv|json|sql | studio
 
+webhub runtimes [list|prune]        # runtime ที่โหลดไว้ + site ที่ใช้
+webhub db version <n> <engine> latest|pin <major>   # ย้าย/pin major (dump→restore)
 webhub profiles [--check]
 webhub infra up|down|status
 webhub reload | ui
@@ -762,9 +769,9 @@ webhub reload | ui
 0. ~~Spike~~ ✅ เสร็จ 2026-11-07 (ผลใน §18)
 1. **MVP-1** — profiles loader + scanner + detector (routes, via, URL env, DB) + dedupe + `scan/approve/list`; daemon + CLI client + auth (token, Host/Origin)
 2. **MVP-2** — nginx container + generator (resolver/variables, validate/swap) + static (publicDir, deny-list)
-3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + env resolver + env sets + URL rewrite
+3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + Runtime Manager (Node/Bun/Python portable) + env resolver + env sets + URL rewrite
 4. **MVP-4** — compose runner (project name เดิม, adopt, override, extra_hosts, rebuild) + hybrid
-5. **MVP-5** — Data Hub: shared postgres + redis, provision, env injection, disable DB services, import จาก volume เดิม
+5. **MVP-5** — Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม
 6. **MVP-6** — Dashboard (Sites, Port Map, Data Hub)
 7. **DB Studio v1** — SQL (pg): browser, data grid + edit, SQL editor + autocomplete, history, export; Redis: key browser, value editor, TTL, console; guard
 8. backup/restore, mysql + mongo (infra + studio), start modes `auto`/`on-demand` + `dependsOn`
@@ -808,6 +815,7 @@ webhub reload | ui
 | 10b | bind `127.0.0.1` vs `0.0.0.0` | **`127.0.0.1`** (spike ผ่าน) + hosts sync จำเป็นสำหรับ native | §6.1, §10.1, §18 |
 | 11 | Prisma กับ shared pg | role `CREATEDB`, restore `--no-owner --no-acl` (เทคนิค) | §5.2, §5.5 |
 | 12 | redis index ระบุไม่ได้ (cloudvps/questcloud) | detect → `isolated` อัตโนมัติ (เทคนิค) | §5.2, §9 |
+| 13 | version ภาษา / DB / Redis ต่างกัน | Runtime Manager portable; DB server ต่อ major (pg/redis → ล่าสุด, mysql/mongo → pin); Redis 7 + Valkey option; profile variant ตาม version framework | §19 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
 ### Backlog — function ที่ยังไม่ได้ตัดสิน
@@ -837,3 +845,111 @@ webhub reload | ui
 
 หมายเหตุ: `curl` ≥ 7.85 resolve `*.localhost` เป็น loopback เองโดยไม่อ่าน `/etc/hosts` (RFC 6761) → health check ใน container ห้ามใช้ curl ทดสอบ `<site>.localhost`; ใช้ `wget`/Node แทน
 Windows Firewall: bind `127.0.0.1` ไม่ trigger popup (by design) — ไม่ได้ทดสอบ popup ของ `0.0.0.0`
+
+---
+
+## 19. Version Management
+
+### 19.1 Runtime Manager (version ภาษา)
+
+**Detect version ที่ต้องการ** (แม่น → หยาบ):
+
+| ภาษา | แหล่ง |
+|---|---|
+| Node | `.nvmrc`, `.node-version`, `.tool-versions`, `package.json` `engines.node`, Dockerfile `FROM node:N` (hint) |
+| Package manager | `packageManager` (`pnpm@x`, `yarn@x`, `npm@x`), lockfile |
+| Bun | `.bun-version`, `engines.bun`, Dockerfile `FROM oven/bun:N` (hint) |
+| Python | `.python-version`, `pyproject` `requires-python`, `runtime.txt`, Dockerfile (hint) |
+| Go / Rust / .NET / PHP / Ruby | `go.mod` `go 1.x`, `rust-toolchain(.toml)`, `global.json`, `composer.json` `require.php`, `Gemfile` / `.ruby-version` |
+
+Dockerfile `FROM` = hint เท่านั้น (เตือน ไม่บังคับ)
+
+**Resolve ต่อ site:**
+```
+required range
+  → runtime บนเครื่องผ่าน?          → ใช้ (source: system)
+  → ไม่ผ่าน → มีใน _WebHub/runtimes? → ใช้ (source: webhub)
+  → ไม่มี → โหลด portable ได้?        → โหลด + verify checksum → ใช้ (source: webhub)
+  → ไม่ได้                          → runner `container` image version ตรง (source: container)
+```
+
+| ภาษา | Portable |
+|---|---|
+| Node | zip ทางการ `nodejs.org/dist/vX/node-vX-win-x64.zip` + `SHASUMS256.txt` |
+| Bun | release zip ทางการ (`bun-windows-x64.zip`) ต่อ version |
+| pnpm / yarn | ตาม `packageManager` ผ่าน corepack ของ Node ที่เลือก หรือ `npx pnpm@x` |
+| Python | `uv python install <ver>` + `uv venv` → venv ที่ `data/venvs/<site>/` (ไม่สร้างใน project) |
+| Go / Rust / .NET / PHP / Ruby | phase หลัง; ระหว่างนี้ → `container` |
+
+- spawn: prepend `runtimes/<lang>/<ver>/` ใน `PATH` **เฉพาะ process นั้น** — ไม่แตะ PATH ระบบ, ไม่ต้อง admin
+- Policy ต่อ site: `range` (default, ผ่านเงื่อนไขที่ประกาศ), `exact`, `ignore` (ใช้ของเครื่องเสมอ)
+- Dashboard: ตาราง "ต้องการ / ใช้อยู่ / source" ต่อ site; `webhub runtimes prune` ลบตัวที่ไม่มี site ใช้
+
+ผลกับ project ตอนนี้ (เครื่อง: Node 24.20, Bun 1.3.11, pnpm 12.9.1, Python 3.14.3):
+
+| Site | ต้องการ | ผล |
+|---|---|---|
+| herotime | node `>=22`, `pnpm@12.9.1` | system ✅ |
+| werewolf | Dockerfile `node:20` (hint) | system 24 + เตือน hint; ตั้ง `exact` → โหลด Node 20 |
+| cloudvps / questcloud | Dockerfile `bun:1.2` (hint) | system 1.3 + เตือน hint |
+| REA (ไม่ใช่เว็บ) | node `^22.19 \|\| ^24.11` | — |
+
+### 19.2 DB version
+
+**หลัก: 1 shared server ต่อ engine ต่อ major ที่มี site ใช้จริง**
+
+```
+webhub-postgres-17   :5432   ← default ของ pg (major ล่าสุด)
+webhub-postgres-15   :5415   ← เกิดขึ้นเฉพาะเมื่อมี site pin 15 (site ที่ pin 15 แชร์กัน)
+webhub-redis-7       :6379
+webhub-mysql-8.4     :3306
+```
+
+| Engine | Default policy | เหตุผล |
+|---|---|---|
+| PostgreSQL | **upgrade → major ล่าสุด** | dump/restore ข้าม major ได้, ปัญหาน้อย |
+| Redis / Valkey | **upgrade → major ที่ตั้งไว้ (7)** | RDB ใหม่อ่านของเก่าได้ |
+| MySQL | **pin major เดิม** | 5.7→8: auth plugin `caching_sha2_password`, collation `utf8mb4_0900_ai_ci`, reserved words |
+| MariaDB | **pin major เดิม** (engine แยกจาก MySQL) | ไม่ใช่ drop-in เต็มตัว |
+| MongoDB | **pin major เดิม** | upgrade ต้องทีละ major + featureCompatibilityVersion |
+
+กฎ:
+- **ห้าม downgrade**: data จาก major ใหม่ → server เก่ากว่า = block
+- **Dump ด้วย client ใหม่สุดเสมอ** (`pg_dump` ต้อง ≥ version ต้นทาง) → รันผ่าน image `postgres:<ล่าสุด>` / `mongo:<target>`
+- **Pre-upgrade check** ก่อนย้าย major:
+  - pg: `pg_extension` (postgis, pgvector, timescale…) มีใน image ปลายทางไหม, collation provider, feature ที่ถูกถอด
+  - mysql: auth plugin ของ user, `sql_mode`, collation, reserved words ใน schema
+  - mongo: FCV, deprecated operators
+  - ไม่ผ่าน → เสนอ pin แทน
+- ย้าย/pin ภายหลังได้: `webhub db version <n> <engine> latest|pin <major>` → backup → dump → restore → ตรวจ row count → สลับ env
+- Port: major default ใช้ port มาตรฐาน; major อื่น = `<prefix><major>` (เช่น pg 15 → `5415`) แก้ได้ใน Port Map
+- image: ตั้งต่อ major ใน `infra` config; extension พิเศษ → image เฉพาะ (เช่น `pgvector/pgvector:pg17`, `postgis/postgis:17-3.5`)
+
+ผลกับ project ตอนนี้: pos / cloudvps / questcloud (pg 15) + werewolf (pg 16) + herotime (pg 17) → **webhub-postgres-17 ตัวเดียว** (ผ่าน pre-upgrade check ก่อน; ไม่ผ่าน → pin); redis 7 ทั้งหมด → webhub-redis-7
+
+### 19.3 Redis vs Valkey
+
+- default `redis:7` (ตรงกับทุก project)
+- `infra.redis.flavor: "redis" | "valkey"` → Valkey (BSD, fork จาก Redis 7.2, protocol/RDB เข้ากันได้) สลับได้ — Redis 7.4+ เปลี่ยน license (RSAL/SSPL, 8.x เพิ่ม AGPL)
+- RedisJSON / RediSearch: ใช้ได้เฉพาะ Redis Stack / Redis 8 → site ที่ใช้ module → pin image ที่มี module
+
+### 19.4 DB Studio รองรับหลาย version
+
+- adapter อ่าน version ตอน connect (`SELECT version()`, `SELECT @@version`, `INFO server`, `buildInfo`) → **capability flags**
+- ซ่อน/ปิด feature ที่ server ไม่รองรับ เช่น MySQL 5.7 ไม่มี CTE/window function, Redis < 7.4 ไม่มี `HEXPIRE`, ไม่มี module JSON → ไม่มี JSON editor, Mongo < 5 ไม่มี `$setWindowFields`
+- introspection query แยกตาม version (pg ≥ 10, mysql 5.7/8, mariadb)
+- autocomplete keyword ตาม dialect + version
+
+### 19.5 Framework version ใน profile
+
+พฤติกรรม dev server เปลี่ยนตาม version → profile มี variant:
+
+```yaml
+variants:
+  - when: { dep: "vite", range: ">=6" }
+    devServer: { hostRewrite: true }          # Vite 6 บล็อก Host ที่ไม่รู้จัก
+  - when: { dep: "next", range: ">=15" }
+    devServer: { hostRewrite: true }          # allowedDevOrigins
+  - when: { dep: "next", range: "<13" }
+    start: { cmd: "next dev -p {PORT} -H {HOST}" }
+```
