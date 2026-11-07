@@ -3,6 +3,8 @@
 ศูนย์รวม website ทุกตัวใน **scan roots ที่ผู้ใช้ตั้ง** (เครื่องผู้พัฒนา: `E:\Workspaces\Project`) — เป็นเครื่องมือทั่วไปใช้กับ project ของใครก็ได้:
 scan หา project ที่เป็นเว็บ (ทุกภาษา) → start/stop ให้ → route ผ่าน nginx ไป `http://<name>.localhost` → **แก้ port ได้ทุกตัว** → **รวม database ทุก project ไว้ที่ server เดียว** → **จัดการ SQL / NoSQL / Redis ได้ครบ** — โดย **ไม่แตะ project เลย**
 
+> เอกสารประกอบ: [Workflow + กฎ](docs/WORKFLOW.md) · [Plan](docs/PLAN.md) · [Features](docs/features/README.md) · [Reports](docs/reports/README.md)
+
 ---
 
 ## 0. Decisions
