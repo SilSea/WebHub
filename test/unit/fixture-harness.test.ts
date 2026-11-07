@@ -1,8 +1,9 @@
-import { appendFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertNoSymlinks,
   assertUntouched,
   copyFixture,
   FIXTURES_ROOT,
@@ -33,7 +34,9 @@ describe("fixture harness", () => {
   it("untouched copy passes", async () => {
     const dir = await copy();
     const before = await hashTree(dir);
-    expect(() => assertUntouched(before, new Map(before))).not.toThrow();
+    expect(() => assertUntouched(before, new Map())).toThrow();
+    const again = await hashTree(dir);
+    expect(() => assertUntouched(before, again)).not.toThrow();
   });
 
   it("reports added, removed and changed files", async () => {
@@ -72,12 +75,22 @@ describe("fixture harness", () => {
     expect(() => assertUntouched(strictBefore, strictAfter)).toThrow(/\+ node_modules/);
   });
 
-  it("does not follow symlinks", async () => {
+  it("detects a permission change (read-only / mode bits)", async () => {
+    const dir = await copy();
+    const before = await hashTree(dir);
+    await chmod(join(dir, "index.html"), 0o444);
+    await expect(hashTree(dir).then((t) => assertUntouched(before, t))).rejects.toThrow(
+      /~ index\.html/,
+    );
+    await chmod(join(dir, "index.html"), 0o644);
+  });
+
+  it("does not follow symlinks", async (ctx) => {
     const dir = await copy();
     try {
       await symlink(tmpdir(), join(dir, "link"), "junction");
     } catch {
-      return; // symlinks not permitted on this machine
+      ctx.skip(); // symlinks not permitted on this machine
     }
     const tree = await hashTree(dir);
     expect(tree.get("link")).toMatch(/^link:/);
@@ -92,6 +105,24 @@ describe("fixture harness — security", () => {
       await expect(copyFixture(name)).rejects.toThrow(/invalid fixture name/);
     },
   );
+
+  it("rejects a valid name that does not exist, without leaking a temp dir", async () => {
+    await expect(copyFixture("does-not-exist")).rejects.toThrow(/fixture not found/);
+  });
+
+  it("rejects fixtures that contain symlinks", async (ctx) => {
+    const dir = await mkdtemp(join(tmpdir(), "webhub-fxsrc-"));
+    try {
+      try {
+        await symlink(tmpdir(), join(dir, "escape"), "junction");
+      } catch {
+        ctx.skip();
+      }
+      await expect(assertNoSymlinks(dir)).rejects.toThrow(/must not contain symlinks/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("refuses to remove anything but a fixture temp copy", async () => {
     await expect(removeFixtureCopy(join(FIXTURES_ROOT, "vite-basic"))).rejects.toThrow(/refusing/);

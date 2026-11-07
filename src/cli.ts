@@ -36,7 +36,15 @@ function isMain(): boolean {
   const entry = process.argv[1];
   if (entry === undefined) return false;
   try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    // `node dist/cli` (no extension) resolves to the same file
+    return [entry, `${entry}.js`].some((p) => {
+      try {
+        return realpathSync(p) === self;
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return false;
   }

@@ -106,7 +106,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 ## 7. คำถามถึงผู้ใช้
 | # | คำถาม | ทางเลือก | แนะนำ | คำตอบ |
 |---|---|---|---|---|
-| Q1 | Node ขั้นต่ำของตัว webhub | 22 (ตาม DESIGN) / 24 | 24 | **Node 22** (`engines: >=22`; CI ทดสอบทั้ง 22 และ 24) |
+| Q1 | Node ขั้นต่ำของตัว webhub | 22 (ตาม DESIGN) / 24 | 24 | **Node 22** (`engines: >=22.12` — Vitest 5 ต้องการ 22.12+; CI ทดสอบทั้ง 22 และ 24) |
 | Q2 | Package manager ของ repo webhub | pnpm / npm | **pnpm** — ไม่รัน install script ของ dependency เป็นค่าเริ่มต้น (ปลอดภัยกว่า), เร็ว; ผู้ใช้ยังติดตั้งด้วย `npm i -g webhub` ได้ปกติ | **pnpm** (`packageManager` ใน package.json, `pnpm install --frozen-lockfile`) |
 | Q3 | Lint + format | Biome / ESLint + Prettier | **Biome** — tool เดียว, dependency น้อยมาก (R6), เร็ว; ESLint มี rule เยอะกว่า | **Biome** |
 | Q4 | CI + การ merge | GitHub Actions + PR เข้า `develop` / GitHub Actions + merge local / ไม่มี CI ตอนนี้ | **Actions + PR** — มี record ของ review ต่องาน | **Actions + PR** เข้า `develop` |

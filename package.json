@@ -18,7 +18,7 @@
   },
   "packageManager": "pnpm@12.9.1",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
     "test:full": "vitest run",

@@ -3,7 +3,17 @@
  * Works only on copies under a private temp dir; never on fixtures/ itself.
  */
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdtemp, readdir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,14 +28,36 @@ export function isInside(root: string, child: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/**
+ * Throws if `dir` contains any symlink/junction. Fixtures must be plain files so a copy can never
+ * point back outside its temp dir.
+ */
+export async function assertNoSymlinks(dir: string): Promise<void> {
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    const abs = join(dir, e.name);
+    const st = await lstat(abs);
+    if (st.isSymbolicLink()) throw new Error(`fixtures must not contain symlinks: ${abs}`);
+    if (st.isDirectory()) await assertNoSymlinks(abs);
+  }
+}
+
 /** Copies fixtures/<name> into a fresh temp dir and returns the copy's path. */
 export async function copyFixture(name: string): Promise<string> {
   if (!NAME_RE.test(name)) throw new Error(`invalid fixture name: ${JSON.stringify(name)}`);
   const src = resolve(FIXTURES_ROOT, name);
   if (!isInside(FIXTURES_ROOT, src)) throw new Error(`fixture outside fixtures/: ${name}`);
+  if (!(await stat(src).catch(() => null))?.isDirectory()) {
+    throw new Error(`fixture not found: ${name}`);
+  }
+  await assertNoSymlinks(src);
   const tmp = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
   const dest = join(tmp, name);
-  await cp(src, dest, { recursive: true, verbatimSymlinks: true, errorOnExist: true });
+  try {
+    await cp(src, dest, { recursive: true, errorOnExist: true });
+  } catch (err) {
+    await rm(tmp, { recursive: true, force: true });
+    throw err;
+  }
   return dest;
 }
 
@@ -50,7 +82,10 @@ export interface HashOptions {
   ignore?: readonly string[];
 }
 
-/** Map of posix relative path → "file:<sha256>" | "dir" | "link:<target>". Symlinks are not followed. */
+/**
+ * Map of posix relative path → "file:<mode>:<sha256>" | "dir" | "link:<target>".
+ * Mode = permission bits (on Windows: read-only attribute). Symlinks are not followed.
+ */
 export async function hashTree(root: string, opts: HashOptions = {}): Promise<Map<string, string>> {
   const ignore = new Set(opts.ignore ?? []);
   const out = new Map<string, string>();
@@ -71,7 +106,7 @@ export async function hashTree(root: string, opts: HashOptions = {}): Promise<Ma
         const digest = createHash("sha256")
           .update(await readFile(abs))
           .digest("hex");
-        out.set(rel, `file:${digest}`);
+        out.set(rel, `file:${(st.mode & 0o777).toString(8)}:${digest}`);
       } else {
         out.set(rel, "other");
       }
