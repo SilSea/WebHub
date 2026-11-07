@@ -39,6 +39,8 @@
 กติกา (R6):
 - ปฏิเสธ home ที่เป็น symlink/junction, อยู่ใน scan root, หรือเป็น root ของ drive
 - ระหว่างพัฒนาตั้ง `WEBHUB_HOME` เป็นโฟลเดอร์**นอก scan root** เช่น `%APPDATA%\webhub-dev` (repo อยู่ใน scan root `E:\Workspaces\Project` จึงใช้ repo เป็น home ไม่ได้ — กติกาข้อแรกปฏิเสธ; gitignore ยังครอบ `data/` `logs/` `runtimes/` กันพลาด)
+- home ที่มีอยู่แล้วต้องเป็นของ user ปัจจุบัน (Windows: owner = SID ตัวเอง หรือ Administrators; POSIX: uid ตัวเอง) และ parent ต้องเป็นของ user ตัวเอง / SYSTEM / Administrators / TrustedInstaller (POSIX: ตัวเอง / root) — กัน user อื่นสร้างโฟลเดอร์รอไว้ก่อน (security-1 S2)
+- ACL: ถ้า ACL ของ home ไม่ใช่ "protected + user + SYSTEM" พอดี → `icacls /reset /T` ทั้ง tree แล้วตั้ง ACL ที่ home (ลูกสืบทอด) — ลูกที่มี ACL เปิดกว้างค้างอยู่ถูกล้าง (S3). POSIX: ถ้ามี group/other bit → ลบออกทั้ง tree
 - test ใช้ home ใน temp dir เสมอ (ไม่แตะ home จริงของเครื่อง)
 
 ```ts
@@ -71,7 +73,10 @@ writeDoc(lock, file, value): Promise<void>   // ต้องถือ lock; file
 acquireLock(paths): Promise<Lock>   // data/.lock: { pid, startedAt, hostname, token }, เปิดแบบ exclusive (wx), 0600
 Lock.release(): Promise<void>
 ```
-- lock ค้างจาก process ที่ตายแล้ว (PID ไม่อยู่ หรือ start time ไม่ตรง — กัน PID reuse) → ยึดคืนได้
+- สร้าง lock แบบ atomic พร้อมเนื้อหา: เขียน temp แล้ว `link()` (มี EEXIST); filesystem ที่ไม่มี hard link → `wx`
+- lock ค้างจาก process ที่ตายแล้ว (PID ไม่อยู่ หรือ start time ไม่ตรง — กัน PID reuse) → ยึดคืนได้ โดยต้องถือ guard `<lock>.takeover` (wx) และอ่านซ้ำใต้ guard ว่ายังเป็นไฟล์เดิม ถึงจะลบ — มีผู้ชนะคนเดียว (review-1 R1 / security-1 S1); guard ค้าง > 30 วิ ถูกลบ
+- สถานะ process 3 แบบ `alive / dead / unknown` (Windows ใช้ CIM `Win32_Process.CreationDate` อ่านข้าม elevation ได้); `unknown` (สิทธิ์ไม่พอ, tool พัง) = ถือว่ายังมีชีวิต → `LOCKED` (R2)
+- `Lock.verify()` อ่าน token บนดิสก์ก่อนทุก `writeDoc` — lock หาย/ถูกแทน → `NOT_LOCKED`
 - lock ของ hostname อื่น (home บน network drive) → ถือว่ายังล็อกอยู่ (ตรวจ process เครื่องอื่นไม่ได้)
 - `release()` ลบไฟล์เฉพาะเมื่อ token ตรง (ไม่ลบ lock ที่คนอื่นยึดไปแล้ว)
 - process ที่ไม่ถือ lock (CLI) อ่านได้อย่างเดียว
@@ -89,6 +94,7 @@ class SecretStore { static open(file, home, backend): Promise<SecretStore>; get(
 generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 ```
 - key รูปแบบ `<scope>/<name>` เช่น `postgres-17/pos`, `auth/master`
+- `set`/`delete` ทำทีละคำสั่ง (queue ภายใน) — เขียนพร้อมกันไม่ทำ secret หาย (R3)
 - ค่าไม่ปรากฏใน error/log (`toJSON`/`inspect` ของ store → `[SecretStore: N secrets]`)
 - at-rest: **DPAPI (CurrentUser scope)** — ไฟล์ `data/secrets.json` = `{ schemaVersion, backend, entries: { <key>: <base64 ciphertext> } }` (backend ไม่ตรง → `SECRET_BACKEND`); daemon ถอดครั้งเดียวตอนเปิดผ่าน PowerShell (`System.Security.Cryptography.ProtectedData`, spawn แบบ args array, ข้อมูลส่งทาง stdin บรรทัดละ `b:<base64>` ไม่ผ่าน argv — prefix ทำให้ secret ว่างยังเป็น 1 บรรทัด) แล้ว cache ในหน่วยความจำ; เขียน = เข้ารหัสค่าใหม่ทีละค่า
 - interface `SecretBackend { name; protect(items: Buffer[]): Promise<Buffer[]>; unprotect(items: Buffer[]): Promise<Buffer[]> }` (batch = เรียก PowerShell ครั้งเดียว) → Windows = DPAPI; macOS/Linux (phase 13) = Keychain / libsecret; test ใช้ backend จำลอง + test จริงบน Windows
@@ -98,7 +104,7 @@ generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 ทุก error เป็น `WebhubError { code, message, file?, hint?, details[] }` — code: `HOME_INVALID`, `CONFIG_INVALID`, `CONFIG_FROM_NEWER_VERSION`, `JSON_PARSE`, `LOCKED`, `NOT_LOCKED`, `SYMLINK_REFUSED`, `PATH_OUTSIDE_HOME`, `FILE_TOO_LARGE`, `SECRET_BACKEND`
 
 ### 3.7 เรียกโปรแกรมของ OS (`src/proc/exec.ts`)
-- `execFile` = spawn แบบ args array, `shell: false`, ข้อมูลลับส่งทาง stdin
+- `execFile` = spawn แบบ args array, `shell: false`, ข้อมูลลับส่งทาง stdin; error ของ stdin (child ปิดก่อนอ่าน) ไม่ทำ process crash — ใช้ exit code แทน (R4)
 - `systemExe(name)` = path เต็มของเครื่องมือ OS: Windows `%SystemRoot%\System32\…` (`icacls.exe`, `whoami.exe`, `WindowsPowerShell\v1.0\powershell.exe`), POSIX `/bin`, `/usr/bin`, … — **ห้ามหาผ่าน PATH** (เจอจริงตอนเทส: Git Bash มี `whoami` ของ coreutils มาก่อนใน PATH ทำให้หา SID ไม่ได้; และกัน binary planting)
 - `powershell(script, input?)` = `-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand` (script คงที่ ไม่มีข้อมูลผู้ใช้ใน script)
 
@@ -165,7 +171,8 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 ## 9. Reports
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/F-001/test-1.md) | | | |
+| 1 | [test-1](../reports/F-001/test-1.md) | [review-1](../reports/F-001/review-1.md) | [security-1](../reports/F-001/security-1.md) | major 6 (R1–R4, S2, S3) → แก้ |
+| 2 | [test-2](../reports/F-001/test-2.md) | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
@@ -178,3 +185,4 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 2026-11-07 | W1 ② | Q1 zod 4, Q2 DPAPI + ACL, Q3 ไม่ start + บอกจุดผิด, Q4 JSON |
 | 2026-11-07 | W3 E2 | implement; ปรับ spec ให้ตรงของจริง: dev home ต้องอยู่นอก scan root, เลื่อน export ไฟล์ JSON Schema (ต้อง CR F-000), API ของ store/secrets, `systemExe` (§3.7), `NOT_LOCKED`/`PATH_OUTSIDE_HOME` |
 | 2026-11-07 | W3 E3 | test-1: 89 pass / 4 skip (ตาม OS); เทสเจอ bug 2 ตัวแก้แล้ว (whoami จาก PATH, secret ว่างทำ DPAPI พัง) |
+| 2026-11-07 | W3 E4/E5 | review-1 + security-1: critical 0, major 6 → แก้ครบ + test (test-2: 101 pass / 5 skip) |

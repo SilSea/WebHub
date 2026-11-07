@@ -86,6 +86,8 @@ function checkKey(key: string): void {
 export class SecretStore {
   #values = new Map<string, string>();
   #cipher = new Map<string, string>();
+  /** Mutations run one at a time so concurrent set/delete never lose an update. */
+  #queue: Promise<unknown> = Promise.resolve();
 
   private constructor(
     private readonly file: string,
@@ -129,9 +131,19 @@ export class SecretStore {
     return this.#values.get(key);
   }
 
+  #serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(fn, fn);
+    this.#queue = run.catch(() => {});
+    return run;
+  }
+
   async set(lock: Lock, key: string, value: string): Promise<void> {
     checkKey(key);
     assertLock(lock, this.home);
+    return this.#serial(() => this.#set(lock, key, value));
+  }
+
+  async #set(lock: Lock, key: string, value: string): Promise<void> {
     const [enc] = await this.backend.protect([Buffer.from(value, "utf8")]);
     if (enc === undefined) throw new WebhubError("SECRET_BACKEND", "protect returned nothing");
     const cipher = new Map(this.#cipher).set(key, enc.toString("base64"));
@@ -143,6 +155,10 @@ export class SecretStore {
   async delete(lock: Lock, key: string): Promise<void> {
     checkKey(key);
     assertLock(lock, this.home);
+    return this.#serial(() => this.#delete(lock, key));
+  }
+
+  async #delete(lock: Lock, key: string): Promise<void> {
     if (!this.#cipher.has(key)) return;
     const cipher = new Map(this.#cipher);
     cipher.delete(key);

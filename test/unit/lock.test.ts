@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Paths } from "../../src/config/home.js";
 import { isWebhubError } from "../../src/errors.js";
-import { acquireLock, assertLock, processStartTime } from "../../src/store/lock.js";
+import { acquireLock, assertLock, processState } from "../../src/store/lock.js";
 import { fakeLock, tempHome } from "../helpers/home.js";
 
 let h: { paths: Paths; cleanup(): Promise<void> };
@@ -53,7 +53,8 @@ describe("lock", { timeout: 30_000 }, () => {
   });
 
   it("stays locked for a live process or another host", async () => {
-    const startedAt = await processStartTime(process.pid);
+    const self = await processState(process.pid);
+    const startedAt = self.state === "alive" ? self.startedAt : "";
     await writeLock({ pid: process.pid, startedAt, hostname: hostname(), token: "t" });
     await expect(acquireLock(h.paths)).rejects.toSatisfy((e) => isWebhubError(e, "LOCKED"));
     await writeLock({ pid: 1, startedAt: "x", hostname: "other-host.invalid", token: "t" });
@@ -68,12 +69,43 @@ describe("lock", { timeout: 30_000 }, () => {
     expect(await readFile(h.paths.lock, "utf8")).toBe(foreign);
   });
 
-  it("processStartTime is stable and undefined for bad PIDs", async () => {
-    const a = await processStartTime(process.pid);
-    expect(a).toBeTruthy();
-    expect(await processStartTime(process.pid)).toBe(a);
-    expect(await processStartTime(-1)).toBeUndefined();
-    expect(await processStartTime(1.5)).toBeUndefined();
+  it("processState: alive + stable start time; dead for bad/missing PIDs", async () => {
+    const a = await processState(process.pid);
+    expect(a.state).toBe("alive");
+    expect(await processState(process.pid)).toEqual(a);
+    expect(await processState(-1)).toEqual({ state: "dead" });
+    expect(await processState(1.5)).toEqual({ state: "dead" });
+    expect(await processState(2 ** 22 + 7)).toEqual({ state: "dead" });
+  });
+
+  it("Windows: a system process (other user / elevated) is never reported dead", async (ctx) => {
+    if (process.platform !== "win32") ctx.skip();
+    expect((await processState(4)).state).not.toBe("dead");
+  });
+
+  it("verify() detects a lock that was replaced; release keeps the foreign lock", async () => {
+    const lock = await acquireLock(h.paths);
+    await expect(lock.verify()).resolves.toBeUndefined();
+    const foreign = JSON.stringify({ pid: 1, startedAt: "x", hostname: "h", token: "other" });
+    await writeFile(h.paths.lock, foreign);
+    await expect(lock.verify()).rejects.toSatisfy((e) => isWebhubError(e, "NOT_LOCKED"));
+    expect(lock.held).toBe(false);
+    expect(await readFile(h.paths.lock, "utf8")).toBe(foreign);
+  });
+
+  it("concurrent takeover of a stale lock has exactly one winner", async () => {
+    for (let round = 0; round < 5; round++) {
+      await writeLock({ pid: 2 ** 22 + 7, startedAt: "x", hostname: hostname(), token: "dead" });
+      const results = await Promise.allSettled(
+        Array.from({ length: 4 }, () => acquireLock(h.paths)),
+      );
+      const won = results.filter((r) => r.status === "fulfilled");
+      expect(won).toHaveLength(1);
+      for (const r of results) {
+        if (r.status === "rejected") expect(isWebhubError(r.reason, "LOCKED")).toBe(true);
+      }
+      if (won[0]?.status === "fulfilled") await won[0].value.release();
+    }
   });
 
   it("assertLock checks held + home", () => {

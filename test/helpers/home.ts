@@ -17,5 +17,11 @@ export async function tempHome(): Promise<{
 
 /** In-memory lock for unit tests of code that only checks `held` + `home`. */
 export function fakeLock(home: string, held = true): Lock {
-  return { file: join(home, "data", ".lock"), home, held, release: async () => {} };
+  return {
+    file: join(home, "data", ".lock"),
+    home,
+    held,
+    verify: async () => {},
+    release: async () => {},
+  };
 }

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -53,6 +54,42 @@ describe("lock across processes", () => {
     }
     const lock = await acquireLock(h.paths); // lock file is still there, holder is dead
     await lock.release();
+  });
+});
+
+/** Separate process: tries the lock once, prints WON or LOST, holds a WON lock for 2 s. */
+function racer(home: string): Promise<string> {
+  const code = `
+    const { acquireLock } = await import(${JSON.stringify(LOCK_MODULE)});
+    const { pathsFor } = await import(${JSON.stringify(HOME_MODULE)});
+    try {
+      const lock = await acquireLock(pathsFor(${JSON.stringify(home)}));
+      console.log("WON");
+      await new Promise((r) => setTimeout(r, 2000));
+      await lock.release();
+    } catch (e) { console.log(e.code === "LOCKED" ? "LOST" : "ERR " + e.message); }
+  `;
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: "pipe" });
+    let out = "";
+    child.stdout.on("data", (b: Buffer) => {
+      out += b.toString();
+    });
+    child.on("exit", () => resolve(out.trim()));
+  });
+}
+
+describe("stale lock race across processes", () => {
+  it("4 processes taking over the same stale lock → exactly one wins", async () => {
+    for (let round = 0; round < 3; round++) {
+      await writeFile(
+        h.paths.lock,
+        JSON.stringify({ pid: 2 ** 22 + 7, startedAt: "x", hostname: hostname(), token: "dead" }),
+      );
+      const results = await Promise.all(Array.from({ length: 4 }, () => racer(h.paths.home)));
+      expect(results.filter((r) => r === "WON")).toHaveLength(1);
+      expect(results.filter((r) => r === "LOST")).toHaveLength(3);
+    }
   });
 });
 

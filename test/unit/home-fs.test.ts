@@ -1,10 +1,10 @@
-import { mkdir, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ensureHome, pathsFor } from "../../src/config/home.js";
 import { isWebhubError } from "../../src/errors.js";
 import { assertSafePath, isInside } from "../../src/fs/safe-path.js";
-import { execFile } from "../../src/proc/exec.js";
+import { execFile, systemExe } from "../../src/proc/exec.js";
 import { tempHome } from "../helpers/home.js";
 
 let h: Awaited<ReturnType<typeof tempHome>>;
@@ -58,7 +58,7 @@ describe("ensureHome", { timeout: 30_000 }, () => {
   it("Windows: ACL has no inheritance and only user + SYSTEM", async (ctx) => {
     if (process.platform !== "win32") ctx.skip();
     await ensureHome(h.paths);
-    const res = await execFile("icacls", [h.paths.home]);
+    const res = await execFile(systemExe("icacls.exe"), [h.paths.home]);
     const lines = res.stdout
       .split(/\r?\n/)
       .map((l) => l.replace(h.paths.home, "").trim())
@@ -66,6 +66,37 @@ describe("ensureHome", { timeout: 30_000 }, () => {
     expect(lines).toHaveLength(2);
     expect(lines.join("\n")).not.toMatch(/\(I\)/);
     expect(lines.join("\n")).not.toMatch(/Everyone|Users|Authenticated/i);
+  });
+
+  it("Windows: a pre-existing child with its own permissive ACL is reset", async (ctx) => {
+    if (process.platform !== "win32") ctx.skip();
+    await mkdir(h.paths.data, { recursive: true });
+    await writeFile(join(h.paths.data, "secrets.json"), "{}");
+    const grant = await execFile(systemExe("icacls.exe"), [
+      h.paths.data,
+      "/inheritance:r",
+      "/grant:r",
+      "*S-1-1-0:(OI)(CI)F",
+    ]);
+    expect(grant.code).toBe(0);
+    await ensureHome(h.paths);
+    for (const p of [h.paths.data, join(h.paths.data, "secrets.json")]) {
+      const out = (await execFile(systemExe("icacls.exe"), [p])).stdout;
+      expect(out).not.toMatch(/Everyone/i);
+    }
+  });
+
+  it("POSIX: group/other bits are stripped from existing children", async (ctx) => {
+    if (process.platform === "win32") ctx.skip();
+    await mkdir(h.paths.data, { recursive: true, mode: 0o777 });
+    const f = join(h.paths.data, "secrets.json");
+    await writeFile(f, "{}", { mode: 0o666 });
+    await chmod(h.paths.home, 0o755);
+    await chmod(h.paths.data, 0o777);
+    await chmod(f, 0o666);
+    await ensureHome(h.paths);
+    expect((await stat(h.paths.data)).mode & 0o077).toBe(0);
+    expect((await stat(f)).mode & 0o077).toBe(0);
   });
 
   it("refuses a symlinked home and a file home", async (ctx) => {

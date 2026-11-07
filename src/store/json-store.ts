@@ -114,6 +114,7 @@ export async function readJsonFile(file: string, home: string): Promise<unknown>
 /** Atomically writes `value` as JSON: tmp + fsync + rename; keeps the previous version as .bak. */
 export async function writeDoc(lock: Lock, file: string, value: unknown): Promise<void> {
   assertLock(lock, lock.home);
+  await lock.verify();
   await assertSafePath(lock.home, file);
   const text = `${JSON.stringify(value, null, 2)}\n`;
   if (Buffer.byteLength(text) > MAX_FILE_BYTES) {

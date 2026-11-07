@@ -36,6 +36,8 @@ export function execFile(
         stderr: Buffer.concat(err).toString("utf8"),
       });
     });
+    // child may exit before reading stdin (EPIPE/EOF): the exit code reports the failure
+    child.stdin.on("error", () => {});
     child.stdin.end(opts.input ?? "");
   });
 }

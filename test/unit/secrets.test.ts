@@ -48,6 +48,36 @@ describe("SecretStore", () => {
     expect((await open()).has("db/postgres")).toBe(false);
   });
 
+  it("concurrent set/delete never lose an update", async () => {
+    const lock = fakeLock(h.paths.home);
+    const s = await open();
+    await Promise.all(Array.from({ length: 8 }, (_, i) => s.set(lock, `k/${i}`, `v${i}`)));
+    await Promise.all([s.delete(lock, "k/0"), s.set(lock, "k/9", "v9"), s.delete(lock, "k/1")]);
+    const re = await open();
+    expect(re.size).toBe(7); // 8 set, 2 deleted, 1 added
+    expect(re.get("k/9")).toBe("v9");
+    expect(re.has("k/0")).toBe(false);
+  });
+
+  it("a failed write does not block later writes", async () => {
+    const lock = fakeLock(h.paths.home);
+    let fail = true;
+    const flaky: SecretBackend = {
+      name: "fake",
+      protect: async (items) => {
+        if (fail) throw new Error("backend down");
+        return fake().protect(items);
+      },
+      unprotect: (items) => fake().unprotect(items),
+    };
+    const s = await open(flaky);
+    await expect(s.set(lock, "a/x", "1")).rejects.toThrow(/backend down/);
+    fail = false;
+    await s.set(lock, "a/y", "2");
+    expect((await open()).get("a/y")).toBe("2");
+    expect(s.has("a/x")).toBe(false);
+  });
+
   it("never prints values", async () => {
     const s = await open();
     await s.set(fakeLock(h.paths.home), "db/x", SECRET);
