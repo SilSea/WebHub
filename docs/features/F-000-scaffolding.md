@@ -137,6 +137,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
+| 2026-11-07 | CR-001 | pack test ยอม `src/*.mts` → `dist/*.mjs(.map)` (ผู้ใช้อนุญาต; เหตุ: F-002 elevated entry) — [CR-001](../changes/CR-001-pack-mjs.md) |
 | 2026-11-07 | W3 E5 | review/security 3 รอบ, แก้ครบ, DoD ผ่าน (รอ merge PR + CI Node 22) |
 | 2026-11-07 | W3 E1–E4 | implement (`bb0fba1`), test-1 ผ่าน 22/22, review-1 + security-1 ไม่มี critical/major |
 | 2026-11-07 | W1 ③④⑤ | อนุมัติ spec, เข้า queue, ผู้ใช้สั่งทำต่อ (W3 เฉพาะ F-000) |

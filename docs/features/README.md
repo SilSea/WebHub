@@ -18,3 +18,7 @@
 Status: `todo` → `draft` → `planned` → `in-progress` → `testing` → `review` → `done`
 
 Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-request.md`](../templates/change-request.md))
+
+| CR | แก้ | Status |
+|---|---|---|
+| [CR-001](../changes/CR-001-pack-mjs.md) | F-000 pack test ยอม `.mts` → `.mjs` | `review` |
