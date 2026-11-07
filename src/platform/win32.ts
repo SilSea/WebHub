@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,7 +77,7 @@ const LISTEN_PS = [
 ].join("\n");
 
 let listenCache: { at: number; value: readonly PortOwner[] } | undefined;
-let listenInFlight: Promise<readonly PortOwner[]> | undefined;
+let listenInFlight: { at: number; promise: Promise<readonly PortOwner[]> } | undefined;
 
 async function queryListening(): Promise<readonly PortOwner[]> {
   const res = await runPs("listening ports", LISTEN_PS);
@@ -87,16 +87,26 @@ async function queryListening(): Promise<readonly PortOwner[]> {
   return value;
 }
 
+/**
+ * Cached 2 s. `fresh` skips the cache; concurrent callers share one query, but a `fresh`
+ * caller only joins a query that started at/after its own call (review-2 D11).
+ * Each query costs ~1 s (PowerShell + CIM): check many ports in parallel, or use findFree.
+ */
 async function listening(opts: { fresh?: boolean } = {}): Promise<PortOwner[]> {
+  const calledAt = Date.now();
   let value: readonly PortOwner[];
-  if (!opts.fresh && listenCache !== undefined && Date.now() - listenCache.at < LISTEN_CACHE_MS) {
+  if (!opts.fresh && listenCache !== undefined && calledAt - listenCache.at < LISTEN_CACHE_MS) {
     value = listenCache.value;
   } else {
-    // concurrent callers share one query
-    listenInFlight ??= queryListening().finally(() => {
-      listenInFlight = undefined;
-    });
-    value = await listenInFlight;
+    let q = listenInFlight;
+    if (q === undefined || (opts.fresh && q.at < calledAt)) {
+      const promise = queryListening().finally(() => {
+        if (listenInFlight?.promise === promise) listenInFlight = undefined;
+      });
+      q = { at: calledAt, promise };
+      listenInFlight = q;
+    }
+    value = await q.promise;
   }
   return value.map((o) => ({ ...o })); // callers cannot corrupt the cache
 }
@@ -245,23 +255,23 @@ async function processTable(): Promise<ProcRow[]> {
 }
 
 /**
- * `root` and its descendants, children before parents. A child counts only if it started
- * at/after its parent: a process whose ParentProcessId points at an earlier holder of a
- * reused PID is not ours (security-1 S5). ISO 'o' UTC strings compare chronologically.
+ * `root` first, then its descendants (parents before children, so a supervisor cannot
+ * respawn a child after its children were killed — review-2 D5). A child counts only if it
+ * started at/after its parent: a process whose ParentProcessId points at an earlier holder
+ * of a reused PID is not ours (security-1 S5). ISO 'o' UTC strings compare chronologically.
  */
 export function descendants(table: readonly ProcRow[], root: ProcRow): ProcRow[] {
-  const out: ProcRow[] = [];
+  const out: ProcRow[] = [root];
   const seen = new Set<number>([root.i]);
   const walk = (parent: ProcRow): void => {
     for (const r of table) {
       if (r.p !== parent.i || seen.has(r.i) || r.c === "" || r.c < parent.c) continue;
       seen.add(r.i);
-      walk(r);
       out.push(r);
+      walk(r);
     }
   };
   walk(root);
-  out.push(root);
   return out;
 }
 
@@ -283,19 +293,20 @@ async function killTree(pid: number, expectStartedAt: string): Promise<void> {
     ...tree.flatMap((r) => ["/PID", String(r.i)]),
   ]);
   const deadline = Date.now() + KILL_WAIT_MS;
-  for (let first = true; ; first = false) {
+  for (let poll = 0; ; poll++) {
     const now = await processTable();
     const alive = tree.filter((t) => now.some((r) => r.i === t.i && r.c === t.c));
     if (alive.length === 0) return;
     const rootAlive = alive.some((r) => r.i === pid);
-    // taskkill refused (e.g. access denied) and the root survived → fail now, not after 5 s
-    if ((first && res.code !== 0 && rootAlive) || Date.now() >= deadline) {
+    // taskkill reported an error (exit 128 also covers "some PID already gone") and the root
+    // is still there on the 2nd look (~1 s later) → refused (e.g. access denied): fail now
+    if ((poll >= 1 && res.code !== 0 && rootAlive) || Date.now() >= deadline) {
       throw new PlatformError("PROCESS_KILL_FAILED", `could not stop PID ${pid}`, {
+        // taskkill text is localized in the OEM codepage → report the exit code only (D14)
         details: [
           `still running: ${alive.map((r) => r.i).join(", ")}`,
-          res.stdout.trim().split(/\r?\n/)[0] ?? "",
-          res.stderr.trim().split(/\r?\n/)[0] ?? "",
-        ].filter((s) => s !== ""),
+          `taskkill exit ${res.code}`,
+        ],
       });
     }
     await sleep(100);
@@ -332,14 +343,26 @@ async function usage(pids: readonly number[]): Promise<Map<number, Usage>> {
 
 // ---------- elevate ----------
 
+const realPath = (p: string): string => {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return p; // missing → reported by the existence check
+  }
+};
+
 /**
- * Absolute paths of node and of the BUILT elevated entry (never looked up through PATH).
- * Always `<package>/dist/platform/elevated.js`, also when webhub runs from source: node cannot
- * run the .ts sources directly (review-1 C6).
+ * Absolute REAL paths (links resolved — security-2 T4) of node and of the BUILT,
+ * self-contained elevated entry. The same paths are checked and launched; nothing is looked
+ * up through PATH. Always `<package>/dist/platform/elevated.mjs`, also when webhub runs from
+ * source: node cannot run the .mts source directly (review-1 C6).
  */
-export function elevatedCommand(): { exe: string; script: string; root: string } {
+export function elevatedCommand(): { exe: string; script: string } {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-  return { exe: process.execPath, script: join(root, "dist", "platform", "elevated.js"), root };
+  return {
+    exe: realPath(process.execPath),
+    script: realPath(join(root, "dist", "platform", "elevated.mjs")),
+  };
 }
 
 /** Fixed script; exe, script path and token arrive as stdin fields. */
@@ -392,26 +415,36 @@ export function elevateOutcome(stdout: string, code: number): void {
   });
 }
 
+/**
+ * Everything that would let a non-administrator change what runs elevated (S1 / T1–T4):
+ * registry environment (incl. volatile keys) + this process's environment as a backstop
+ * in case it is inherited, and owner/ACL of node.exe, elevated.mjs, their folders and every
+ * ancestor folder.
+ */
+export async function elevationProblems(exe: string, script: string): Promise<string[]> {
+  return [
+    ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
+    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script)))),
+  ];
+}
+
 async function elevate(input: unknown): Promise<void> {
   const task = parseTask(input); // refuse before any UAC prompt
-  const { exe, script, root } = elevatedCommand();
+  const { exe, script } = elevatedCommand();
   if (!existsSync(exe) || !existsSync(script)) {
     throw new PlatformError("ELEVATION_FAILED", "webhub's elevated helper was not found", {
       details: [script],
       hint: "Reinstall webhub (or run `pnpm build` when working from source).",
     });
   }
-  const problems = [
-    ...nodeEnvProblems(await persistentEnvNames()),
-    ...(await pathTrustProblems(trustTargets(elevationFiles(exe, root)))),
-  ];
+  const problems = await elevationProblems(exe, script);
   if (problems.length > 0) {
     throw new PlatformError(
       "ELEVATION_UNSAFE",
       "refusing to ask for administrator rights: a non-administrator could change what would run",
       {
         details: problems.slice(0, 20),
-        hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* variables (except NODE_ENV) from the user/system environment.",
+        hint: "Install Node.js and webhub in a folder only administrators can change (e.g. C:\\Program Files) and remove NODE_* (except NODE_ENV), OPENSSL_*, SSL_CERT_* and UV_* variables from the user/system environment and from the shell that starts webhub.",
       },
     );
   }

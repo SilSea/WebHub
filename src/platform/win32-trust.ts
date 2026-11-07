@@ -1,16 +1,17 @@
 /**
- * Pre-elevation checks (security-1 S1). The elevated process runs node.exe + webhub's code
- * from disk. If a non-administrator can change any of that code, or set a NODE_* variable
- * that node reads at startup, then a program running as the user could get its own code run
- * as administrator the next time the user accepts a UAC prompt. In that case webhub refuses
- * to elevate (ELEVATION_UNSAFE) instead of asking.
+ * Pre-elevation checks (security-1 S1, security-2 T1–T5). The elevated process runs node.exe
+ * and webhub's self-contained `elevated.mjs` from disk. If a non-administrator can change
+ * either of them (or a folder above them), or has set an environment variable that node acts
+ * on at startup, then a program running as another user / with the user's rights could get
+ * its own code run as administrator the next time the user accepts a UAC prompt. In that case
+ * webhub refuses to elevate (ELEVATION_UNSAFE) instead of asking.
  *
- * Known limits (documented in spec §6): files inside a checked folder that carry their own
- * explicit ACL are not walked one by one; there is a short window between check and use.
+ * Paths are real paths (links resolved) and the SAME real paths are launched (T4).
+ * Known limits (spec §6): check→use window (TOCTOU); a program already running as the same
+ * user can show its own UAC prompt or tamper with this check — the real fix is the planned
+ * Program Files helper (CR).
  */
-import { realpathSync } from "node:fs";
-import { basename, dirname, join, parse } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, parse } from "node:path";
 import { z } from "zod";
 import { fields, jsonLine, PS_READ_FIELDS, runPs } from "./win32-shell.js";
 
@@ -25,8 +26,8 @@ export const TRUSTED_SIDS = [
 export type TrustMode = "F" | "A";
 
 /**
- * Everything the elevated node loads, plus every ancestor folder (renaming an ancestor would
- * swap the whole tree).
+ * The given paths (full check) plus every ancestor folder (renaming an ancestor would swap the
+ * whole tree).
  */
 export function trustTargets(files: readonly string[]): [TrustMode, string][] {
   const full = new Set<string>();
@@ -47,50 +48,42 @@ export function trustTargets(files: readonly string[]): [TrustMode, string][] {
   ];
 }
 
-/** Paths the elevated process depends on: node.exe, the package's dist/platform code, zod. */
-export function elevationFiles(exe: string, root: string): string[] {
-  const dist = join(root, "dist");
-  const plat = join(dist, "platform");
-  const out = [
-    exe,
-    dirname(exe),
-    root,
-    join(root, "package.json"),
-    dist,
-    plat,
-    join(plat, "elevated.js"),
-    join(plat, "tasks.js"),
-    join(plat, "types.js"),
-    join(root, "node_modules"),
-  ];
-  try {
-    // real location (pnpm links into node_modules/.pnpm); its ancestors are checked too
-    const entry = realpathSync(fileURLToPath(import.meta.resolve("zod")));
-    out.push(entry);
-    let d = dirname(entry);
-    while (dirname(d) !== d && basename(d) !== "zod") d = dirname(d);
-    out.push(d, join(d, "package.json"));
-  } catch {
-    // zod not resolvable → the elevated process will fail anyway; nothing extra to check
-  }
-  return out;
+/**
+ * Everything the elevated process loads from disk: node.exe, its folder (DLL search), the
+ * self-contained elevated.mjs and its folder. Both must already be real paths.
+ */
+export function elevationFiles(exe: string, script: string): string[] {
+  return [exe, dirname(exe), script, dirname(script)];
 }
 
-const NODE_ENV_ALLOWED = new Set(["NODE_ENV"]);
+/**
+ * Environment variables node (or its OpenSSL / libuv) acts on at startup, before any JS:
+ * NODE_OPTIONS (--import/--require), NODE_PATH, NODE_ICU_DATA, NODE_COMPILE_CACHE …,
+ * OPENSSL_CONF / OPENSSL_MODULES (provider DLL load — T1), SSL_CERT_*, UV_*.
+ * Denylist by prefix, not an allowlist: unrelated variables (JAVA_HOME, GOPATH …) are common
+ * on dev machines and do not affect node.exe (decision recorded in spec §3.3).
+ */
+const RISKY_ENV = /^(NODE_|OPENSSL_|SSL_CERT_|UV_)/i;
+const ENV_ALLOWED = new Set(["NODE_ENV"]);
 
-/** NODE_* variables that change how node starts (NODE_OPTIONS --import, NODE_PATH …). */
 export function nodeEnvProblems(names: readonly string[]): string[] {
-  return names
-    .filter((n) => /^NODE_/i.test(n) && !NODE_ENV_ALLOWED.has(n.toUpperCase()))
-    .map((n) => `environment variable ${n} is set (node reads it at startup)`);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const n of names) {
+    const key = n.toUpperCase();
+    if (!RISKY_ENV.test(n) || ENV_ALLOWED.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(`environment variable ${n} is set (node reads it at startup)`);
+  }
+  return out;
 }
 
 const TRUST_PS = [
   "$ErrorActionPreference = 'Stop'",
   PS_READ_FIELDS,
   `$trusted = @(${TRUSTED_SIDS.map((s) => `'${s}'`).join(",")})`,
-  // WriteData|AppendData|DeleteChild|Delete|WriteDac|WriteOwner|GenericAll|GenericWrite
-  "$full = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000",
+  // WriteData|AppendData|WriteEA|DeleteChild|WriteAttributes|Delete|WriteDac|WriteOwner|GenericAll|GenericWrite
+  "$full = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000",
   // DeleteChild|Delete|WriteDac|WriteOwner|GenericAll
   "$anc = 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000",
   "$out = @()",
@@ -130,16 +123,22 @@ export async function pathTrustProblems(
   return rows.map((r) => `${r.p}: ${r.r}`);
 }
 
+/**
+ * Every registry source CreateEnvironmentBlock merges into a new logon environment (T2):
+ * machine, user, and the user's volatile keys incl. per-session subkeys.
+ */
 const ENV_PS = [
   "$ErrorActionPreference = 'Stop'",
   "$n = @()",
-  "foreach ($k in @('HKCU:\\Environment', 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment')) {",
+  "$keys = @('HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'HKCU:\\Environment', 'HKCU:\\Volatile Environment')",
+  "if (Test-Path -LiteralPath 'HKCU:\\Volatile Environment') { $keys += @(Get-ChildItem -LiteralPath 'HKCU:\\Volatile Environment' | ForEach-Object { $_.PSPath }) }",
+  "foreach ($k in $keys) {",
   "  if (Test-Path -LiteralPath $k) { $n += @((Get-Item -LiteralPath $k).GetValueNames()) }",
   "}",
   "'JSON:' + (ConvertTo-Json -InputObject @($n) -Compress)",
 ].join("\n");
 
-/** Names of persistent user + machine environment variables (what an elevated process gets). */
+/** Names of persistent + volatile user/machine environment variables (what an elevated process gets). */
 export async function persistentEnvNames(): Promise<string[]> {
   const res = await runPs("environment", ENV_PS);
   return jsonLine(res.stdout, z.array(z.string()), "environment");

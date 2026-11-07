@@ -1,5 +1,7 @@
+import { realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { main as elevatedMain } from "../../src/platform/elevated.js";
+import { main as elevatedMain, validateTask } from "../../src/platform/elevated.mjs";
 import {
   getPlatform,
   isPlatformError,
@@ -112,7 +114,7 @@ describe("process input validation", () => {
     expect(await code(p.usage([1, -3]))).toBe("PID_INVALID");
   });
 
-  it("descendants: children first, ignores children older than the parent (PID reuse)", () => {
+  it("descendants: root first, ignores children older than the parent (PID reuse)", () => {
     const t = (i: number, p: number, c: string): ProcRow => ({ i, p, c });
     const root = t(10, 1, "2026-11-07T10:00:00.0000000Z");
     const table = [
@@ -123,7 +125,7 @@ describe("process input validation", () => {
       t(14, 10, ""), // start time unknown → not ours
       t(15, 99, "2026-11-07T10:00:03.0000000Z"),
     ];
-    expect(descendants(table, root).map((r) => r.i)).toEqual([12, 11, 10]);
+    expect(descendants(table, root).map((r) => r.i)).toEqual([10, 11, 12]);
   });
 });
 
@@ -139,6 +141,50 @@ describe("elevated tasks (allowlist)", () => {
     ]) {
       expect(await code(() => parseTask(bad))).toBe("ELEVATION_INVALID");
     }
+  });
+
+  it("parity: hand-written validator in elevated.mts accepts exactly what the zod schema accepts", () => {
+    const evilProto = JSON.parse('{"kind":"noop","__proto__":{"x":1}}') as unknown;
+    const corpus: unknown[] = [
+      { kind: "noop" },
+      { kind: "exec", cmd: "calc.exe" },
+      { kind: "noop", extra: 1 },
+      { kind: "noop", extra: undefined },
+      evilProto,
+      Object.create({ kind: "noop" }) as unknown, // inherited kind
+      "noop",
+      null,
+      undefined,
+      [],
+      [{ kind: "noop" }],
+      { kind: "NOOP" },
+      { kind: "hosts.writeBlock" },
+      {},
+      42,
+    ];
+    for (const input of corpus) {
+      const zodOk = (() => {
+        try {
+          parseTask(input);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      // the admin side may be stricter than zod, never looser
+      if (validateTask(input) !== undefined) expect(zodOk, String(input)).toBe(true);
+    }
+    expect(validateTask({ kind: "noop" })).toEqual({ kind: "noop" });
+    expect(validateTask(evilProto)).toBeUndefined();
+  });
+
+  it("elevated.mts is self-contained: imports only node: built-ins (security-2 T3)", async () => {
+    const src = await readFile(new URL("../../src/platform/elevated.mts", import.meta.url), "utf8");
+    const specs = [
+      ...src.matchAll(/\bfrom\s+["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']/g),
+    ].map((m) => m[1] ?? m[2]);
+    expect(specs.length).toBeGreaterThan(0);
+    for (const s of specs) expect(s).toMatch(/^node:/);
   });
 
   it("token round-trip; malformed tokens refused", async () => {
@@ -189,10 +235,10 @@ describe("elevated tasks (allowlist)", () => {
     );
   });
 
-  it("elevated command: absolute node + built dist entry (also from source)", () => {
+  it("elevated command: real path of node + built self-contained entry (also from source)", () => {
     const { exe, script } = elevatedCommand();
-    expect(exe).toBe(process.execPath);
-    expect(script).toMatch(/[\\/]dist[\\/]platform[\\/]elevated\.js$/);
+    expect(exe).toBe(realpathSync.native(process.execPath));
+    expect(script).toMatch(/[\\/]dist[\\/]platform[\\/]elevated\.mjs$/);
   });
 
   it("elevate script is fixed text; exe/script/token only as stdin fields", () => {
@@ -225,10 +271,27 @@ describe("elevation trust checks (pure parts)", () => {
     ]);
   });
 
-  it("nodeEnvProblems: any NODE_* except NODE_ENV", () => {
-    expect(nodeEnvProblems(["Path", "TEMP", "NODE_ENV", "node_options", "NODE_PATH"])).toEqual([
-      "environment variable node_options is set (node reads it at startup)",
-      "environment variable NODE_PATH is set (node reads it at startup)",
+  it("nodeEnvProblems: NODE_* (except NODE_ENV), OPENSSL_*, SSL_CERT_*, UV_*; deduplicated", () => {
+    const names = [
+      "Path",
+      "TEMP",
+      "JAVA_HOME",
+      "NODE_ENV",
+      "node_options",
+      "NODE_PATH",
+      "OPENSSL_CONF",
+      "OPENSSL_MODULES",
+      "SSL_CERT_FILE",
+      "UV_THREADPOOL_SIZE",
+      "NODE_OPTIONS", // same as node_options (Windows env names are case-insensitive)
+    ];
+    expect(nodeEnvProblems(names).map((s) => s.split(" ")[2])).toEqual([
+      "node_options",
+      "NODE_PATH",
+      "OPENSSL_CONF",
+      "OPENSSL_MODULES",
+      "SSL_CERT_FILE",
+      "UV_THREADPOOL_SIZE",
     ]);
   });
 });

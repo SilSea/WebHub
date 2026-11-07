@@ -45,8 +45,11 @@ afterEach(() => {
   }
 });
 
-/** Listener in ANOTHER process on `host`; resolves its port. */
-function foreignListener(host: string): Promise<number> {
+/**
+ * Listener in ANOTHER process on `host`; resolves its port, or undefined when the child could
+ * not listen (e.g. no IPv6 stack) — never hangs (review-2 D9).
+ */
+function foreignListener(host: string): Promise<number | undefined> {
   const child = spawn(
     process.execPath,
     [
@@ -56,9 +59,11 @@ function foreignListener(host: string): Promise<number> {
     { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, H: host } },
   );
   children.push(child);
-  return new Promise((resolve) =>
-    child.stdout?.once("data", (b: Buffer) => resolve(Number(b.toString().trim()))),
-  );
+  return new Promise((resolve) => {
+    child.stdout?.once("data", (b: Buffer) => resolve(Number(b.toString().trim())));
+    child.once("exit", () => resolve(undefined));
+    child.once("error", () => resolve(undefined));
+  });
 }
 
 describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () => {
@@ -90,18 +95,23 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     expect(await p.ports.canBind(port)).toBe(true);
   });
 
-  it.each(["::1", "0.0.0.0", "::"])(
+  it.for(["::1", "0.0.0.0", "::"])(
     "ports.canBind: false while another process listens on %s",
-    async (host) => {
+    async (host, ctx) => {
       const port = await foreignListener(host);
+      if (port === undefined) return ctx.skip(); // address family not available here
       expect(await p.ports.canBind(port)).toBe(false);
     },
   );
 
-  it("ports.findFree skips used ports (also foreign IPv6) and the avoid set", async () => {
+  it("ports.findFree skips used ports (also foreign IPv6) and the avoid set", async (ctx) => {
     const s = await listen();
     const used = portOf(s);
     const v6 = await foreignListener("::1");
+    if (v6 === undefined) {
+      await close(s);
+      return ctx.skip();
+    }
     try {
       const lo = Math.min(used, v6);
       const hi = Math.min(Math.max(used, v6) + 50, 65535);
@@ -113,11 +123,16 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     }
   });
 
-  it("ports.findFree inside an excluded range → skips it (if the machine has one)", async () => {
-    const r = (await p.ports.reserved()).find((x) => x.end < 65535);
-    if (r === undefined) return;
-    const free = await p.ports.findFree([r.start, Math.min(r.end + 200, 65535)]);
-    expect(free).toBeGreaterThan(r.end);
+  it("ports.findFree inside an excluded range → skips the whole run (if the machine has one)", async (ctx) => {
+    const ranges = [...(await p.ports.reserved())].sort((a, b) => a.start - b.start);
+    const first = ranges[0];
+    if (first === undefined) return ctx.skip();
+    // adjacent/overlapping ranges (Hyper-V/WSL reserve 100-port blocks) form one run (D3)
+    let runEnd = first.end;
+    for (const r of ranges) if (r.start <= runEnd + 1 && r.end > runEnd) runEnd = r.end;
+    if (runEnd + 300 > 65535) return ctx.skip();
+    const free = await p.ports.findFree([first.start, runEnd + 300]);
+    expect(free).toBeGreaterThan(runEnd);
   });
 
   it("process.info / usage of ourselves; unknown PID → undefined", async () => {
@@ -164,13 +179,13 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     await p.process.killTree(pid, startedAt); // already gone → fine
   });
 
-  it("trust check: system file trusted; a user-owned temp folder is not", async () => {
+  it("trust check: system file trusted; user temp folder not; missing file reported", async () => {
     const sys = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "notepad.exe");
     expect(await pathTrustProblems(trustTargets([sys]))).toEqual([]);
     const dir = mkdtempSync(join(tmpdir(), "webhub-trust-"));
     try {
-      const problems = await pathTrustProblems([["F", dir]]);
-      expect(problems.some((x) => x.startsWith(`${dir}: owner `))).toBe(true);
+      // owner is the user, or Administrators when the suite runs elevated → either way a problem (D8)
+      expect((await pathTrustProblems([["F", dir]])).length).toBeGreaterThan(0);
       expect(await pathTrustProblems([["F", join(dir, "missing.js")]])).toEqual([
         `${join(dir, "missing.js")}: missing`,
       ]);
@@ -179,17 +194,56 @@ describe.skipIf(!win)("Windows platform (real system)", { timeout: 60_000 }, () 
     }
   });
 
-  it("elevate refuses (ELEVATION_UNSAFE) when webhub's files are user-writable — no UAC shown", async () => {
-    const { exe, root } = elevatedCommand();
+  it("trust check: trusted owner but an ACE lets others write → 'writable by' (D7)", async (ctx) => {
+    const pub = join(process.env.SystemDrive ?? "C:", "\\Users\\Public");
+    const problems = await pathTrustProblems([["F", pub]]);
+    if (problems.some((x) => x.endsWith("unreadable"))) return ctx.skip();
+    expect(problems.some((x) => x.startsWith(`${pub}: writable by S-1-`))).toBe(true);
+    expect(problems.some((x) => x.includes(": owner "))).toBe(false);
+  });
+
+  it("environment sources include the volatile keys (T2)", async () => {
+    const names = (await persistentEnvNames()).map((n) => n.toUpperCase());
+    // USERDOMAIN / SESSIONNAME / LOGONSERVER exist only in HKCU\Volatile Environment (+ session subkey)
+    expect(
+      names.some((n) => ["USERDOMAIN", "SESSIONNAME", "LOGONSERVER", "USERNAME"].includes(n)),
+    ).toBe(true);
+  });
+
+  it("elevate refuses (ELEVATION_UNSAFE) when webhub's files are user-writable — no UAC shown", async (ctx) => {
+    const { exe, script } = elevatedCommand();
     const problems = [
-      ...nodeEnvProblems(await persistentEnvNames()),
-      ...(await pathTrustProblems(trustTargets(elevationFiles(exe, root)))),
+      ...nodeEnvProblems([...(await persistentEnvNames()), ...Object.keys(process.env)]),
+      ...(await pathTrustProblems(trustTargets(elevationFiles(exe, script)))),
     ];
     // a dev checkout is user-owned; if this machine is fully trusted, skip (would show UAC)
-    if (problems.length === 0) return;
+    if (problems.length === 0) return ctx.skip();
     await expect(p.elevate({ kind: "noop" })).rejects.toSatisfy(
       (e) => isPlatformError(e, "ELEVATION_UNSAFE") && e.details.length > 0,
     );
+  });
+
+  it("built elevated.mjs runs standalone and loads nothing but node built-ins", async () => {
+    const { script } = elevatedCommand();
+    const { encodeTask } = await import("../../src/platform/tasks.js");
+    // trace every module node loads for the real entry (no UAC: run as the current user)
+    const hook =
+      "data:text/javascript,import{registerHooks}from'node:module';registerHooks({resolve(s,c,n){const r=n(s,c);if(!r.url.startsWith('node:'))process.stderr.write('LOAD '+r.url+'\\n');return r}})";
+    const child = spawn(
+      process.execPath,
+      ["--import", hook, script, encodeTask({ kind: "noop" })],
+      {
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    let err = "";
+    child.stderr.on("data", (b: Buffer) => {
+      err += b.toString();
+    });
+    const exit = await new Promise<number | null>((r) => child.once("exit", r));
+    expect(exit).toBe(0);
+    const loaded = err.split(/\r?\n/).filter((l) => l.startsWith("LOAD "));
+    expect(loaded.every((l) => l.endsWith("/elevated.mjs"))).toBe(true);
   });
 
   it("notify never throws (special characters stay data)", async () => {
