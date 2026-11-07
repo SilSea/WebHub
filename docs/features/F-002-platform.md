@@ -81,7 +81,10 @@ getPlatform(): Platform   // เลือกตาม process.platform; ไม�
 - ล้มเหลว (Focus Assist, policy, Windows Server ไม่มี WinRT) → ไม่ throw, คืน `false` + log; การแจ้งเตือนไม่ใช่ทางเดียวที่ข้อมูลไปถึงผู้ใช้ (dashboard มีเสมอ)
 
 ### 3.5 Errors เพิ่ม
-`PLATFORM_UNSUPPORTED`, `PORT_EXHAUSTED`, `PROCESS_MISMATCH`, `ELEVATION_DENIED`, `ELEVATION_FAILED`
+`PLATFORM_UNSUPPORTED`, `PLATFORM_TOOL` (output ของ CIM/netsh ผิดรูป / tool ล้ม), `PORT_INVALID` (port/ช่วงไม่ถูก), `PORT_EXHAUSTED`, `PROCESS_MISMATCH`, `PROCESS_KILL_FAILED` (taskkill แล้วยังไม่ตายใน 5 วิ), `ELEVATION_INVALID` (task ไม่อยู่ใน allowlist), `ELEVATION_DENIED`, `ELEVATION_FAILED`
+
+- ใช้ class `PlatformError` (`src/platform/types.ts`) แยกจาก `WebhubError` ของ F-001 — เพราะเพิ่ม code ใน `src/errors.ts` = แก้ feature ที่ done (R1). รวมเป็นตัวเดียวทีหลังผ่าน CR
+- รายละเอียด implement ที่ต่างจากร่าง: `notify()` คืน `Promise<boolean>` (ไม่ throw); `elevate()` รับ `unknown` แล้ว validate เอง; exe/script/token ส่งเข้า PowerShell ทาง stdin (script คงที่) → `Start-Process -Verb RunAs -Wait`; exit code ของ elevated.js: 0 ok / 2 task ไม่ถูก / 1 ล้ม
 
 ## 4. ผลดี / ผลเสีย (R3)
 | | รายละเอียด |

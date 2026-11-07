@@ -1115,6 +1115,13 @@ interface Platform {
 | kill tree | `taskkill /T /F` | process group `kill -PGID` | process group |
 | autostart | Task Scheduler (user) | launchd agent | `systemd --user` |
 | notify | toast | `osascript` | `notify-send` |
+
+Windows implement แล้ว (F-002, `src/platform/`):
+- ports: CIM `MSFT_NetTCPConnection State=2` (ไม่ขึ้นกับภาษา Windows, cache 2 วิ); reserved จาก `netsh` (เอาเฉพาะตัวเลข); `findFree(range, avoid)` = ตัด listening/reserved/avoid แล้วลอง `canBind` ทีละตัว
+- process: `killTree(pid, expectStartedAt)` ต้องส่ง start time ที่จำไว้ตอน spawn → ไม่ตรง = ไม่ฆ่า (`PROCESS_MISMATCH`, กัน PID reuse)
+- elevate: **allowlist ของ task kind** (zod strict, ไม่มี kind "รันคำสั่ง") → `Start-Process -Verb RunAs` เรียก `node elevated.js <base64url task>` ด้วย path เต็ม; validate ซ้ำใน process admin; ตอนนี้มีแค่ `noop` (MVP-2 เพิ่ม `hosts.writeBlock`)
+- notify: toast ผ่าน PowerShell WinRT (AUMID ของ PowerShell), ข้อความทาง stdin + XML escape, ล้มเหลวคืน `false` ไม่ throw
+- error ใช้ `PlatformError` แยกจาก `WebhubError` (ไม่แก้ F-001, R1)
 | nginx → native | `host.docker.internal` (Docker Desktop, bind 127.0.0.1 ได้ — spike ✅) | น่าจะเหมือน Windows — **ต้อง spike** | Docker native: container **เข้าไม่ถึง** 127.0.0.1 ของ host → nginx `network_mode: host` (ต้อง spike) |
 | port 80 | ได้ | Docker Desktop ได้ | rootless Docker/Podman bind < 1024 ไม่ได้ → fallback `8080` |
 
