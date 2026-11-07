@@ -1,156 +1,196 @@
-# Workflow — การสร้าง / แก้ไข function
+# Workflow — Planning / Plan execution / Manual
 
-ใช้กับทุกงานใน webhub (ทั้งคนและ AI). อ้างอิง design หลัก: [`DESIGN.md`](../DESIGN.md), แผน: [`PLAN.md`](PLAN.md)
+Applies to all work on webhub (humans and AI). Main design: [`DESIGN.md`](../DESIGN.md). Plan: [`PLAN.md`](PLAN.md).
 
----
-
-## กฎ (บังคับ)
-
-| # | กฎ | ความหมายในทางปฏิบัติ |
+| Workflow | Used for | Ends at |
 |---|---|---|
-| R1 | **ห้ามแก้ feature โดยไม่ได้รับอนุญาต** | feature ที่ status `done` ใน [`features/README.md`](features/README.md) = locked. จะแตะพฤติกรรม/API/config/schema ของมัน → ต้องมี Change Request (CR) ที่เจ้าของอนุมัติก่อน. แก้บั๊คที่ไม่เปลี่ยน spec ก็ต้องแจ้งใน CR แบบสั้น |
-| R2 | **ห้ามเขียนโค้ดก่อนออกแบบ** | ต้องมี Feature Spec / CR ที่ status `approved` ก่อนเขียนโค้ดบรรทัดแรก. spec ต้องบอกว่าระบบเดิม (DESIGN.md) รองรับยังไง หรือต้องปรับ design ส่วนไหน |
-| R3 | **วิเคราะห์ผลดี / ผลเสียทุกครั้ง** | ทุก spec / CR มีหัวข้อ "ผลดี / ผลเสีย / ทางเลือกที่ไม่เลือก" + ผลกระทบต่อ feature เดิม, Zero-touch, security, performance |
-| R4 | **ต้องอัปเดตเอกสารทุกครั้ง** | ทุกการเปลี่ยน (design, โค้ด, config, bug fix) → อัปเดต DESIGN.md / spec / CR / PLAN.md / features/README.md ใน commit เดียวกันหรือก่อนหน้า. เอกสารไม่ตรงโค้ด = งานยังไม่เสร็จ |
-| R5 | **Report แยกไฟล์** | ผลทดสอบ, code review, security review, regression → ไฟล์แยกใน `docs/reports/` (ไม่ฝังใน spec) — spec แค่ลิงก์ไป |
-| R6 | **Security สูงสุด** | secure by default (bind 127.0.0.1, deny ก่อน allow, least privilege, ไม่มี secret ใน log/repo/export); ทุก spec มี threat model; ทุก function ผ่าน security review แยก; security finding ระดับใดก็ตามที่ exploit ได้ = **critical** (block merge) |
-| R0 | **Zero-touch** (จาก DESIGN §0) | ไม่แก้ไฟล์ใน project ของผู้ใช้. ทุก gate ต้องเช็คข้อนี้ |
+| **W1** Create a function | New function | Added to plan → ask "proceed now?" |
+| **W2** Change a function | Change / bugfix / refactor of an existing feature | Added to plan → ask "proceed now?" |
+| **W3** Execute the plan | Implementing planned work | Continues item by item until the plan is complete or the user says stop |
+| **W4** User manual | End of each MVP / any user-visible change | HTML manual that passes the coverage check |
 
 ---
 
-## 1. สร้าง function ใหม่
+## Rules (mandatory)
+
+| # | Rule | In practice |
+|---|---|---|
+| R0 | **Zero-touch** (DESIGN §0) | Never modify files inside a user's project. Every gate checks this. |
+| R1 | **No feature changes without permission** | A feature with status `done` in [`features/README.md`](features/README.md) is locked. Changing its behavior / API / config / schema requires a Change Request (CR) the user has approved (W2). A bugfix that does not change the spec still needs a short CR. |
+| R2 | **No code before design** | Code may be written only for items with status `planned` (spec/CR approved and in the plan). The spec must state how the existing system (DESIGN.md) supports it, or which part of the design changes. |
+| R3 | **Always analyze pros / cons** | Every spec / CR has "Pros / Cons / Alternatives not chosen" plus impact on existing features, Zero-touch, security, performance. |
+| R4 | **Always update documentation** | Every change (design, code, config, bugfix) updates DESIGN.md / spec / CR / PLAN.md / features/README.md in the same or an earlier commit. Docs that do not match the code = work not finished. |
+| R5 | **Separate report files** | Test, code review, security review, regression and manual-coverage results are separate files under `docs/reports/` (not embedded in the spec); the spec only links to them. |
+| R6 | **Maximum security** | Secure by default (bind 127.0.0.1, deny before allow, least privilege, no secrets in logs/repo/exports); every spec has a threat model; every item gets a separate security review; any exploitable security finding = **critical** (blocks merge). |
+
+Item status: `todo` → `draft` (being designed) → **`planned`** (spec/CR approved + in the plan queue) → `in-progress` → `testing` → `review` → `done` (locked)
+
+---
+
+## W1. Create a new function (planning)
 
 ```
- ①ออกแบบ → ②ถามความเห็น → ③เขียน/แก้เอกสาร → ④implement (ไม่กระทบของเดิม)
-   → ⑤ทดสอบ → ⑥code-review → ⑦แก้ bug critical/major จนเป็น 0 → done (locked)
-              ▲                          │
-              └──── วนกลับ ⑤ ทุกครั้งที่แก้ ─┘
+ ①Design → ②Ask for feedback → ③Write/update docs → ④Add to plan → ⑤Ask "proceed now?"
+                                                                    ├─ yes → W3 for this item only (then stop)
+                                                                    └─ no  → end (item waits in plan as `planned`)
 ```
 
-| ขั้น | ทำอะไร | Output | Gate (ผ่านถึงไปต่อ) |
+| Step | What | Output | Gate |
 |---|---|---|---|
-| ① ออกแบบ | อ่าน DESIGN.md ส่วนที่เกี่ยว, เขียน Feature Spec จาก [`templates/feature-spec.md`](templates/feature-spec.md): ขอบเขต, interface, data/config, flow, error, ผลดี/ผลเสีย, ทางเลือก, impact ต่อ feature เดิม, **threat model**, test plan | `docs/features/F-xxx-<name>.md` status `draft` | ครบทุกหัวข้อ, ไม่มี "TBD" ในส่วน interface / threat model |
-| ② ถามความเห็น | สรุปประเด็นที่ต้องตัดสินใจเป็นคำถาม (ภาษาไทย) + ทางเลือก + ข้อแนะนำ | คำตอบผู้ใช้ | ผู้ใช้ตอบครบทุกข้อ |
-| ③ เอกสาร | ใส่คำตอบใน spec, อัปเดต DESIGN.md ถ้า design เปลี่ยน (+ แถวใน §17 Review log), อัปเดต PLAN.md | spec status `approved` | ผู้ใช้อนุมัติ spec |
-| ④ Implement | เขียนโค้ดตาม spec เท่านั้น. **ไม่กระทบ feature เดิม**: ไม่เปลี่ยน signature/behavior ที่มีอยู่, ของใหม่เพิ่มแบบ additive (ไฟล์ใหม่, option ใหม่ default ปิด, schema migration แบบเข้ากันได้) | branch `feat/F-xxx-<name>` | build ผ่าน, ไม่มีไฟล์นอกขอบเขต spec ถูกแก้ |
-| ⑤ ทดสอบ | unit + integration ตาม test plan + **regression ทั้งชุด** ของ feature ที่ done แล้ว + fixtures (DESIGN §21.5) + **security tests** ตาม threat model | `reports/F-xxx/test-<n>.md` | เทสใหม่ผ่าน 100%, regression ผ่าน 100% |
-| ⑥ Code review | (a) code review diff ทั้งหมด (correctness, Zero-touch, กระทบ feature เดิม, ตรง spec) (b) **security review แยก** ตาม [checklist](#6-security-checklist-r6) + `npm audit` / dependency check. จัดระดับ: **critical / major / minor / nit** | `reports/F-xxx/review-<n>.md`, `reports/F-xxx/security-<n>.md` | review ครบทุกไฟล์ใน diff + checklist ครบทุกข้อ |
-| ⑦ แก้ bug | แก้ critical + major ทั้งหมด → กลับ ⑤ → ⑥ ใหม่ (report รอบใหม่ `-<n+1>`) จนไม่เหลือ. minor/nit → แก้หรือบันทึกเป็น backlog (ผู้ใช้เลือก) — **security finding ไม่มี minor ที่ปล่อยผ่าน** ต้องแก้หรือผู้ใช้ยอมรับเป็นลายลักษณ์อักษรใน report | spec status `done`, merge เข้า `develop`, อัปเดตเอกสาร (R4) | critical = 0, major = 0, security open = 0, regression ผ่าน |
+| ① Design | Read the relevant DESIGN.md sections; write a Feature Spec from [`templates/feature-spec.md`](templates/feature-spec.md): scope, interface, data/config, flow, errors, pros/cons, alternatives, impact on existing features, **threat model**, test plan | `docs/features/F-xxx-<name>.md`, status `draft` | All sections filled; no "TBD" in interface / threat model |
+| ② Ask for feedback | Turn open decisions into questions (in Thai) with options and a recommendation — one batch | User answers | Every question answered |
+| ③ Docs | Put answers into the spec; update DESIGN.md if the design changed (+ a row in §17 Review log) | Final spec | User approves the spec |
+| ④ Add to plan | Add the item to the **Plan queue** in [`PLAN.md`](PLAN.md) (order, dependencies, phase); update [`features/README.md`](features/README.md) | Status `planned` | Order respects dependencies |
+| ⑤ Ask to proceed | "Proceed with F-xxx now?" | User answer | — |
 
-ระดับ bug:
-- **critical** — ข้อมูลหาย/เสีย, ละเมิด Zero-touch, ช่องโหว่ security, crash ของ daemon, feature เดิมพัง
-- **major** — ฟังก์ชันหลักตาม spec ทำงานผิด, ไม่มี rollback ตามที่ spec สัญญา, error ที่ผู้ใช้แก้เองไม่ได้
-- **minor** — edge case, ข้อความผิด, UX ไม่ดี แต่มีทางเลี่ยง
+- **Yes** → run W3 for this item only (E1–E5), then stop (does not continue with other plan items — start W3 for that).
+- **No** → end. The item stays `planned` until W3 runs.
+
+---
+
+## W2. Change an existing function (planning)
+
+Same steps as W1 (ends with adding to plan + asking to proceed), but starts with a **Change Request** and adds:
+
+| Step | In addition to W1 |
+|---|---|
+| ① Design | Write a CR from [`templates/change-request.md`](templates/change-request.md): current → new → why; **impact matrix** (which features / config / data are affected); migration + rollback plan; **files allowed to change** |
+| ② Ask for feedback | Explicitly ask **permission to change the feature** (R1). Not granted = CR `rejected`, end. |
+| ④ Add to plan | CR enters the plan queue as `planned` |
+
+CR types: `change` (changes the spec), `bugfix` (no spec change — short CR: current / cause / fix / test), `refactor` (no behavior change — regression suite is the proof). All types require permission.
+
+---
+
+## W3. Execute the plan
+
+```
+ ┌─► E1 Read plan → E2 Implement → E3 Test → E4 Code review + security → E5 Fix bugs ─┐
+ │                                 ▲                                       │         │
+ │                                 └──────── back to E3 after every fix ───┘         │
+ └──────── next item in plan (until complete or user says stop) ◄── done + docs ─────┘
+```
+
+| Step | What | Output | Gate |
+|---|---|---|---|
+| E1 Read plan | Pick the first `planned` item in the Plan queue whose dependencies are all `done`; read its spec/CR and referenced DESIGN sections; verify the spec still matches the current system; set status `in-progress` | Branch `feat/F-xxx-<name>` / `fix/CR-xxx-<name>` | Spec/CR approved (R2); dependencies done; spec still valid |
+| E2 Implement | Write code strictly per spec/CR. **Do not affect existing features**: no changes to existing signatures/behavior; new things are additive (new files, new options default off, backward-compatible schema migrations); a CR touches only files in its scope | Code + tests | Build passes; no files outside scope changed |
+| E3 Test | Unit + integration per test plan + **full regression** of all `done` items + fixtures (DESIGN §21.5) + **security tests** from the threat model. For CRs: tests proving unintended old behavior is unchanged | `reports/<id>/test-<n>.md` | New tests 100% pass; regression 100% pass |
+| E4 Review | (a) code review of the full diff (correctness, Zero-touch, impact on existing features, matches spec, docs match code) (b) **separate security review** using the [checklist](#8-security-checklist-r6) + `npm audit`. Reviewer is not the author. Severity: **critical / major / minor / nit** | `reports/<id>/review-<n>.md`, `reports/<id>/security-<n>.md` | Every file in the diff reviewed; every checklist item checked |
+| E5 Fix bugs | Fix all critical + major → back to E3 → E4 (new report round `-<n+1>`) until none remain. Minor/nit → fix or log to backlog (user decides — asked once at the end of the item). Security findings must be fixed or explicitly accepted by the user in the report | Status `done`, merged into `develop`, docs updated (R4) | Definition of Done (§6) met |
+
+After E5 passes → short report (what was done, reports, commit) → **continue with the next plan item without asking**.
+
+**Stop when:**
+- The user says stop (finish the current item up to a safe point: commit what has passed its gate; unfinished work keeps its status and is noted in the spec Log).
+- No `planned` items remain (the next item is still `todo`/`draft` → must go through W1/W2 first, R2).
+- E3–E5 has looped more than 3 times and critical/major findings remain → stop and ask the user.
+- Work turns out to require touching a `done` feature outside scope, or the spec is wrong/insufficient → stop; propose a CR (W2) or a spec fix (W1 ①–③).
+- A manual item `M-x` in the plan → run W4 instead of E2–E5.
+
+Bug severity:
+- **critical** — data loss/corruption, Zero-touch violation, security vulnerability, daemon crash, existing feature broken
+- **major** — main function behaves against spec, promised rollback missing, error the user cannot resolve
+- **minor** — edge case, wrong message, poor UX with a workaround
 - **nit** — style, naming
 
 ---
 
-## 2. แก้ไข function ที่มีอยู่
-
-ใช้ขั้นเดียวกับข้อ 1 แต่เริ่มด้วย **Change Request** และมีเพิ่ม:
-
-| ขั้น | เพิ่มจากข้อ 1 |
-|---|---|
-| ① ออกแบบ | เขียน CR จาก [`templates/change-request.md`](templates/change-request.md): ของเดิมทำอะไร → จะเปลี่ยนเป็นอะไร → ทำไม; **impact matrix**: feature ไหน / config ไหน / ข้อมูลไหนโดนบ้าง; แผน migration + rollback |
-| ② ถามความเห็น | ต้องขอ **อนุญาตแก้ feature** อย่างชัดเจน (R1) — ไม่อนุญาต = หยุด |
-| ④ Implement | แก้เฉพาะที่ CR ระบุ; ส่วนที่ไม่ได้ระบุห้ามแตะ; ถ้าระหว่างทำพบว่าต้องแตะเพิ่ม → หยุด กลับ ① แก้ CR + ขออนุญาตใหม่ |
-| ⑤ ทดสอบ | เพิ่มเทสที่พิสูจน์ว่าพฤติกรรมเก่าที่ "ไม่ได้ตั้งใจเปลี่ยน" ยังเหมือนเดิม |
-
-Bug fix ที่ไม่เปลี่ยน spec → CR แบบย่อ (ส่วน "ของเดิม / สาเหตุ / แก้ยังไง / เทส"), ยังต้องขออนุญาต
-
----
-
-## 2.5 คู่มือการใช้งาน (User manual)
+## W4. User manual
 
 ```
- ①วิเคราะห์ระบบ → ②จัดทำคู่มือ HTML (เปิดได้ทันที) → ③ตรวจความครบถ้วนการใช้งาน → (ขาด → กลับ ①/②)
+ ①Analyze the system → ②Write HTML manual (opens directly) → ③Check usage coverage → (gaps → back to ①/②)
 ```
 
-| ขั้น | ทำอะไร | Output | Gate |
+| Step | What | Output | Gate |
 |---|---|---|---|
-| ① วิเคราะห์ระบบ | อ่านโค้ดจริง + spec ที่ `done` + CLI `--help` + หน้า dashboard → สร้าง **inventory**: ทุกคำสั่ง CLI, ทุกหน้า/ปุ่ม dashboard, ทุก config key, ทุก error/ป้ายเตือนที่ผู้ใช้เห็น, flow หลัก (ติดตั้ง → setup → scan → approve → start → เปิดเว็บ → DB …), ข้อจำกัด, troubleshooting | `docs/manual/_inventory.md` | inventory มาจากของจริง (ไม่ใช่จาก design ที่ยังไม่ทำ) |
-| ② คู่มือ HTML | `docs/manual/index.html` + หน้าแยกต่อหัวข้อ; **เปิดจากไฟล์ได้ทันที** (double-click, `file://`) ไม่ต้องมี server; ไม่โหลดอะไรจากภายนอก (CSS/JS/รูป inline หรือไฟล์ข้างๆ — R6); ภาษาไทยเป็นหลัก; มีสารบัญ + ค้นหา + ตัวอย่างคำสั่ง copy ได้ + screenshot | `docs/manual/*.html` | เปิดใน Chrome/Edge/Firefox ได้, ลิงก์ภายในไม่เสีย |
-| ③ ตรวจความครบถ้วน | เทียบ inventory ↔ คู่มือ ทีละรายการ (coverage table จาก [`templates/manual-coverage.md`](templates/manual-coverage.md)); ทำตามคู่มือจริงบนเครื่องสะอาด (fixture project) ทีละ flow; ตรวจว่าตรงกับพฤติกรรมจริง | `reports/manual/coverage-<n>.md` | coverage 100%, ทุก flow ทำตามได้จริง, ไม่มีขั้นตอนที่ผิดจากของจริง |
+| ① Analyze | Read the actual code + `done` specs + CLI `--help` + dashboard pages → build an **inventory**: every CLI command, every dashboard page/button, every config key, every user-visible error/warning badge, main flows (install → setup → scan → approve → start → open site → DB …), limitations, troubleshooting | `docs/manual/_inventory.md` | Inventory comes from the real system, not from unimplemented design |
+| ② HTML manual | `docs/manual/index.html` + one page per topic; **opens straight from disk** (double-click, `file://`), no server; loads nothing external (CSS/JS/images inline or local — R6); Thai first; table of contents + search + copyable command examples + screenshots | `docs/manual/*.html` | Opens in Chrome/Edge/Firefox; no broken internal links |
+| ③ Coverage check | Compare inventory ↔ manual item by item (coverage table from [`templates/manual-coverage.md`](templates/manual-coverage.md)); follow the manual for real on a clean machine (fixture projects), flow by flow; confirm it matches actual behavior | `reports/manual/coverage-<n>.md` | 100% coverage; every flow works as written; no step differs from reality |
 
-- รันเมื่อ: จบแต่ละ MVP (PLAN.md) และทุกครั้งที่ CR เปลี่ยนสิ่งที่ผู้ใช้เห็น (R4)
-- คู่มือห้ามมี secret/token/path ส่วนตัวจริง (ใช้ตัวอย่าง)
-
----
-
-## 3. สิ่งที่ AI (Claude) ต้องทำในแต่ละขั้น
-
-- ขั้น ② และการขออนุญาต R1 → ถามผู้ใช้เสมอ **ไม่ตัดสินใจแทน**, ถามเป็นภาษาไทย
-- ห้ามเขียนโค้ดในขั้น ①–③ (prototype/spike ทดลองได้เฉพาะใน scratchpad และต้องบอกผู้ใช้ — ไม่เข้า repo)
-- ขั้น ⑥ ใช้ reviewer ที่ไม่เห็นเหตุผลของผู้เขียน (agent ใหม่ / `/code-review`) แล้ว **ยืนยัน finding กับโค้ดจริง** ก่อนแก้
-- commit / push เฉพาะเมื่อผ่าน gate ของขั้นนั้น; ข้อความ commit อ้าง `F-xxx` / `CR-xxx`
+- Runs for `M-x` plan items (after each MVP) and whenever a CR changes something user-visible (R4).
+- The manual must not contain real secrets/tokens/personal paths (use examples).
 
 ---
 
-## 4. Definition of Done
+## 5. AI (Claude) obligations
 
-- [ ] spec/CR status `done`, report ครบใน `docs/reports/F-xxx/` (test, review, security — รอบสุดท้ายผ่าน)
-- [ ] critical = 0, major = 0, security open = 0
-- [ ] regression ทั้งชุดผ่าน
-- [ ] ไม่มีไฟล์ใน project ของผู้ใช้ถูกแก้ (fixture test ตรวจ hash ก่อน/หลัง)
-- [ ] DESIGN.md / PLAN.md / features/README.md อัปเดตแล้ว
-- [ ] merge เข้า `develop`
+- W1/W2 steps ② and ⑤, and every R1 permission → always ask the user, **never decide for them**; ask in Thai.
+- No repo code during W1/W2 (prototypes/spikes only in the scratchpad, and tell the user — never committed).
+- W3: do not ask mid-item except for the "Stop when" conditions; give short progress updates.
+- E4 uses a reviewer that has not seen the author's reasoning (fresh agent / `/code-review`), then **verify each finding against the real code** before fixing.
+- Commit / push only after a step's gate passes; commit messages reference `F-xxx` / `CR-xxx` / `M-x`.
 
 ---
 
-## 5. Reports (R5)
+## 6. Definition of Done (per W3 item)
+
+- [ ] Spec/CR status `done`; reports complete in `docs/reports/<id>/` (test, review, security — final round passing)
+- [ ] critical = 0, major = 0, open security = 0
+- [ ] Full regression passes
+- [ ] No file in any user project changed (fixture test compares hashes before/after)
+- [ ] DESIGN.md / PLAN.md / features/README.md / reports/README.md updated
+- [ ] Merged into `develop`
+
+---
+
+## 7. Reports (R5)
 
 ```
 docs/reports/
-├── README.md                 # index: ทุก report + ผลล่าสุดต่อ feature
+├── README.md                 # index: every report + latest result per item
 ├── F-xxx/
 │   ├── test-1.md             # template: templates/test-report.md
 │   ├── review-1.md           # template: templates/review-report.md
 │   ├── security-1.md         # template: templates/security-report.md
-│   └── test-2.md …           # รอบถัดไปหลังแก้ (ไม่เขียนทับรอบเก่า)
+│   └── test-2.md …           # next round after fixes (never overwrite earlier rounds)
 ├── CR-xxx/ …
-├── design/                   # review ของ DESIGN.md แต่ละ version
-└── regression/<date>.md      # ผล regression ทั้งชุดก่อน merge
+├── manual/coverage-<n>.md    # template: templates/manual-coverage.md
+├── design/                   # DESIGN.md reviews per version
+└── regression/<date>.md      # full regression result before merge
 ```
 
-- report เขียนครั้งเดียว ไม่แก้ย้อนหลัง (append-only) → ตรวจย้อนได้ว่าแต่ละรอบเจออะไร
-- ห้ามมี secret / token / password / connection string จริงใน report (mask เป็น `***`)
+- Reports are written once and never edited afterwards (append-only), so every round stays traceable.
+- No real secrets / tokens / passwords / connection strings in reports (mask as `***`).
 
 ---
 
-## 6. Security checklist (R6)
+## 8. Security checklist (R6)
 
-ใช้ทุก function ในขั้น ① (threat model) และ ⑥ (security review)
+Used for every item in W1/W2 ① (threat model) and W3 E4 (security review).
 
-| หมวด | ต้องผ่าน |
+| Area | Must pass |
 |---|---|
-| Network | bind `127.0.0.1` เป็น default ทุก port; เปิด LAN ต้องผู้ใช้สั่ง + password; ไม่มี port publish `0.0.0.0` โดยไม่ตั้งใจ |
-| AuthN/AuthZ | ทุก endpoint ผ่าน token/session (ยกเว้น `/_wake`, `/_auth` ที่จำกัด Host); Host allowlist (DNS rebinding); Origin check (CSRF); cookie `HttpOnly; SameSite=Strict` host-only; master token ไม่ออกนอก daemon |
-| Input | validate ทุก input ด้วย schema; ห้ามต่อ string เข้า shell (ใช้ `spawn` แบบ args array); path ต้อง resolve แล้วอยู่ใน root ที่อนุญาต (กัน path traversal); SQL ใช้ parameter |
-| Secret | อยู่ใน `data/secrets.json` (สิทธิ์ไฟล์เฉพาะ user); ไม่อยู่ใน log, error message, report, export (ยกเว้น `--with-secrets`), URL query; password สุ่มด้วย CSPRNG |
-| Privilege | ไม่รันเป็น admin; ยกสิทธิ์เฉพาะงานที่จำเป็น (hosts file) ผ่าน Platform `elevate()` ทีละครั้ง + แสดงสิ่งที่จะทำ |
-| Code จาก project | Run approval ก่อนรัน command/compose/image ใหม่ (DESIGN §21.6); script ใน API Studio รันใน isolated-vm |
-| Outbound | API Studio จำกัดปลายทาง (SSRF); โหลด runtime/image ตรวจ checksum / digest |
-| Docker | container ของ webhub ไม่ privileged, ไม่ mount docker socket (ยกเว้นจำเป็นและระบุใน spec), mount project แบบ `:ro`; label `webhub.managed=true` |
-| Dependency | lockfile ของ webhub เอง, `npm audit` ไม่มี high/critical, pin version image |
-| Data | คำสั่งอันตรายต้องยืนยัน + backup ก่อน; ไม่ลบ volume/ข้อมูลของ project อัตโนมัติ |
-| Zero-touch | test ตรวจ hash ไฟล์ใน fixture project ก่อน/หลัง = เท่ากัน |
+| Network | Every port binds `127.0.0.1` by default; LAN exposure only on explicit user action + password; no unintended `0.0.0.0` publish |
+| AuthN/AuthZ | Every endpoint requires token/session (except `/_wake`, `/_auth`, `/_webhub/login`, restricted by Host); Host allowlist (DNS rebinding); Origin check (CSRF); cookies `HttpOnly; SameSite=Strict`, host-only; master token never leaves the daemon |
+| Input | Validate all input with a schema; never build shell strings (`spawn` with an args array); paths must resolve inside an allowed root (path traversal); SQL uses parameters |
+| Secrets | Stored in `data/secrets.json` (user-only file permissions); never in logs, error messages, reports, exports (unless `--with-secrets`), or URL queries; passwords generated with a CSPRNG |
+| Privilege | Never run as admin; elevate only for tasks that need it (hosts file) via Platform `elevate()`, one at a time, showing what will happen |
+| Project code | Run approval before running a new command/compose/image (DESIGN §21.6); API Studio scripts run in isolated-vm |
+| Outbound | API Studio restricts destinations (SSRF); downloaded runtimes/images verified by checksum / digest |
+| Docker | webhub containers are not privileged, do not mount the Docker socket (unless required and stated in the spec), mount projects `:ro`; label `webhub.managed=true` |
+| Dependencies | webhub's own lockfile; `npm audit` has no high/critical; image versions pinned |
+| Data | Dangerous commands require confirmation + backup first; never auto-delete project volumes/data |
+| Zero-touch | Fixture-project file hashes identical before/after |
 
-ระดับ security finding: exploit ได้จากเครื่องอื่น/เว็บอื่น หรือได้ token/secret = **critical**; ต้องมีสิทธิ์ local user อยู่แล้วแต่ยกระดับได้ = **major**; defense-in-depth ที่ขาด = **major** ถ้าเป็นข้อใน checklist ไม่งั้น minor
+Security severity: exploitable from another machine/website, or leaks a token/secret = **critical**; privilege escalation that needs an existing local user = **major**; missing defense-in-depth = **major** if it is a checklist item, otherwise minor.
 
 ---
 
-## 7. วิเคราะห์ workflow นี้ — ผลดี / ผลเสีย
+## 9. Analysis of this workflow — pros / cons
 
-| | ผลดี | ผลเสีย | ลดผลเสียยังไง |
+| | Pros | Cons | Mitigation |
 |---|---|---|---|
-| ออกแบบก่อนโค้ด (R2) | design ไม่ขัดกัน (เห็นจาก review DESIGN v6–v9 ที่เจอปัญหาก่อนเขียนโค้ด), ประเมินงานได้, ผู้ใช้คุมทิศทาง | ช้าในช่วงแรก, design อาจผิดเพราะยังไม่ได้ลองจริง | อนุญาต spike ใน scratchpad (ไม่เข้า repo) เพื่อพิสูจน์สมมติฐาน เช่น §18 |
-| ถามความเห็นทุก function | ไม่ทำผิดสิ่งที่ผู้ใช้ต้องการ, ตัดสินใจโปร่งใส | ผู้ใช้ต้องตอบบ่อย, งานรอคำตอบ | รวมคำถามเป็นชุดเดียวต่อ function, ใส่ข้อแนะนำให้เลือกได้เร็ว; เรื่องเทคนิคล้วนตัดสินเองแล้วบันทึกเหตุผล |
-| ห้ามแก้ feature เดิมโดยไม่ได้อนุญาต (R1) | feature ที่ใช้อยู่ไม่พังเงียบๆ, ประวัติการเปลี่ยนตรวจย้อนได้ | refactor ยาก, อาจเกิดโค้ดซ้ำเพราะไม่กล้าแตะของเดิม | CR แบบ "refactor ไม่เปลี่ยนพฤติกรรม" + regression test เป็นตัวยืนยัน |
-| วิเคราะห์ผลดี/ผลเสีย (R3) | เห็น trade-off ก่อนตัดสินใจ, มีเหตุผลอ้างอิงภายหลัง | เอกสารยาวขึ้น | ตารางสั้น 3 คอลัมน์ ไม่ต้องเขียนเรียงความ |
-| เทส + regression ทุกรอบ | มั่นใจว่าไม่กระทบของเดิม | เวลารันเทสเพิ่มตามจำนวน feature | แยก fast suite (unit) / full suite (integration+Docker) — รัน full ก่อน merge |
-| วน review จน critical/major = 0 | คุณภาพสูง, security ไม่หลุด | วนหลายรอบได้, เกณฑ์ critical/major อาจตีความต่างกัน | นิยามระดับ bug ชัดในข้อ 1, จำกัดการวนที่ 3 รอบ — เกินแล้วถามผู้ใช้ |
-| อัปเดตเอกสารบังคับ (R4) | เอกสารเชื่อถือได้, คน/AI รอบหน้าเข้าใจระบบจากเอกสารได้ | งานเอกสารเพิ่มทุก commit | DoD มี checkbox, review ⑥ ตรวจว่าเอกสารตรงโค้ด |
-| Report แยก (R5) | ประวัติชัด ตรวจย้อนได้, spec ไม่บวม | ไฟล์เยอะ | โฟลเดอร์ต่อ feature + index ใน `reports/README.md` |
-| Security สูงสุด (R6) | เหมาะกับเครื่องมือที่แตะ hosts file, Docker, DB, รันโค้ดของ repo อื่น — พลาดแล้วกระทบทั้งเครื่อง | ช้าขึ้น, UX ยุ่งขึ้น (ยืนยันบ่อย, ต้องใส่ password เมื่อเปิด LAN), บาง feature อาจทำไม่ได้ (เช่น เปิด LAN แบบง่าย) | checklist เดียวใช้ซ้ำ, ยืนยันครั้งเดียวต่อการเปลี่ยนคำสั่ง (ไม่ถามทุก start) |
-| คู่มือ HTML + ตรวจครบถ้วน | ผู้ใช้อื่นใช้ได้โดยไม่ต้องอ่าน DESIGN.md (ตรงกับ goal "ใช้กับ project ของใครก็ได้"); เปิดออฟไลน์ได้; inventory ช่วยจับ feature ที่ไม่มีใครรู้ว่ามี | ต้องดูแลคู่มือทุกครั้งที่ UI/CLI เปลี่ยน; screenshot ล้าสมัยเร็ว | สร้างคู่มือตอนจบ MVP (ไม่ใช่ทุก commit); inventory gen จาก CLI `--help` / route ของ dashboard ได้บางส่วน |
-| ภาพรวม | เหมาะกับ webhub ที่แตะ Docker/DB/hosts file ของเครื่องจริง (พลาดแล้วเสียหายจริง) | ไม่เหมาะกับงานทดลองเร็วๆ | งาน spike แยกออกจาก workflow ชัดเจน |
+| Planning (W1/W2) separate from doing (W3) | Several items can be designed ahead and built later; the user chooses when to build; the plan is a clear approved backlog | A spec planned long ago may go stale after earlier items change the system | E1 checks the spec against the current system before starting — mismatch → stop, fix spec (W1 ①–③) |
+| W3 runs continuously until the plan is done | No need to trigger each item; fast progress | User sees several items at once; a wrong direction costs several items | Short report after each item; user can stop anytime; automatic stop conditions (>3 loops / needs a locked feature / spec insufficient) |
+| Design before code (R2) | Consistent design (DESIGN v6–v9 reviews caught issues before any code), estimable work, user steers | Slower start; design may be wrong because untested | Spikes allowed in the scratchpad (never in the repo) to prove assumptions, e.g. §18 |
+| Ask for feedback on every function | Builds what the user actually wants; transparent decisions | User answers often; work waits | One question batch per function with recommendations; purely technical choices decided and justified in the spec |
+| No feature changes without permission (R1) | Working features don't break silently; change history traceable | Harder refactoring; possible duplication | `refactor` CR + regression suite as proof |
+| Pros/cons analysis (R3) | Trade-offs visible before deciding; rationale on record | Longer docs | Short 3-column table, no essays |
+| Tests + regression every round | Confidence that nothing old broke | Test time grows with features | Fast suite (unit) / full suite (integration + Docker) — full before merge |
+| Review until critical/major = 0 | High quality; no security leaks | Possibly many loops; severity may be interpreted differently | Clear severity definitions in W3; max 3 loops, then ask the user |
+| Mandatory doc updates (R4) | Reliable docs; future humans/AI understand the system from docs | Extra doc work every commit | DoD checkbox; E4 checks docs match code |
+| Separate reports (R5) | Clear, traceable history; specs stay small | Many files | Folder per item + index in `reports/README.md` |
+| Maximum security (R6) | Fits a tool that touches the hosts file, Docker, DBs and runs other repos' code — mistakes affect the whole machine | Slower; heavier UX (more confirmations, password for LAN); some features become harder (easy LAN sharing) | One reusable checklist; confirm once per command change (not every start) |
+| HTML manual + coverage check (W4) | Others can use webhub without reading DESIGN.md (matches the "anyone's projects" goal); works offline; inventory surfaces forgotten features | Manual upkeep on every UI/CLI change; screenshots age fast | Manual per MVP (`M-x`), not per commit; inventory partly generated from CLI `--help` / dashboard routes |
+| Overall | Suits webhub, which touches Docker/DB/hosts file on a real machine | Not suited to quick experiments | Spikes clearly separated from the workflow |

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `draft` → `approved` / `rejected` → `in-progress` → `testing` → `review` → `done` |
+| Status | `draft` → `planned` / `rejected` → `in-progress` → `testing` → `review` → `done` |
 | Feature ที่แก้ | F-xxx (locked) |
 | ประเภท | change (เปลี่ยน spec) / bugfix (ไม่เปลี่ยน spec) / refactor (ไม่เปลี่ยนพฤติกรรม) |
 | **อนุญาตโดย (R1)** | <ผู้ใช้> / วันที่ — ไม่มี = ห้ามเริ่ม |

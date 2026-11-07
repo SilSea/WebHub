@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `draft` → `approved` → `in-progress` → `testing` → `review` → `done` |
+| Status | `draft` → `planned` → `in-progress` → `testing` → `review` → `done` |
 | Phase | MVP-x (PLAN.md) |
 | DESIGN.md | §x.y |
 | Depends on | F-xxx, … |

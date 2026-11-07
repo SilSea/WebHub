@@ -1,22 +1,23 @@
-# webhub — กฎสำหรับการทำงาน (คนและ AI)
+# webhub — Working rules (humans and AI)
 
-อ่านก่อนทำงานทุกครั้ง:
-- Design: `DESIGN.md` · ขั้นตอน: `docs/WORKFLOW.md` · แผน: `docs/PLAN.md` · สถานะ feature: `docs/features/README.md`
+Read before any work:
+- Design: `DESIGN.md` · Workflow: `docs/WORKFLOW.md` · Plan: `docs/PLAN.md` · Feature status: `docs/features/README.md`
 
-## กฎ (บังคับ — รายละเอียดใน docs/WORKFLOW.md)
-- **R0 Zero-touch** — ห้ามแก้ไฟล์ใน project ของผู้ใช้; ทุก config/env ผ่าน webhub
-- **R1** — ห้ามแก้ feature ที่ `done` โดยไม่ได้รับอนุญาต (ต้องมี CR ที่ผู้ใช้อนุมัติ)
-- **R2** — ห้ามเขียนโค้ดก่อนมี spec/CR ที่ `approved` (spike ได้เฉพาะใน scratchpad นอก repo)
-- **R3** — ทุก spec/CR วิเคราะห์ผลดี / ผลเสีย / ทางเลือก / impact
-- **R4** — ทุกการเปลี่ยนต้องอัปเดตเอกสารที่เกี่ยวข้อง
-- **R5** — report (test / review / security / manual coverage) แยกไฟล์ใน `docs/reports/`, append-only
-- **R6** — security สูงสุด: secure by default, threat model ทุก spec, security review แยกทุก function
+## Rules (mandatory — details in docs/WORKFLOW.md)
+- **R0 Zero-touch** — never modify files in a user's project; all config/env goes through webhub.
+- **R1** — never change a `done` feature without permission (requires a user-approved CR).
+- **R2** — no code before the item is `planned` (approved spec/CR in the plan). Spikes only in the scratchpad, outside the repo.
+- **R3** — every spec/CR analyzes pros / cons / alternatives / impact.
+- **R4** — every change updates the related documentation.
+- **R5** — reports (test / review / security / manual coverage) are separate, append-only files in `docs/reports/`.
+- **R6** — maximum security: secure by default, threat model in every spec, separate security review for every item.
 
-## Workflow
-1. สร้าง function: ออกแบบ → ถามความเห็น → เอกสาร → implement (ไม่กระทบของเดิม) → ทดสอบ → code review + security review → แก้ critical/major จนเป็น 0
-2. แก้ function: เหมือนข้อ 1 แต่เริ่มจาก CR + ขออนุญาตก่อน
-3. คู่มือ: วิเคราะห์ระบบ → คู่มือ HTML เปิดจากไฟล์ได้ (`docs/manual/`) → ตรวจความครบถ้วน
+## Workflows
+- **W1 Create function:** design → ask for feedback → docs → add to plan → ask "proceed now?" (yes → W3 for this item only; no → stop).
+- **W2 Change function:** same as W1, but starts with a CR and requires explicit permission.
+- **W3 Execute plan:** read plan → implement (without affecting existing features) → test → code review + security review → fix critical/major until zero → next item, until the plan is complete or the user says stop.
+- **W4 Manual:** analyze the real system → HTML manual that opens from disk (`docs/manual/`) → check usage coverage.
 
-## การสื่อสาร
-- ถามผู้ใช้เป็นภาษาไทย; ไม่ตัดสินใจแทนในขั้น "ถามความเห็น" และการขออนุญาตแก้ feature
-- branch: `develop` (หลัก), `feat/F-xxx-<name>`, `fix/CR-xxx-<name>`; commit อ้าง F-xxx / CR-xxx
+## Communication
+- Talk to the user in Thai; never decide on their behalf at "ask for feedback", "proceed now?" or feature-change permission.
+- Branches: `develop` (main), `feat/F-xxx-<name>`, `fix/CR-xxx-<name>`; commits reference F-xxx / CR-xxx / M-x.

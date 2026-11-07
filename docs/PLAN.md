@@ -2,8 +2,15 @@
 
 อ้างอิง: [`DESIGN.md`](../DESIGN.md) §15 Roadmap · ขั้นตอนทำงาน: [`WORKFLOW.md`](WORKFLOW.md) · สถานะ: [`features/README.md`](features/README.md)
 
-ทุก feature ด้านล่างต้องผ่าน workflow ① ออกแบบ → ② ถามความเห็น → ③ เอกสาร → ④ implement → ⑤ ทดสอบ → ⑥ review + security review → ⑦ แก้จน critical/major = 0
-ยังไม่มีโค้ด — เริ่มที่ ① ของ F-000
+งานแต่ละตัวต้องผ่าน **W1** (ออกแบบ → ถามความเห็น → เอกสาร → ใส่ Plan queue เป็น `planned`) ก่อน แล้ว **W3** จึงลงมือทำ (WORKFLOW.md)
+
+## 0. Plan queue (W3 ทำจากบนลงล่าง)
+
+| ลำดับ | งาน | Status | Spec |
+|---|---|---|---|
+| — | (ยังไม่มีงาน `planned`) | | |
+
+งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
 ---
 
@@ -108,4 +115,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-F-000 ขั้น ①: ออกแบบ scaffolding → ถามความเห็น (package manager, test framework, lint, CI, Node version ขั้นต่ำ)
+F-000 W1: ออกแบบ scaffolding → ถามความเห็น → เข้า queue → W3

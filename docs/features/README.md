@@ -15,6 +15,6 @@
 | F-008 | setup + doctor | MVP-1 | `todo` | — | — | — |
 | F-009 … F-029 | ดู [PLAN.md](../PLAN.md) | MVP-2–6 | `todo` | — | — | — |
 
-Status: `todo` → `draft` → `approved` → `in-progress` → `testing` → `review` → `done`
+Status: `todo` → `draft` → `planned` → `in-progress` → `testing` → `review` → `done`
 
 Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-request.md`](../templates/change-request.md))
