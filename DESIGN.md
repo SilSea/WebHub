@@ -1,4 +1,4 @@
-# webhub — Design v4
+# webhub — Design v5
 
 ศูนย์รวม website ทุกตัวใน `E:\Workspaces\Project`:
 scan หา project ที่เป็นเว็บ (ทุกภาษา) → start/stop ให้ → route ผ่าน nginx ไป `http://<name>.localhost` → **แก้ port ได้ทุกตัว** → **รวม database ทุก project ไว้ที่ server เดียว** → **จัดการ SQL / NoSQL / Redis ได้ครบ** — โดย **ไม่แตะ project เลย**
@@ -14,18 +14,20 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | งานหลัก | **Launcher + Router**: start/stop project เอง + route ไป `<name>.localhost` |
 | Port | **แก้ได้ทุก port** (web, api, db, nginx, dashboard) ผ่าน dashboard/CLI, Port Map รวม + เช็คชน + rollback |
 | Env / URL | env ตั้งผ่าน webhub, **Env Sets** (เช่น `local`/`remote`) สลับได้, **URL Rewrite** เสนอแล้วกดยืนยัน |
-| Database | **Shared Infra**: postgres / mysql / mongo / redis อย่างละ 1 ตัว, แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
-| DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; เสริม CloudBeaver/RedisInsight ได้ |
+| Database | **Shared Infra**: postgres / mysql / mariadb / mongo / redis — **1 server ต่อ engine ต่อ major** (ปกติ engine ละตัวเดียว), แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
+| DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight / mongo-express** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase |
 | ภาษา | **Runtime Profiles** แบบ data-driven (YAML) — built-in หลายภาษา + เพิ่มเองได้ไม่ต้องแก้ code |
 | ที่เก็บ config | รวมใน `_WebHub/data/` |
 | Docker project | `docker compose` ด้วย **project name เดิม** + override file; adopt container ที่รันอยู่แล้ว |
 | Hot reload | compose ที่ mount source → default `hybrid` (app native); compose ที่ build image → compose + Rebuild; polling เป็น fallback |
-| Non-docker | dev mode native; ไม่มี runtime → fallback `container` ตาม profile |
+| Non-docker | dev mode native ด้วย runtime จาก Runtime Manager (ของเครื่อง หรือ portable); ทำไม่ได้ → `container` |
 | Routing backend | **path บน origin เดียวเป็นหลัก** (`/api/`, `/socket.io/`…, `strip` ต่อ route), สลับเป็น subdomain `api.<site>.localhost` ได้ |
 | Shared backend | backend ที่ serve หลาย site (Backend-Hobby) = **shared service** + `dependsOn` |
 | Start mode | ต่อ site: `manual` / `auto` / `on-demand` |
 | เพิ่ม project | scan → `pending` → กด Enable / Ignore |
-| Interface | Dashboard + CLI (CLI คุยผ่าน API ของ daemon) |
+| Interface | Dashboard + CLI (CLI คุยผ่าน API ของ daemon); daemon auto-start ตอน login (Task Scheduler, ไม่ต้อง admin) + tray icon |
+| Dev services | **Mailpit** (mail catcher) + **MinIO** (S3) เป็น shared infra แบบ optional, inject env ให้ site ที่ใช้ (§5.8) |
+| Operations | CPU/RAM ต่อ site, แจ้งเตือน crash, backup ตามเวลา + retention, cleanup ของที่ webhub สร้าง, export/import config (§20) |
 | Security | API bind `127.0.0.1`, Host/Origin check, **token อัตโนมัติ** ใน cookie; static deny-list |
 | nginx | Docker container, resolve upstream ตอน request |
 | Version ภาษา | **Runtime Manager**: detect version ที่ project ต้องการ → ใช้ของบนเครื่องถ้าผ่าน range, ไม่ผ่าน → โหลด portable เก็บใน `_WebHub/runtimes/` (ไม่ admin, ไม่แตะ PATH ระบบ), ทำไม่ได้ → `container` (§19.1) |
@@ -33,7 +35,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Redis engine | `redis:7` default, สลับเป็น **Valkey** ได้ใน config (§19.3) |
 | Stack ของ webhub | Node + TypeScript (Fastify + Vite/React) |
 
-สภาพเครื่อง (2026-11-07): Node 24.20, Bun 1.3.11, pnpm 12.9.1, Python 3.14.3, Docker Compose 5.1.1 (daemon ยังไม่เปิด), ไม่มี `trunk`; port 80/443/8080 ว่าง; Windows excluded TCP ranges `50000–50059`, `54288`, `62828–63127`, dynamic range `49152–65535`
+สภาพเครื่อง (2026-11-07): Node 24.20, Bun 1.3.11, pnpm 12.9.1, Python 3.14.3, Docker 29.3.1 + Compose 5.1.1, ไม่มี `trunk`; port 80/443/8080 ว่าง; Windows excluded TCP ranges `50000–50059`, `54288`, `62828–63127`, dynamic range `49152–65535`
 
 ---
 
@@ -43,9 +45,9 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 - รันได้ 5 แบบ: `static` / `native` / `compose` / `hybrid` / `container`
 - **Port Map**: เห็นทุก port ที่ webhub คุม + port ที่ OS/process อื่นใช้/จอง, แก้ได้ทุกตัว, เช็คชนก่อน apply
 - **Env & URL**: แก้ env ต่อ site, หลาย env set, rewrite URL ที่ชี้ port เดิมให้เป็น `<site>.localhost`
-- **Data Hub**: DB server กลางชุดเดียว, provision database/user ต่อ site, import จาก DB เดิม, backup/restore
+- **Data Hub**: DB server กลาง (engine ละชุด, แยกเฉพาะ major ที่จำเป็น), provision database/user ต่อ site, import จาก DB เดิม, backup/restore
 - **DB Studio**: เครื่องมือ SQL / MongoDB / Redis ครบในตัว
-- **Multi-language**: Node, Bun, Deno, Python, PHP, Ruby, Go, Rust, Java, .NET, Elixir, SSG + custom profile
+- **Multi-language**: Node, Bun, Deno, Python, PHP, Ruby, Go, Rust, Java, .NET, Elixir, SSG + custom profile; version ภาษาไม่ตรงก็รันได้ (Runtime Manager)
 - Gen nginx config ต่อ site → validate → reload (site หนึ่งพังไม่ลากทั้งระบบ)
 - Dashboard + CLI ทำได้เท่ากัน; ปลอดภัยจากเว็บอื่นใน browser
 
@@ -62,15 +64,16 @@ Non-goals (MVP): SSL จริง, deploy ขึ้น server, multi-machine, pr
                  │   ┌──────────┬───────────┬───────────┬──────┼──────┬───────────┬───────────┐  │
                  │   ▼          ▼           ▼           ▼      ▼      ▼           ▼           ▼  │
                  │ Port      Env/URL     Infra       Nginx   Runners  Supervisor  DB Studio  API │
-                 │ Manager   Resolver    Manager     Gen              (modes)     backend   :7400│
-                 │                       (Data Hub)                                  127.0.0.1  │
+                 │ Manager   Resolver    Manager     Gen     +Runtime (modes)     backend   :7400│
+                 │                       (Data Hub)          Manager                 127.0.0.1  │
                  └──────────────────┬───────────────┬───────────────┬────────────────────────────┘
                                     │               │               │  ▲ CLI (token)
         ┌───────────────────────────▼──┐   ┌────────▼───────────────────────────────┐
         │ webhub-nginx :80             │   │ webhub-infra (docker network "webhub") │
- browser│  <site>.localhost → app      │   │  webhub-postgres  webhub-mysql         │
- ──────►│  hub.localhost → :7400       │   │  webhub-mongo     webhub-redis         │
-        │  db.localhost  → :7400/studio│   │  (optional) cloudbeaver, redisinsight  │
+ browser│  <site>.localhost → app      │   │  webhub-postgres-17  webhub-redis-7    │
+ ──────►│  hub.localhost → :7400       │   │  webhub-mysql-<M>    webhub-mongo-<M>  │
+        │  db.localhost  → :7400/studio│   │  (optional) mailpit, minio,            │
+        │                              │   │   cloudbeaver, redisinsight            │
         │  resolver 127.0.0.11         │   └────────────────────────────────────────┘
         └──────────────────────────────┘                ▲ network "webhub"
                  │ host.docker.internal                 │
@@ -85,9 +88,10 @@ Non-goals (MVP): SSL จริง, deploy ขึ้น server, multi-machine, pr
 | Registry | `data/sites/<name>.json`, `data/ports.json`, `data/infra.json`, `data/state.json` (เขียนผ่าน daemon เท่านั้น) |
 | Port Manager | จอง/แก้/ล็อก port, probe 3 ชั้น (§4.3), apply + rollback |
 | Env/URL Resolver | รวม env ตาม precedence + env set + URL rewrite + DB connection → inject |
-| Infra Manager | start shared engines, provision, import/backup/restore |
+| Infra Manager | start shared engines (ต่อ major), provision, import/backup/restore, upgrade/pin major, optional services (Mailpit, MinIO, CloudBeaver, RedisInsight) |
 | Nginx Generator | template → temp → `nginx -t` → swap → reload; fail = คง config เดิม |
 | Runners | รัน site ตาม runner (§7), adopt container/process ที่รันอยู่ |
+| Runtime Manager | detect version ภาษาที่ต้องการ → system / portable (`runtimes/`) / container (§19.1) |
 | Supervisor | start modes, `dependsOn`, idle stop, restart/backoff, health check |
 | DB Studio backend | `DbAdapter` ต่อ engine + guard (§5.7) |
 | API + Dashboard | Fastify REST + WS ที่ **7400** bind `127.0.0.1` (ย้ายจาก 4000 เพราะชน werewolf backend), auth §10.3 |
@@ -134,10 +138,10 @@ networks:
   "system": {
     "nginx.http":     { "port": 80,   "locked": true },
     "dashboard":      { "port": 7400, "locked": true },
-    "infra.postgres": { "port": 5432 },
-    "infra.mysql":    { "port": 3306 },
-    "infra.mongo":    { "port": 27017 },
-    "infra.redis":    { "port": 6379 }
+    "infra.postgres-17": { "port": 5432 },
+    "infra.redis-7":     { "port": 6379 },
+    "infra.mailpit":     { "port": 8025, "smtp": 1025 },
+    "infra.minio":       { "port": 9000, "console": 9001 }
   },
   "sites": {
     "pos": {
@@ -169,7 +173,9 @@ networks:
 | `7400` | dashboard/API |
 | `4100–4999` | web/api ของ site |
 | `14100–14999` | infra แบบ `isolated` ต่อ site |
-| ค่ามาตรฐาน (5432, 3306, 27017, 6379) | shared infra |
+| ค่ามาตรฐาน (5432, 3306, 27017, 6379) | shared infra major default |
+| `<prefix><major>` (เช่น pg 15 → `5415`, mysql 5.7 → `3357`) | shared infra major ที่ถูก pin |
+| `1025`/`8025`, `9000`/`9001` | Mailpit (SMTP/UI), MinIO (API/console) |
 
 ### 4.3 แก้ port — flow + probe
 
@@ -220,18 +226,18 @@ networks:
 ### 5.1 แนวคิด
 
 เดิม: ทุก project ยก postgres/redis ของตัวเอง → ชน port, กิน RAM, ข้อมูลกระจาย
-ใหม่: **webhub-infra** มี engine ละ 1 ตัว → แต่ละ site ได้ **database + user แยก** ใน server เดียว
+ใหม่: **webhub-infra** มี engine ละ 1 ตัว (แยกเพิ่มเฉพาะ major ที่ถูก pin — §19.2) → แต่ละ site ได้ **database + user แยก** ใน server เดียว
 
 ```
-webhub-postgres (17)
+webhub-postgres-17
 ├── db: pos            user: pos
 ├── db: werewolf       user: werewolf
 ├── db: herotime       user: herotime
 ├── db: cloudvps       user: cloudvps
 └── db: questcloud     user: questcloud
-webhub-redis (7)
+webhub-redis-7
 ├── db 0: herotime     (REDIS_URL → /0)
-├── db 1: werewolf
+├── db 1: werewolf     (REDIS_URL → /1)
 └── cloudvps, questcloud → ใช้ REDIS_HOST/PORT แยกกัน ระบุ db index ไม่ได้ → isolated (§5.3)
 ```
 
@@ -240,8 +246,9 @@ webhub-redis (7)
 | Engine | Image | แยกต่อ site ด้วย |
 |---|---|---|
 | PostgreSQL | `postgres:17` | database + role (owner, `CREATEDB` สำหรับ Prisma shadow DB) |
-| MySQL / MariaDB | `mysql:8.4` | database + user (GRANT ON db.*) |
-| MongoDB | `mongo:7` | database + user |
+| MySQL | `mysql:<major>` (default 8.4) | database + user (GRANT ON db.*) |
+| MariaDB | `mariadb:<major>` (engine แยกจาก MySQL) | database + user |
+| MongoDB | `mongo:<major>` (default 7) | database + user |
 | Redis / Valkey | `redis:7` (หรือ `valkey/valkey:8`) | DB index 0–15 — **เฉพาะ app ที่ระบุ index ได้** (`REDIS_URL=.../N` หรือ `REDIS_DB`); เกิน 16 site หรือระบุไม่ได้ → `isolated` |
 | SQLite | — | ไฟล์อยู่ใน project, Data Hub/Studio แค่ list/เปิด/backup |
 
@@ -266,7 +273,7 @@ services:
     depends_on: !override                  # gen ใหม่: ตัดเฉพาะ service ที่ถูก disable, คง dependency อื่นไว้
       redis: { condition: service_started }
     environment:
-      DATABASE_URL: postgres://pos:<pw>@webhub-postgres:5432/pos
+      DATABASE_URL: postgres://pos:<pw>@webhub-postgres-17:5432/pos
 ```
 
 ### 5.4 Env injection
@@ -275,8 +282,8 @@ Detector หา env ที่เกี่ยวกับ DB (`DATABASE_URL`, `PO
 
 | รันแบบ | host ที่ inject |
 |---|---|
-| compose / container (join network `webhub`) | `webhub-postgres:5432` |
-| native | `127.0.0.1:<infra.postgres port>` |
+| compose / container (join network `webhub`) | `webhub-postgres-<major>:5432` |
+| native | `127.0.0.1:<infra.postgres-<major> port>` |
 
 ### 5.5 Provision + Import
 
@@ -303,7 +310,7 @@ enable site (mode shared)
 
 ที่ `db.localhost` (หรือแท็บ Data Hub). Connection ของทุก site เพิ่มให้อัตโนมัติ ไม่ต้องกรอก password. ใช้ auth เดียวกับ dashboard (§10.3)
 
-**Engine:** PostgreSQL, MySQL/MariaDB, SQLite, MongoDB, Redis (ต่อยอด: MSSQL, ClickHouse ผ่าน adapter)
+**Engine:** PostgreSQL, MySQL, MariaDB, SQLite, MongoDB, Redis/Valkey (ต่อยอด: MSSQL, ClickHouse ผ่าน adapter); รองรับหลาย version ด้วย capability flags (§19.4)
 
 #### SQL (Postgres / MySQL / SQLite)
 | หมวด | Feature |
@@ -349,8 +356,17 @@ enable site (mode shared)
 - Frontend: Monaco, virtualized grid (TanStack Table / AG Grid community), ER diagram ด้วย React Flow
 - Streaming result ผ่าน WebSocket
 
-#### เครื่องมือเสริม (optional)
-webhub รัน container + เพิ่ม connection ให้เอง: **CloudBeaver** → `sql.localhost`, **RedisInsight** → `redis.localhost`, **mongo-express** → `mongo.localhost`
+#### เครื่องมือเสริม (เปิดได้ตั้งแต่ Data Hub phase)
+webhub รัน container + เพิ่ม connection ทุก site ให้เอง (เข้าผ่าน nginx + auth เดียวกับ dashboard): **CloudBeaver** → `sql.localhost`, **RedisInsight** → `redis.localhost`, **mongo-express** → `mongo.localhost`. ทำให้ได้เครื่องมือ SQL/NoSQL/Redis ครบตั้งแต่ต้น ระหว่าง DB Studio ของเราทยอยทำ (v1 → v2); ปิดได้เมื่อ Studio ครอบคลุมแล้ว
+
+### 5.8 Dev services (optional shared)
+
+| Service | ใช้แทน | inject env |
+|---|---|---|
+| **Mailpit** (`axllent/mailpit`) → `mail.localhost` | SMTP จริง (cloudvps/questcloud มี `EMAIL_HOST`/`EMAIL_PORT`) | `EMAIL_HOST`/`SMTP_HOST` = `webhub-mailpit` หรือ `127.0.0.1`, port `1025`; ตรวจ key จาก detector, เสนอแล้วกดยืนยันแบบ URL rewrite |
+| **MinIO** → `s3.localhost` (console) | volume `uploads` / S3 จริง (herotime) | bucket ต่อ site + access key ต่อ site; `S3_ENDPOINT`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID`… ตาม key ที่ detect เจอ |
+
+เปิดต่อ site (default ปิด); ไม่มี key ให้ inject → ไม่เสนอ
 
 ---
 
@@ -368,8 +384,8 @@ detect:
   any:  [{ fileContains: ["requirements.txt|pyproject.toml", "fastapi|uvicorn"] }]
   score: 60
 runtime:
-  check: "python --version"
-  install: "pip install -r requirements.txt"   # ปุ่ม Install deps / auto เมื่อไม่มี venv
+  lang: python                                   # Runtime Manager เลือก version (§19.1)
+  install: "pip install -r requirements.txt"   # ลง venv ที่ data/venvs/<site>/ (ไม่สร้างใน project)
 start:
   cmd: "uvicorn {module}:app --reload --host {HOST} --port {PORT}"
   vars: { module: "main" }                       # แก้ได้ต่อ site
@@ -399,7 +415,7 @@ routes:
 | Node | `vite`, `next`, `nuxt`, `sveltekit`, `astro`, `angular`, `cra`, `express`, `nestjs`, `fastify`, `koa` | `npm/pnpm/yarn run dev` (ตาม lockfile) + `--port {PORT}` |
 | Bun | `bun-elysia`, `bun-hono`, `bun-generic` | `bun run --watch <entry>`, `PORT` (หรือ `fixed` ถ้า `.listen(N)`) |
 | Deno | `deno-fresh`, `deno-generic` | `deno task dev` |
-| Python | `django`, `flask`, `fastapi`, `streamlit`, `gradio` | `manage.py runserver {HOST}:{PORT}`, `flask run`, `uvicorn` … (ใช้ venv ใน project ถ้ามี) |
+| Python | `django`, `flask`, `fastapi`, `streamlit`, `gradio` | `manage.py runserver {HOST}:{PORT}`, `flask run`, `uvicorn` … (venv ใน project มีอยู่แล้ว → ใช้แบบอ่านอย่างเดียว, ไม่มี → `data/venvs/<site>/`) |
 | PHP | `laravel`, `php-plain`, `wordpress` | `php artisan serve`, `php -S {HOST}:{PORT}`; ไม่มี php → container `php:8.3-apache` |
 | Ruby | `rails`, `sinatra` | `bin/rails s -b {HOST} -p {PORT}` |
 | Go | `go-generic` (gin/echo/fiber/chi) | `go run .` หรือ `air`, `PORT` |
@@ -418,7 +434,7 @@ script ใน `package.json` ที่ hardcode port (เช่น `next dev --p
 
 ### 6.4 Runtime check
 
-Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/go/cargo/java/dotnet/ruby/trunk…) + version; site ที่ไม่มี runtime → เสนอติดตั้ง (ลิงก์/winget) หรือรันแบบ `container`
+Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อง + ที่ webhub โหลดไว้ + version + site ที่ใช้; site ที่ไม่มี runtime ตรง → Runtime Manager โหลด portable ให้ (§19.1), ภาษาที่ยังไม่รองรับ portable → `container`
 
 ---
 
@@ -427,13 +443,13 @@ Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/
 | Runner | ใช้เมื่อ | ทำอะไร |
 |---|---|---|
 | `static` | static site | nginx serve จาก `/projects/<folder>/<publicDir>` ไม่มี process |
-| `native` | มี runtime บนเครื่อง | spawn ตาม profile, inject env/port/DB/URL, เก็บ PID + log |
+| `native` | runtime จาก Runtime Manager (system/portable) | spawn ตาม profile, inject env/port/DB/URL + `PATH` ของ runtime ที่เลือก, เก็บ PID + log |
 | `compose` | compose ที่ **build image** (PPRS, cloudvps, questcloud) | override → `compose up -d`; ปุ่ม **Rebuild** + เตือนเมื่อ source/build-time env เปลี่ยน |
 | `hybrid` | compose ที่ **mount source + dev server** (werewolf, Pos) หรือ compose มีแค่ infra (herotime) | app → native (hot reload ไว); DB → shared หรือ compose (isolated) |
-| `container` | ไม่มี runtime / `via: fixed` ที่ต้องรันพร้อมกัน / profile สั่ง | `docker run` image ตาม profile, mount source, map port |
+| `container` | runtime โหลด portable ไม่ได้ / `via: fixed` ที่ต้องรันพร้อมกัน / profile สั่ง | `docker run` image ตาม profile, mount source, map port |
 
 - polling fallback (สลับต่อ site, สำหรับ compose ที่ยังรัน dev ใน container): `CHOKIDAR_USEPOLLING=true`, `WATCHPACK_POLLING=true`, nodemon `-L` (`bun --watch` ไม่รองรับ)
-- deps: ไม่มี `node_modules` / venv → เสนอ install ก่อน start
+- deps: ไม่มี `node_modules` / venv → เสนอ install ก่อน start (`node_modules` เป็นสิ่งที่ project สร้างเองตามปกติ ไม่นับเป็นการแก้ project)
 - Process บน Windows: kill ทั้ง tree (`taskkill /T /F` / `tree-kill`); log → ring buffer + `logs/<site>.log` (rotate)
 - **Re-adopt** หลัง webhub restart: ตรวจ PID + command line + port ก่อนถือว่าเป็นของเดิม (กัน PID reuse)
 
@@ -465,6 +481,8 @@ Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/
 - **DB**: image ใน compose + deps + env keys; redis ระบุ index ได้ไหม
 - **URL env**: ค่าเป็น URL → จัดกลุ่มสำหรับ URL Rewrite (§11.2)
 - **publicDir**: `public/` / `dist/` / `docs/` ที่มี `index.html` ไม่งั้น root
+- **Runtime version**: `.nvmrc`, `engines`, `packageManager`, `.python-version`, `requires-python`, Dockerfile `FROM` (hint) … (§19.1)
+- **Dev services**: env key แนว `EMAIL_HOST`/`SMTP_*`, `S3_*`/`AWS_*` → เสนอ Mailpit / MinIO (§5.8)
 
 ### ผล scan จริง (2026-11-07)
 
@@ -476,16 +494,16 @@ Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/
 | wowmusic | WowMusic | static + bun-elysia | native | api 3000 (env `PORT`) | `/`, `/wowmusic/` (strip:false) | — | หรือ `dependsOn: backend-hobby` |
 | backend-hobby | Backend-Hobby | bun-elysia | native | 3000 (fixed) | `/` | — | **shared service** serve `/wowmusic` + `/pprs` |
 | pprs | PPRS | bun-elysia | compose | 3200→3000 (fixed) | `/`, `/api/` (strip:false) | — | `container_name: pprs`; สำเนาใน Backend-Hobby/project |
-| pos | Pos_on_website | vite + bun-elysia | hybrid | 5173 (fixed), 3000 (env `BACKEND_PORT`) | `/`, `/api/` (strip:true — backend route ที่ `/`) | pg 15 → shared; pgadmin → DB Studio | compose mount source |
-| werewolf | werewolfofpower | vite + express | hybrid | 5173 (fixed), 4000 (env `PORT`) | `/`, `/socket.io/` | pg 16 → shared, redis 7 → shared | `init.sql`; env set `local`/`remote` (DDNS) |
-| herotime | herotime | nestjs (pnpm) | hybrid | 3000 (env `PORT`) | `/` | pg 17 → shared, redis 7 → shared | server อยู่ใน profile `scale`; `apps/web` build-only |
-| cloudvps | cloudvps/* | next + bun-elysia | compose ×2 | 3001 (script → arg), 3000 (env `PORT`) | `/`, `/api/` (strip:false) | pg 15 → shared, redis 7 → isolated | redis ใช้ HOST/PORT |
-| questcloud | qusetcloud/* | next + bun-elysia | compose ×2 | 3001 (script → arg), 3000 (env `PORT`) | `/`, `/api/` (strip:false) | pg 15 → shared, redis 7 → isolated | NextAuth เรียก API ฝั่ง server → `extra_hosts` |
-| craft-anything-web | craft-anything/apps/craft-anything-web | rust-trunk | native | — | `/` | — | ต้องลง `trunk` (pending) |
+| pos | Pos_on_website | vite + bun-elysia | hybrid | 5173 (fixed), 3000 (env `BACKEND_PORT`) | `/`, `/api/` (strip:true — backend route ที่ `/`) | pg 15 → shared (17); pgadmin → DB Studio | compose mount source |
+| werewolf | werewolfofpower | vite + express | hybrid | 5173 (fixed), 4000 (env `PORT`) | `/`, `/socket.io/` | pg 16 → shared (17), redis 7 → shared (`REDIS_URL`) | `init.sql`; env set `local`/`remote` (DDNS); Dockerfile `node:20` (hint) |
+| herotime | herotime | nestjs (pnpm) | hybrid | 3000 (env `PORT`) | `/` | pg 17 → shared, redis 7 → shared (`REDIS_URL`); uploads → MinIO (option) | server อยู่ใน profile `scale`; `apps/web` build-only |
+| cloudvps | cloudvps/* | next + bun-elysia | compose ×2 | 3001 (script → arg), 3000 (env `PORT`) | `/`, `/api/` (strip:false) | pg 15 → shared (17), redis 7 → isolated | redis ใช้ HOST/PORT; email → Mailpit (option); Dockerfile `bun:1.2` (hint) |
+| questcloud | qusetcloud/* | next + bun-elysia | compose ×2 | 3001 (script → arg), 3000 (env `PORT`) | `/`, `/api/` (strip:false) | pg 15 → shared (17), redis 7 → isolated | NextAuth เรียก API ฝั่ง server → `extra_hosts`; email → Mailpit (option) |
+| craft-anything-web | craft-anything/apps/craft-anything-web | rust-trunk | container (จน Runtime Manager รองรับ Rust/trunk) | — | `/` | — | pending |
 
 **ไม่ใช่เว็บ:** ads-remove, download_manga (extension), PhiTheGhostHunting, RiderCardBattle (Roblox), Reclaim (Unreal), scamwithfriends_thmod (C# mod), LineBankVerify, translate_manga, video_decode_subtitle, auto_train_fish (Python script/GUI), battleofmyfriends, translate_manga_release (ว่าง/เอกสาร), craft-anything crates อื่น
 
-**DB ที่ย้ายเข้า shared:** postgres ×5 (pos, werewolf, herotime, cloudvps, questcloud), redis ×2 (werewolf, herotime); redis ×2 isolated (cloudvps, questcloud); pgadmin ของ pos → แทนด้วย DB Studio
+**DB ที่ย้ายเข้า shared:** postgres ×5 (pos, werewolf, herotime, cloudvps, questcloud) → `webhub-postgres-17` ตัวเดียว (ผ่าน pre-upgrade check ก่อน), redis ×2 (werewolf, herotime) → `webhub-redis-7`; redis ×2 isolated (cloudvps, questcloud); pgadmin ของ pos → แทนด้วย DB Studio
 
 ---
 
@@ -493,10 +511,10 @@ Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/
 
 ### 10.1 Hostnames
 
-`http://<name>.localhost` (Chrome/Edge resolve เอง). Reserved (ห้ามเป็นชื่อ site, validate ตอน approve): `hub`, `db`, `sql`, `redis`, `mongo`, `api.*`
+`http://<name>.localhost` (Chrome/Edge resolve เอง). Reserved (ห้ามเป็นชื่อ site, validate ตอน approve): `hub`, `db`, `sql`, `redis`, `mongo`, `mail`, `s3`, `api`
 
 - ใน container: `extra_hosts` ทุก site → `host-gateway` (§4.4) → server-side เรียก `<site>.localhost` ผ่าน nginx ได้
-- native: **hosts file sync จำเป็น** (`127.0.0.1 <site>.localhost`, admin) — spike พบว่า Node / Bun / Python บน Windows resolve `*.localhost` ไม่ได้ (`ENOTFOUND`); webhub เขียน block `# webhub:begin … # webhub:end` ใน `C:\Windows\System32\drivers\etc\hosts` ผ่าน UAC prompt ครั้งเดียวตอนเพิ่ม/ลบ site; ไม่ให้สิทธิ์ admin → site ที่มี server-side call ไป `<site>.localhost` ติดป้ายเตือน
+- native: **hosts file sync จำเป็น** (`127.0.0.1 <site>.localhost`, admin) — spike พบว่า Node / Bun / Python บน Windows resolve `*.localhost` ไม่ได้ (`ENOTFOUND`); webhub เขียน block `# webhub:begin … # webhub:end` ใน `C:\Windows\System32\drivers\etc\hosts` (ทุก `<site>.localhost` + `api.<site>.localhost` ที่เปิด subdomain) ผ่าน UAC prompt ครั้งเดียวตอนเพิ่ม/ลบ site; ไม่ให้สิทธิ์ admin → site ที่มี server-side call ไป `<site>.localhost` ติดป้ายเตือน
 
 ### 10.2 Generated config
 
@@ -539,6 +557,7 @@ server {
 
 - API bind `127.0.0.1:7400` เท่านั้น; nginx proxy ให้ที่ `hub.localhost` / `db.localhost`
 - `Host` allowlist: `hub.localhost`, `db.localhost`, `127.0.0.1:7400` → กัน DNS rebinding
+- เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.localhost`) → nginx `auth_request` ไปที่ API ตรวจ cookie token เดียวกัน (ไม่เปิดโล่ง)
 - `Origin` check ทุก request ที่แก้ข้อมูล → กัน CSRF
 - Token สุ่มใน `data/auth.json`; `webhub ui` เปิด one-time link → set cookie `HttpOnly; SameSite=Strict`; CLI อ่าน token จากไฟล์
 - เปิด `lan` / tunnel → บังคับ password + เตือน; DB ที่ `expose: lan` ต้อง password แรง
@@ -586,14 +605,19 @@ server {
   "maxDepth": 3,
   "ignore": ["node_modules", ".git", "dist", "build", "venv", ".venv", "target", "_WebHub", "Library", "Intermediate", "DerivedDataCache"],
   "domainSuffix": "localhost",
-  "reservedNames": ["hub", "db", "sql", "redis", "mongo"],
+  "reservedNames": ["hub", "db", "sql", "redis", "mongo", "mail", "s3", "api"],
   "ports": { "web": [4100, 4999], "isolatedInfra": [14100, 14999] },
   "infra": {
-    "postgres": { "image": "postgres:17" },
-    "mysql":    { "image": "mysql:8.4" },
-    "mongo":    { "image": "mongo:7" },
-    "redis":    { "image": "redis:7" }
+    "postgres": { "default": "17", "policy": "latest", "images": { "17": "postgres:17", "15": "postgres:15" } },
+    "mysql":    { "default": "8.4", "policy": "pin" },
+    "mariadb":  { "default": "11", "policy": "pin" },
+    "mongo":    { "default": "7", "policy": "pin" },
+    "redis":    { "default": "7", "policy": "latest", "flavor": "redis" },
+    "optional": { "mailpit": false, "minio": false, "cloudbeaver": false, "redisinsight": false, "mongoExpress": false }
   },
+  "runtimes": { "dir": "./runtimes", "policy": "range", "verifyChecksum": true },
+  "daemon": { "autostart": true, "tray": true },
+  "backups": { "schedule": "daily 03:00", "keep": 7 },
   "defaultEnv": { "NODE_ENV": "development" },
   "onDemand": { "idleStopMinutes": 30 },
   "profilesDir": ["./profiles", "./data/profiles"]
@@ -620,7 +644,7 @@ server {
     { "path": "/api/", "service": "backend", "strip": false }
   ],
   "database": {
-    "postgres": { "mode": "shared", "disableComposeServices": ["postgres"] },
+    "postgres": { "mode": "shared", "version": "latest", "disableComposeServices": ["postgres"] },
     "redis":    { "mode": "isolated", "reason": "REDIS_HOST/PORT ไม่ระบุ db index" },
     "dbEnv": { "DATABASE_URL": "{postgres.url}" }
   },
@@ -632,6 +656,8 @@ server {
     { "key": "NEXT_PUBLIC_API_URL", "from": "http://localhost:3000", "to": "http://questcloud.localhost", "enabled": true, "buildTime": true },
     { "key": "CORS_ORIGIN", "from": "http://localhost:3001", "append": "http://questcloud.localhost", "enabled": true }
   ],
+  "runtime": { "frontend": { "lang": "bun", "required": "1.2 (hint)", "policy": "range", "resolved": "1.3.11", "source": "system" } },
+  "devServices": { "mailpit": true, "minio": false },
   "static": null,
   "detected": { "score": 120, "markers": ["next", "elysia", "compose:postgres:15", "compose:redis:7"] }
 }
@@ -669,9 +695,11 @@ _WebHub/
 │   ├── nginx/{generator.ts, control.ts, templates/}
 │   ├── runners/{static,native,compose,hybrid,container}.ts
 │   ├── supervisor.ts         # start modes, dependsOn, idle, restart, health
+│   ├── ops/{metrics.ts, notify.ts, backup-schedule.ts, cleanup.ts, config-io.ts}   # §20
+│   ├── system/{hosts.ts, autostart.ts, tray.ts}   # hosts sync (UAC), Task Scheduler, tray
 │   └── server/{api.ts, auth.ts}               # REST + WS + /_wake + Host/Origin/token
 ├── dashboard/                # Vite + React
-├── docker/{nginx.compose.yml, infra.compose.yml}
+├── docker/{nginx.compose.yml, infra.compose.yml, tools.compose.yml}
 ├── nginx/{nginx.conf, sites/, errors/}
 ├── runtimes/                 # gitignored: portable runtimes <lang>/<ver>/
 ├── data/                     # gitignored
@@ -709,7 +737,12 @@ webhub db export <n> [table] --format csv|json|sql | studio
 webhub runtimes [list|prune]        # runtime ที่โหลดไว้ + site ที่ใช้
 webhub db version <n> <engine> latest|pin <major>   # ย้าย/pin major (dump→restore)
 webhub profiles [--check]
-webhub infra up|down|status
+webhub infra up|down|status | enable mailpit|minio|cloudbeaver|redisinsight|mongo-express
+webhub stats [<n>]                   # CPU/RAM ต่อ site
+webhub cleanup [--dry-run]           # ลบ container/network/override ที่ webhub สร้าง (ไม่แตะ volume เดิมของ project)
+webhub config export <file> | import <file>
+webhub autostart on|off
+webhub code <n> | term <n> | folder <n>   # เปิด VS Code / terminal / explorer
 webhub reload | ui
 ```
 
@@ -718,8 +751,8 @@ webhub reload | ui
 ## 14. Dashboard
 
 ```
-┌ webhub ──── [Sites] [Port Map] [Data Hub] [DB Studio] [Profiles] ── [Rescan] ┐
-│ nginx ● :80   infra ● pg redis   docker ●   sites 12 · running 5              │
+┌ webhub ─ [Sites] [Port Map] [Data Hub] [DB Studio] [Runtimes] [Profiles] ─ [Rescan] ┐
+│ nginx ● :80   infra ● pg17 redis7   docker ●   sites 12 · running 5 · RAM 2.1 GB    │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │ Name        Lang         Runner   Mode       URL                 Status   Act │
 │ questcloud  ts/next+bun  compose  on-demand  questcloud.localhost ◌ sleep ▶↗⚙│
@@ -747,19 +780,20 @@ webhub reload | ui
 
 [DB Studio — db.localhost]
 ┌ Connections ──────┐┌ Query 1 × │ users × │ + ──────────────────────────────┐
-│ ▾ pg (shared)     ││ SELECT * FROM users WHERE created_at > :since;      │
+│ ▾ pg17 (shared)   ││ SELECT * FROM users WHERE created_at > :since;      │
 │   ▾ questcloud    ││ [▶ Run] [Explain] [Format] [Save]   auto-commit ☑   │
 │     ▾ public      │├─────────────────────────────────────────────────────┤
 │       ▸ users     ││ id │ name   │ email          │ created_at          │
 │       ▸ vps       ││ 1  │ Somchai│ s@x.com  ✎     │ 2026-11-01 10:00    │
 │   ▸ werewolf      ││ ... 1,000 rows · 23 ms   [Export ▾] [Save changes(1)]│
-│ ▾ redis (shared)  │└─────────────────────────────────────────────────────┘
+│ ▾ redis7 (shared) │└─────────────────────────────────────────────────────┘
 │   ▸ db1 werewolf  │  Redis: ▾ session: (120) ▾ room: (8)  key=room:42 hash TTL 3600
 │ ▸ mongo           │  Mongo: [Filter {}] [Aggregate +stage] JSON/Table view
 └───────────────────┘
 
-⚙ Site: services | routes (path/strip/ws/subdomain) | profile + start cmd | ports
-        | env + env sets | URL rewrite | database mode | start mode + dependsOn | static rules
+⚙ Site: services | routes (path/strip/ws/subdomain) | profile + start cmd | runtime version | ports
+        | env + env sets | URL rewrite | database mode + version | dev services | start mode + dependsOn
+        | static rules | [VS Code] [Terminal] [Folder] | git branch/status | CPU/RAM
 ```
 
 ---
@@ -768,16 +802,17 @@ webhub reload | ui
 
 0. ~~Spike~~ ✅ เสร็จ 2026-11-07 (ผลใน §18)
 1. **MVP-1** — profiles loader + scanner + detector (routes, via, URL env, DB) + dedupe + `scan/approve/list`; daemon + CLI client + auth (token, Host/Origin)
-2. **MVP-2** — nginx container + generator (resolver/variables, validate/swap) + static (publicDir, deny-list)
+2. **MVP-2** — nginx container + generator (resolver/variables, validate/swap) + static (publicDir, deny-list) + hosts sync (UAC)
 3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + Runtime Manager (Node/Bun/Python portable) + env resolver + env sets + URL rewrite
 4. **MVP-4** — compose runner (project name เดิม, adopt, override, extra_hosts, rebuild) + hybrid
-5. **MVP-5** — Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม
-6. **MVP-6** — Dashboard (Sites, Port Map, Data Hub)
+5. **MVP-5** — Data Hub: shared postgres + redis (server ต่อ major, upgrade/pin, pre-upgrade check), provision, env injection, disable DB services, import จาก volume เดิม + **เปิด CloudBeaver / RedisInsight** (connection อัตโนมัติ, auth_request) → ได้เครื่องมือ DB ครบตั้งแต่ phase นี้
+6. **MVP-6** — Dashboard (Sites, Port Map, Data Hub, Runtimes) + autostart/tray + CPU/RAM + แจ้งเตือน crash
 7. **DB Studio v1** — SQL (pg): browser, data grid + edit, SQL editor + autocomplete, history, export; Redis: key browser, value editor, TTL, console; guard
-8. backup/restore, mysql + mongo (infra + studio), start modes `auto`/`on-demand` + `dependsOn`
-9. **DB Studio v2** — EXPLAIN, schema/DDL editor, ER diagram, Mongo aggregation builder, Redis pub/sub + slowlog + memory, sqlite; optional CloudBeaver/RedisInsight
-10. Profiles เพิ่ม (PHP, Ruby, Go, Java, .NET, Elixir, SSG) + container runner fallback
-11. health check, watch mode, mkcert HTTPS, hosts sync, export config ไป VPS
+8. backup/restore + backup ตามเวลา, mysql + mariadb + mongo (infra + studio), start modes `auto`/`on-demand` + `dependsOn`, Mailpit + MinIO
+9. **DB Studio v2** — EXPLAIN, schema/DDL editor, ER diagram, Mongo aggregation builder, Redis pub/sub + slowlog + memory, sqlite → ครอบคลุมเครื่องมือเสริม (ปิดได้)
+10. Profiles เพิ่ม (PHP, Ruby, Go, Java, .NET, Elixir, SSG) + Runtime Manager รองรับภาษาเพิ่ม + container runner fallback
+11. watch mode (rescan), cleanup, export/import config, ปุ่ม VS Code/terminal, git status, alias
+12. mkcert HTTPS, export config ไป VPS
 
 ---
 
@@ -788,14 +823,17 @@ webhub reload | ui
 - Shared DB: version/extension ต่างกัน, DB host hardcode, redis ระบุ index ไม่ได้ → `isolated`
 - Import: ต้อง start DB เดิมชั่วคราว → ใน network ภายใน ไม่ publish
 - Compose ≥ 2.24 สำหรับ `!override` / `!reset` (เครื่องนี้ 5.1.1 ผ่าน)
-- Docker Desktop ต้องเปิดก่อน; port 80 ถูกจองทีหลัง → แก้ใน Port Map
+- Docker Desktop ต้องเปิดก่อน (autostart ของ webhub เช็ค + แจ้ง); port 80 ถูกจองทีหลัง → แก้ใน Port Map
+- Runtime portable: ต้องมี internet ครั้งแรก, ตรวจ checksum ทุกครั้ง; ใช้พื้นที่ดิสก์ → `runtimes prune`
+- Upgrade DB major: ข้อมูลเสี่ยงถ้า restore ไม่ครบ → backup ก่อนเสมอ + ตรวจ row count + เก็บ volume เดิม
+- hosts sync ต้อง UAC; ผู้ใช้ปฏิเสธ → native server-side call ไป `<site>.localhost` ใช้ไม่ได้ (แจ้งเตือน)
 - Windows excluded port ranges เปลี่ยนทุก reboot → probe ทุกครั้ง
-- Scope: DB Studio ใหญ่ → แบ่ง v1/v2, เครื่องมือเสริมเติมช่องว่าง
+- Scope: DB Studio ใหญ่ → เครื่องมือเสริมเปิดตั้งแต่ MVP-5 ให้ใช้ได้ครบก่อน, Studio ทำ v1/v2 ตามหลัง
 - Secret ใน `data/` → ห้าม commit
 
 ---
 
-## 17. Review log (v3 → v4)
+## 17. Review log
 
 | # | ประเด็น | ตัดสินใจ | อยู่ใน |
 |---|---|---|---|
@@ -816,15 +854,11 @@ webhub reload | ui
 | 11 | Prisma กับ shared pg | role `CREATEDB`, restore `--no-owner --no-acl` (เทคนิค) | §5.2, §5.5 |
 | 12 | redis index ระบุไม่ได้ (cloudvps/questcloud) | detect → `isolated` อัตโนมัติ (เทคนิค) | §5.2, §9 |
 | 13 | version ภาษา / DB / Redis ต่างกัน | Runtime Manager portable; DB server ต่อ major (pg/redis → ล่าสุด, mysql/mongo → pin); Redis 7 + Valkey option; profile variant ตาม version framework | §19 |
+| 14 | review v5 (goal เดิม) | DB server ต่อ major ทุกจุด (ชื่อ `webhub-postgres-17`, ports, config); MariaDB แยก engine; เครื่องมือเสริมเปิดตั้งแต่ MVP-5; venv ไป `data/venvs`; Runtime Manager ใน architecture/runners/dashboard; backlog ที่แนะนำ → design (Mailpit, MinIO, autostart/tray, metrics, notify, backup ตามเวลา, cleanup, config export, ปุ่ม VS Code); auth ของเครื่องมือเสริมผ่าน `auth_request`; werewolf redis ตรวจแล้วใช้ `REDIS_URL` → shared ถูกต้อง | ทั้งเอกสาร, §5.8, §20 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
-### Backlog — function ที่ยังไม่ได้ตัดสิน
-- Shared **Mailpit** (cloudvps/questcloud มี `EMAIL_HOST`) และ **MinIO** (herotime `uploads`)
-- webhub auto-start ตอน login (Task Scheduler) / tray icon
-- CPU/RAM ต่อ site, แจ้งเตือน crash
-- backup ตามเวลา + retention
-- ปุ่มเปิดใน VS Code / terminal / folder, git branch/status, alias หลายชื่อต่อ site
-- export/import config ของ webhub, cleanup container/volume ที่ webhub สร้าง
+### Backlog
+- (ว่าง — ย้ายเข้า design แล้วใน v5: §0, §5.8, §20)
 
 ---
 
@@ -953,3 +987,21 @@ variants:
   - when: { dep: "next", range: "<13" }
     start: { cmd: "next dev -p {PORT} -H {HOST}" }
 ```
+
+---
+
+## 20. Operations
+
+| Function | ทำยังไง |
+|---|---|
+| **Autostart** | Task Scheduler task "At log on" ของ user (ไม่ต้อง admin) รัน daemon; ตอน start เช็ค Docker Desktop (เปิดให้ถ้าตั้งไว้) → nginx → infra ที่จำเป็น → site `auto` |
+| **Tray icon** | สถานะรวม (●/⚠), เปิด dashboard, start/stop site ที่ใช้บ่อย, Quit |
+| **Metrics** | CPU/RAM ต่อ site: native = รวมทั้ง process tree (`Get-Process`/`pidusage`), compose/container = `docker stats --no-stream`; เก็บย้อนหลังสั้น (ring buffer) แสดง sparkline |
+| **Notify** | crash / restart เกิน backoff / health fail / port ชน / backup fail → Windows toast + badge ใน dashboard |
+| **Scheduled backup** | ตาม `backups.schedule` (default ทุกวัน 03:00) ทุก DB ใน shared + isolated, เก็บ `keep` ชุดล่าสุด, ไฟล์ใน `data/backups/` |
+| **Cleanup** | `webhub cleanup` ลบเฉพาะของที่ webhub สร้าง (label `webhub.managed=true`): container, network `webhub`, override, nginx conf, runtimes ที่ไม่ใช้ — **ไม่ลบ volume เดิมของ project, ไม่แตะ project**; `--dry-run` ดูก่อน |
+| **Config export/import** | zip `webhub.config.json` + `data/sites`, `ports.json`, `profiles/` (ไม่รวม secrets/backups เว้นแต่ `--with-secrets`) → ย้ายเครื่อง / เตรียม export ไป VPS |
+| **Dev shortcuts** | ปุ่ม VS Code (`code <path>`), terminal (Windows Terminal ที่ cwd ของ site + env ของ site), explorer; git branch/dirty status (อ่านอย่างเดียว) |
+| **Alias** | ชื่อเพิ่มต่อ site (`pos.localhost` + `shop.localhost`) → nginx `server_name` + hosts sync |
+
+ทุก resource ที่ webhub สร้าง (container, network, volume ของ shared infra) ติด label `webhub.managed=true` เพื่อแยกจากของ project
