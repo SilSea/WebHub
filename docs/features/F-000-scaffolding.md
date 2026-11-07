@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (merge ผ่าน PR → `develop`) |
 | Phase | MVP-0 (PLAN.md) |
 | DESIGN.md | §0 (Stack), §12 (Folder structure), §21.4 (npm package), §21.5 (fixtures) |
 | Depends on | — |
@@ -128,7 +128,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-000/test-1.md) | [review-1](../reports/F-000/review-1.md) | [security-1](../reports/F-000/security-1.md) | critical 0 / major 0; minor 7+2 sec, nit 2+2 sec → แก้ทั้งหมด |
 | 2 | [test-2](../reports/F-000/test-2.md) | [review-2](../reports/F-000/review-2.md) | [security-2](../reports/F-000/security-2.md) | sec major 1 (N1), nit 3 → แก้ |
-| 3 | [test-3](../reports/F-000/test-3.md) | รอ | รอ | 29/29 |
+| 3 | [test-3](../reports/F-000/test-3.md) | [review-3](../reports/F-000/review-3.md) | [security-3](../reports/F-000/security-3.md) | critical/major/security open = 0; nit 1 แก้แล้ว — **done** |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §12  - [x] PLAN.md queue  - [x] features/README.md  - [x] reports/README.md
@@ -137,6 +137,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-07 | W1 ① | ร่าง spec |
+| 2026-11-07 | W3 E5 | review/security 3 รอบ, แก้ครบ, DoD ผ่าน (รอ merge PR + CI Node 22) |
 | 2026-11-07 | W3 E1–E4 | implement (`bb0fba1`), test-1 ผ่าน 22/22, review-1 + security-1 ไม่มี critical/major |
 | 2026-11-07 | W1 ③④⑤ | อนุมัติ spec, เข้า queue, ผู้ใช้สั่งทำต่อ (W3 เฉพาะ F-000) |
 | 2026-11-07 | W1 ② | Q1 Node 22, Q2 pnpm, Q3 Biome, Q4 Actions + PR |

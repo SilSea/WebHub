@@ -39,12 +39,12 @@ export async function assertNoSymlinks(dir: string): Promise<void> {
 export async function copyFixture(name: string, root: string = FIXTURES_ROOT): Promise<string> {
   if (!NAME_RE.test(name)) throw new Error(`invalid fixture name: ${JSON.stringify(name)}`);
   const src = resolve(root, name);
-  if (!isInside(root, src)) throw new Error(`fixture outside fixtures/: ${name}`);
+  if (!isInside(root, src)) throw new Error(`fixture outside root ${root}: ${name}`);
   const st = await lstat(src).catch(() => null);
   if (st?.isSymbolicLink()) throw new Error(`fixtures must not contain symlinks: ${src}`);
   if (!st?.isDirectory()) throw new Error(`fixture not found: ${name}`);
   if (!isInside(await realpath(root), await realpath(src))) {
-    throw new Error(`fixture resolves outside fixtures/: ${name}`);
+    throw new Error(`fixture resolves outside root ${root}: ${name}`);
   }
   await assertNoSymlinks(src);
   const tmp = await mkdtemp(join(tmpdir(), TEMP_PREFIX));

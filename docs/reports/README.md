@@ -11,7 +11,7 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 ## Features / CR
 | ID | รอบล่าสุด | test | review | security | ผล |
 |---|---|---|---|---|---|
-| F-000 | 3 | [test-3](F-000/test-3.md) | [review-2](F-000/review-2.md) | [security-2](F-000/security-2.md) | round 1–2 แก้ครบ; round 3 review รอ |
+| F-000 | 3 | [test-3](F-000/test-3.md) | [review-3](F-000/review-3.md) | [security-3](F-000/security-3.md) | done — critical/major/security 0 |
 
 ## Regression
 | วันที่ | ผล |

@@ -8,7 +8,7 @@
 
 | ลำดับ | งาน | Status | Spec |
 |---|---|---|---|
-| 1 | F-000 Repo scaffolding | `review` | [spec](features/F-000-scaffolding.md) |
+| 1 | F-000 Repo scaffolding | `done` | [spec](features/F-000-scaffolding.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
