@@ -7,7 +7,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 
 ## 0. Decisions
 
-> **หลักการสูงสุด — Zero-touch:** project ทุกตัวต้อง **เหมือนเดิม 100%** (ไม่แก้ code, `.env`, `vite.config`, `docker-compose.yml`, `package.json` ฯลฯ). ทุกอย่างที่ต่างไปตอนรันผ่าน webhub (port, env, URL, DB, args, host header) ทำผ่าน **ชั้นนอก** เท่านั้น: process env, CLI args, compose override file, nginx, ไฟล์ใน `_WebHub/data/`. ถอด webhub ออก → project รันแบบเดิมได้ทันที. สิ่งที่ทำผ่านชั้นนอกไม่ได้ → webhub **แจ้งข้อจำกัด** ไม่ไปแก้ project
+> **หลักการสูงสุด — Zero-touch:** project ทุกตัวต้อง **เหมือนเดิม 100%** (ไม่แก้ code, `.env`, `vite.config`, `docker-compose.yml`, `package.json` ฯลฯ). ทุกอย่างที่ต่างไปตอนรันผ่าน webhub (port, env, URL, DB, args, host header) ทำผ่าน **ชั้นนอก** เท่านั้น: process env, CLI args, compose override file, nginx, ไฟล์ใน `$WEBHUB_HOME/data/`. ถอด webhub ออก → project รันแบบเดิมได้ทันที. สิ่งที่ทำผ่านชั้นนอกไม่ได้ → webhub **แจ้งข้อจำกัด** ไม่ไปแก้ project
 
 | เรื่อง | ตัดสินใจ |
 |---|---|
@@ -17,7 +17,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Database | **Shared Infra**: postgres / mysql / mariadb / mongo / redis — **1 server ต่อ engine ต่อ major** (ปกติ engine ละตัวเดียว), แต่ละ site ได้ database + user ของตัวเอง; ต่อ site เลือก `shared` / `isolated` / `external` |
 | DB tools | **DB Studio** ในตัวที่ `db.localhost`: SQL (pg/mysql/mariadb/sqlite), MongoDB, Redis — browse/edit/query/schema/import-export + guard กันพลาด; ระหว่างสร้าง Studio เปิด **CloudBeaver / RedisInsight / mongo-express** (connection อัตโนมัติ) ให้ใช้ได้ครบตั้งแต่ Data Hub phase |
 | ภาษา | **Runtime Profiles** แบบ data-driven (YAML) — built-in หลายภาษา + เพิ่มเองได้ไม่ต้องแก้ code |
-| ที่เก็บ config | รวมใน `_WebHub/data/` |
+| ที่เก็บ config | รวมใน `$WEBHUB_HOME` (default `%APPDATA%\webhub`; ระหว่างพัฒนาใช้ repo `_WebHub/` ได้) — `data/`, `runtimes/`, `logs/`, `nginx/` (§21.4) |
 | Docker project | `docker compose` ด้วย **project name เดิม** + override file; adopt container ที่รันอยู่แล้ว |
 | Hot reload | compose ที่ mount source → default `hybrid` (app native); compose ที่ build image → compose + Rebuild; polling เป็น fallback |
 | Non-docker | dev mode native ด้วย runtime จาก Runtime Manager (ของเครื่อง หรือ portable); ทำไม่ได้ → `container` |
@@ -30,7 +30,7 @@ scan หา project ที่เป็นเว็บ (ทุกภาษา) �
 | Operations | CPU/RAM ต่อ site, แจ้งเตือน crash, backup ตามเวลา + retention, cleanup ของที่ webhub สร้าง, export/import config (§20) |
 | Security | API bind `127.0.0.1`, Host/Origin check, **token อัตโนมัติ** ใน cookie; static deny-list |
 | nginx | Docker container, resolve upstream ตอน request |
-| Version ภาษา | **Runtime Manager**: detect version ที่ project ต้องการ → ใช้ของบนเครื่องถ้าผ่าน range, ไม่ผ่าน → โหลด portable เก็บใน `_WebHub/runtimes/` (ไม่ admin, ไม่แตะ PATH ระบบ), ทำไม่ได้ → `container` (§19.1) |
+| Version ภาษา | **Runtime Manager**: detect version ที่ project ต้องการ → ใช้ของบนเครื่องถ้าผ่าน range, ไม่ผ่าน → โหลด portable เก็บใน `$WEBHUB_HOME/runtimes/` (ไม่ admin, ไม่แตะ PATH ระบบ), ทำไม่ได้ → `container` (§19.1) |
 | Version DB | **server ต่อ major**: pg/redis default ย้ายขึ้น major ล่าสุดตัวเดียว, mysql/mongo default pin major เดิม, ทุก site pin ได้ (site ที่ pin major เดียวกันแชร์ server), ห้าม downgrade (§19.2) |
 | Redis engine | `redis:7` default, สลับเป็น **Valkey** ได้ใน config (§19.3) |
 | Stack ของ webhub | Node + TypeScript (Fastify + Vite/React) |
@@ -681,7 +681,7 @@ server {
 ## 12. Folder Structure
 
 ```
-_WebHub/
+_WebHub/                      # repo (npm package source)
 ├── DESIGN.md
 ├── webhub.config.json
 ├── package.json
@@ -720,7 +720,9 @@ _WebHub/
 ├── dashboard/                # Vite + React
 ├── docker/{nginx.compose.yml, infra.compose.yml, tools.compose.yml}
 ├── nginx/{nginx.conf, sites/, errors/}
-├── runtimes/                 # gitignored: portable runtimes <lang>/<ver>/
+│
+│  ── ด้านล่างอยู่ใน $WEBHUB_HOME ตอนใช้งานจริง (default %APPDATA%\webhub), dev = ใน repo + gitignore ──
+├── runtimes/                 # portable runtimes <lang>/<ver>/
 ├── data/                     # gitignored
 │   ├── sites/  compose/  profiles/  backups/  venvs/
 │   ├── ports.json  infra.json  secrets.json  auth.json  state.json
@@ -930,7 +932,7 @@ Dockerfile `FROM` = hint เท่านั้น (เตือน ไม่บ�
 ```
 required range
   → runtime บนเครื่องผ่าน?          → ใช้ (source: system)
-  → ไม่ผ่าน → มีใน _WebHub/runtimes? → ใช้ (source: webhub)
+  → ไม่ผ่าน → มีใน $WEBHUB_HOME/runtimes? → ใช้ (source: webhub)
   → ไม่มี → โหลด portable ได้?        → โหลด + verify checksum → ใช้ (source: webhub)
   → ไม่ได้                          → runner `container` image version ตรง (source: container)
 ```
