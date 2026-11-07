@@ -48,8 +48,12 @@ export function execFile(
  */
 export function systemExe(name: string): string {
   if (process.platform === "win32") {
-    const env = process.env.SystemRoot;
-    const root = env !== undefined && isAbsolute(env) ? env : "C:Windows";
+    // only a full drive path (C:\...) is accepted; "C:Windows" or "\\Windows" would resolve
+    // against a current directory → refuse instead of guessing
+    const root = [process.env.SystemRoot, process.env.windir].find(
+      (v): v is string => v !== undefined && /^[A-Za-z]:[\\/]/.test(v) && isAbsolute(v),
+    );
+    if (root === undefined) throw new Error("SystemRoot is not set to an absolute path");
     return join(root, "System32", name);
   }
   for (const dir of ["/bin", "/usr/bin", "/usr/sbin", "/sbin"]) {
@@ -60,11 +64,18 @@ export function systemExe(name: string): string {
 }
 
 /** Runs a PowerShell script passed via -EncodedCommand (no quoting, no user data in the script). */
-export function powershell(script: string, input?: string): Promise<ExecResult> {
+export function powershell(
+  script: string,
+  input?: string,
+  timeoutMs?: number,
+): Promise<ExecResult> {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return execFile(
     systemExe(join("WindowsPowerShell", "v1.0", "powershell.exe")),
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-    input === undefined ? {} : { input },
+    {
+      ...(input === undefined ? {} : { input }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    },
   );
 }

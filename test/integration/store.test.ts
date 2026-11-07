@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, saveConfig } from "../../src/config/config.js";
 import { ensureHome, type Paths } from "../../src/config/home.js";
 import { isWebhubError } from "../../src/errors.js";
@@ -13,6 +13,20 @@ import { tempHome } from "../helpers/home.js";
 
 const LOCK_MODULE = pathToFileURL(join(import.meta.dirname, "../../dist/store/lock.js")).href;
 const HOME_MODULE = pathToFileURL(join(import.meta.dirname, "../../dist/config/home.js")).href;
+
+// child processes load the built code: refuse to test a stale dist/ (review-1 R11)
+beforeAll(async () => {
+  for (const [built, src] of [
+    ["dist/store/lock.js", "src/store/lock.ts"],
+    ["dist/config/home.js", "src/config/home.ts"],
+  ] as const) {
+    const root = join(import.meta.dirname, "../..");
+    const b = await stat(join(root, built)).catch(() => null);
+    if (b === null || b.mtimeMs < (await stat(join(root, src))).mtimeMs) {
+      throw new Error(`${built} is missing or older than ${src} — run \`pnpm build\` first`);
+    }
+  }
+});
 
 let h: { root: string; paths: Paths; cleanup(): Promise<void> };
 beforeEach(async () => {

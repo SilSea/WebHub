@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { WebhubError } from "../errors.js";
 import { isInside } from "../fs/safe-path.js";
@@ -26,10 +26,13 @@ export function defaultConfig(): Config {
   return validate(ConfigSchema, { schemaVersion: CONFIG_VERSION });
 }
 
-/** Resolves a config path (relative = relative to home) and requires it to stay inside home. */
+/**
+ * Resolves a config path (relative = relative to home) and requires it to be strictly inside
+ * home (never the home itself: a later "clean <dir>" must not be able to wipe the home).
+ */
 export function resolveInHome(home: string, p: string, key: string): string {
   const abs = isAbsolute(p) ? resolve(p) : resolve(home, p);
-  if (!isInside(home, abs)) {
+  if (!isInside(home, abs) || resolve(home) === abs) {
     throw new WebhubError("CONFIG_INVALID", `${key} must be inside WEBHUB_HOME: ${p}`, {
       details: [`${key}: resolves outside WEBHUB_HOME`],
     });
@@ -49,20 +52,27 @@ export async function checkConfig(config: Config, paths: Paths): Promise<string[
     try {
       resolveInHome(paths.home, p, key);
     } catch {
-      problems.push(`${key}: must resolve inside WEBHUB_HOME (got ${p})`);
+      problems.push(`${key}: must resolve to a folder inside WEBHUB_HOME (got ${p})`);
     }
   }
+  // compare real paths too: a junction / 8.3 short name can hide the same folder
+  const realHome = await realpath(paths.home).catch(() => resolve(paths.home));
   for (const [i, root] of config.scanRoots.entries()) {
-    if (isInside(root, paths.home)) {
+    const realRoot = await realpath(root).catch(() => resolve(root));
+    if (isInside(root, paths.home) || isInside(realRoot, realHome)) {
       problems.push(
         `scanRoots.${i}: WEBHUB_HOME (${paths.home}) must not be inside a scan root (${root})`,
       );
-    } else if (isInside(paths.home, root)) {
+    } else if (isInside(paths.home, root) || isInside(realHome, realRoot)) {
       problems.push(`scanRoots.${i}: scan root must not be inside WEBHUB_HOME (${root})`);
     }
-    const st = await stat(root).catch(() => null);
-    if (st === null) warnings.push(`scanRoots.${i}: folder does not exist yet: ${root}`);
-    else if (!st.isDirectory()) problems.push(`scanRoots.${i}: not a directory: ${root}`);
+    const st = await stat(root).catch((err: NodeJS.ErrnoException) => err);
+    if (st instanceof Error) {
+      if (st.code === "ENOENT") warnings.push(`scanRoots.${i}: folder does not exist yet: ${root}`);
+      else problems.push(`scanRoots.${i}: cannot access ${root} (${st.code ?? st.message})`);
+    } else if (!st.isDirectory()) {
+      problems.push(`scanRoots.${i}: not a directory: ${root}`);
+    }
   }
   if (problems.length > 0) {
     throw new WebhubError(

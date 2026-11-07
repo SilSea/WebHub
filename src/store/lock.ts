@@ -49,17 +49,23 @@ class FileLock implements Lock {
   async release(): Promise<void> {
     if (!this.#held) return;
     this.#held = false;
-    // move the file aside atomically, then delete it only if it is ours (else put it back)
-    const aside = `${this.file}.released-${rand()}`;
-    try {
-      await rename(this.file, aside);
-    } catch {
-      return; // already gone
-    }
-    const info = parseInfo(await readRaw(aside));
-    if (info?.token !== this.token) await link(aside, this.file).catch(() => {});
-    await rm(aside, { force: true });
+    await removeIf(this.file, (raw) => parseInfo(raw)?.token === this.token);
   }
+}
+
+/**
+ * Deletes `file` only if its content passes `isOurs`: rename aside (atomic, one winner),
+ * check, and put it back (link, never overwrites) if it belonged to someone else.
+ */
+async function removeIf(file: string, isOurs: (raw: string | undefined) => boolean): Promise<void> {
+  const aside = `${file}.aside-${rand()}`;
+  try {
+    await rename(file, aside);
+  } catch {
+    return; // already gone
+  }
+  if (!isOurs(await readRaw(aside))) await link(aside, file).catch(() => {});
+  await rm(aside, { force: true });
 }
 
 export type ProcessState =
@@ -145,20 +151,25 @@ const GUARD_STALE_MS = 30_000;
  */
 async function takeOver(file: string, judged: string | undefined): Promise<boolean> {
   const guard = `${file}.takeover`;
+  const mine = `${process.pid}:${rand()}`;
   try {
-    await writeFile(guard, String(process.pid), { flag: "wx", mode: 0o600 });
+    await writeFile(guard, mine, { flag: "wx", mode: 0o600 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    // a takeover that crashed leaves the guard behind; it only lives for milliseconds
+    // a takeover that crashed leaves the guard behind; it only lives for milliseconds.
+    // Break it only if it is still the same old guard (content compared after an atomic move).
+    const seen = await readRaw(guard);
     const st = await stat(guard).catch(() => null);
-    if (st !== null && Date.now() - st.mtimeMs > GUARD_STALE_MS) await rm(guard, { force: true });
+    if (st !== null && Date.now() - st.mtimeMs > GUARD_STALE_MS) {
+      await removeIf(guard, (raw) => raw === seen);
+    }
     return false;
   }
   try {
     if ((await readRaw(file)) === judged) await rm(file, { force: true });
     return true;
   } finally {
-    await rm(guard, { force: true });
+    await removeIf(guard, (raw) => raw === mine);
   }
 }
 

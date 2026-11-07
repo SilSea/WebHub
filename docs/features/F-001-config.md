@@ -40,7 +40,13 @@
 - ปฏิเสธ home ที่เป็น symlink/junction, อยู่ใน scan root, หรือเป็น root ของ drive
 - ระหว่างพัฒนาตั้ง `WEBHUB_HOME` เป็นโฟลเดอร์**นอก scan root** เช่น `%APPDATA%\webhub-dev` (repo อยู่ใน scan root `E:\Workspaces\Project` จึงใช้ repo เป็น home ไม่ได้ — กติกาข้อแรกปฏิเสธ; gitignore ยังครอบ `data/` `logs/` `runtimes/` กันพลาด)
 - home ที่มีอยู่แล้วต้องเป็นของ user ปัจจุบัน (Windows: owner = SID ตัวเอง หรือ Administrators; POSIX: uid ตัวเอง) และ parent ต้องเป็นของ user ตัวเอง / SYSTEM / Administrators / TrustedInstaller (POSIX: ตัวเอง / root) — กัน user อื่นสร้างโฟลเดอร์รอไว้ก่อน (security-1 S2)
-- ACL: ถ้า ACL ของ home ไม่ใช่ "protected + user + SYSTEM" พอดี → `icacls /reset /T` ทั้ง tree แล้วตั้ง ACL ที่ home (ลูกสืบทอด) — ลูกที่มี ACL เปิดกว้างค้างอยู่ถูกล้าง (S3). POSIX: ถ้ามี group/other bit → ลบออกทั้ง tree
+- home ที่เพิ่งสร้าง → ตั้ง ACL ทันทีหลัง mkdir (ก่อนตรวจอื่นที่ช้า) ลดช่องเวลาให้ user อื่นแทรก
+- ตรวจทั้ง tree (audit) เมื่อยังไม่มี marker `.webhub-secured` หรือ ACL/mode ของ home ไม่ตรง: walk เองไม่ตาม link (ไม่ใช้ `icacls /T` — มันตาม junction ออกนอก home, review-2 N1)
+  - เจอ junction/reparse point (Windows) → `SYMLINK_REFUSED` (POSIX: symlink ข้าม ไม่ตาม — runtimes ใช้ symlink ปกติ)
+  - เจอ entry ที่ owner ไม่ใช่ user / SYSTEM / Administrators หรืออ่านไม่ได้ → `HOME_INVALID` (N2)
+  - entry ที่มี ACL ของตัวเอง (explicit / protected) → `icacls <entry> /reset` ทีละตัว แล้วตั้ง ACL ที่ home (ลูกสืบทอด); POSIX: ลบ group/other bit
+  - icacls ที่รายงาน `Failed processing N>0` = error (icacls คืน 0 แม้บางไฟล์พัง)
+  - ผ่านแล้วเขียน marker → ครั้งต่อไปตรวจแค่ ACL ของ home (เร็ว)
 - test ใช้ home ใน temp dir เสมอ (ไม่แตะ home จริงของเครื่อง)
 
 ```ts
@@ -65,7 +71,9 @@ writeDoc(lock, file, value): Promise<void>   // ต้องถือ lock; file
   - เท่ากับปัจจุบัน → validate
   - ต่ำกว่า → รัน migration ทีละขั้น (บน copy) → validate → ถ้าถือ lock: backup ไป `data/backups/migrate/<timestamp>/<file>` แล้วเขียนกลับ; ไม่ถือ lock (CLI): ใช้ค่าที่ migrate ในหน่วยความจำ ไม่แตะไฟล์
   - **สูงกว่า** (ไฟล์จาก webhub เวอร์ชันใหม่) → error `CONFIG_FROM_NEWER_VERSION` ไม่แก้ไฟล์ (กันข้อมูลหายตอน downgrade)
-- อ่านไฟล์: ปฏิเสธ symlink (lstat), จำกัดขนาด 5 MB, JSON parse error → error ระบุไฟล์ + บรรทัด, ลอง `.bak` ไม่อัตโนมัติ (แจ้งให้ `doctor` เสนอ restore)
+- อ่านไฟล์: ปฏิเสธ symlink (lstat), จำกัดขนาด 5 MB, ตัด UTF-8 BOM, JSON parse error → error ระบุไฟล์ + line/column (หาเองด้วย `jsonErrorIndex` — **ไม่ใช้ข้อความของ V8** เพราะมันยกเนื้อหาไฟล์มา อาจมี credential), ลอง `.bak` ไม่อัตโนมัติ (แจ้งให้ `doctor` เสนอ restore)
+- error ของ schema แสดงค่าที่ได้รับ `(got …)` เฉพาะตัวเลข/boolean/string สั้น และไม่แสดงเลยใต้ key ที่อาจเป็น credential (`defaultEnv`, `entries`, …) หรือเอกสาร `sensitive`
+- `DocSpec.sensitive` (secrets.json): ไม่เก็บ `.bak` และลบ `.bak` เก่า — secret ที่ลบ/เปลี่ยนแล้วไม่ค้างในสำเนา (S8); migration backup ยังเก็บ (ค่าเข้ารหัสอยู่)
 - เขียนได้เฉพาะ process ที่ถือ lock
 
 ### 3.3 Lock (`src/store/lock.ts`)
@@ -74,7 +82,7 @@ acquireLock(paths): Promise<Lock>   // data/.lock: { pid, startedAt, hostname, t
 Lock.release(): Promise<void>
 ```
 - สร้าง lock แบบ atomic พร้อมเนื้อหา: เขียน temp แล้ว `link()` (มี EEXIST); filesystem ที่ไม่มี hard link → `wx`
-- lock ค้างจาก process ที่ตายแล้ว (PID ไม่อยู่ หรือ start time ไม่ตรง — กัน PID reuse) → ยึดคืนได้ โดยต้องถือ guard `<lock>.takeover` (wx) และอ่านซ้ำใต้ guard ว่ายังเป็นไฟล์เดิม ถึงจะลบ — มีผู้ชนะคนเดียว (review-1 R1 / security-1 S1); guard ค้าง > 30 วิ ถูกลบ
+- lock ค้างจาก process ที่ตายแล้ว (PID ไม่อยู่ หรือ start time ไม่ตรง — กัน PID reuse) → ยึดคืนได้ โดยต้องถือ guard `<lock>.takeover` (wx) และอ่านซ้ำใต้ guard ว่ายังเป็นไฟล์เดิม ถึงจะลบ — มีผู้ชนะคนเดียว (review-1 R1 / security-1 S1); guard มี token; guard ค้าง > 30 วิ ถูกลบแบบ atomic (ย้ายออก + เทียบเนื้อหา) และลบ guard เฉพาะของตัวเอง (review-2 N3)
 - สถานะ process 3 แบบ `alive / dead / unknown` (Windows ใช้ CIM `Win32_Process.CreationDate` อ่านข้าม elevation ได้); `unknown` (สิทธิ์ไม่พอ, tool พัง) = ถือว่ายังมีชีวิต → `LOCKED` (R2)
 - `Lock.verify()` อ่าน token บนดิสก์ก่อนทุก `writeDoc` — lock หาย/ถูกแทน → `NOT_LOCKED`
 - lock ของ hostname อื่น (home บน network drive) → ถือว่ายังล็อกอยู่ (ตรวจ process เครื่องอื่นไม่ได้)
@@ -84,7 +92,7 @@ Lock.release(): Promise<void>
 ### 3.4 Config schema (`webhub.config.json`, schemaVersion 1)
 ตาม DESIGN §11.3 ทุก key: `mode`, `locale`, `scanRoots`, `maxDepth`, `ignore`, `domainSuffix`, `reservedNames`, `ports`, `infra`, `runtimes`, `daemon`, `backups`, `defaultEnv`, `onDemand`, `profilesDir`
 - ไม่มีไฟล์ → ใช้ default ในหน่วยความจำ (ไม่เขียนจนกว่าจะ save — `setup` F-008 เป็นคนสร้าง)
-- validate เพิ่ม: `scanRoots` เป็น absolute + มีอยู่จริง (warning ถ้าไม่มี), ห้ามซ้อนกับ `$WEBHUB_HOME`; ช่วง port 1–65535 และ start ≤ end; `domainSuffix` เป็น hostname label ที่ถูกต้อง; path relative → resolve กับ home และต้องอยู่ใน home
+- validate เพิ่ม: `scanRoots` เป็น absolute + มีอยู่จริง (warning เฉพาะ ENOENT; สิทธิ์ไม่พอ = error), ห้ามซ้อนกับ `$WEBHUB_HOME` (เทียบทั้ง path ตรงและ realpath — กัน junction / ชื่อ 8.3); `runtimes.dir`/`profilesDir` ห้ามเท่ากับ home; ช่วง port 1–65535 และ start ≤ end; `domainSuffix` เป็น hostname label ที่ถูกต้อง; path relative → resolve กับ home และต้องอยู่ใน home
 - key ไม่รู้จัก / ค่าผิด → **error `CONFIG_INVALID` ไม่ start** พร้อมรายการทุกจุดที่ผิด (path ของ key, ค่าที่ได้, ที่คาด) — zod `strict()` ทุก object
 - schema เขียนด้วย zod 4 → `configJsonSchema()` คืน JSON Schema (ไว้ให้ editor autocomplete / profile §21.5). **การ export เป็นไฟล์ `schemas/` ใน package เลื่อนออกไป** — ต้องเพิ่มใน `files` ของ package.json = แก้ F-000 (ต้องมี CR); ทำพร้อม feature ที่ใช้จริง
 
@@ -105,7 +113,7 @@ generateSecret(bytes = 32): string     // crypto.randomBytes → base64url
 
 ### 3.7 เรียกโปรแกรมของ OS (`src/proc/exec.ts`)
 - `execFile` = spawn แบบ args array, `shell: false`, ข้อมูลลับส่งทาง stdin; error ของ stdin (child ปิดก่อนอ่าน) ไม่ทำ process crash — ใช้ exit code แทน (R4)
-- `systemExe(name)` = path เต็มของเครื่องมือ OS: Windows `%SystemRoot%\System32\…` (`icacls.exe`, `whoami.exe`, `WindowsPowerShell\v1.0\powershell.exe`), POSIX `/bin`, `/usr/bin`, … — **ห้ามหาผ่าน PATH** (เจอจริงตอนเทส: Git Bash มี `whoami` ของ coreutils มาก่อนใน PATH ทำให้หา SID ไม่ได้; และกัน binary planting)
+- `systemExe(name)` = path เต็มของเครื่องมือ OS: Windows `%SystemRoot%\System32\…` (`icacls.exe`, `whoami.exe`, `WindowsPowerShell\v1.0\powershell.exe`; `SystemRoot`/`windir` ต้องเป็น `X:\…` ไม่งั้น error — ไม่เดา), POSIX `/bin`, `/usr/bin`, … — **ห้ามหาผ่าน PATH** (เจอจริงตอนเทส: Git Bash มี `whoami` ของ coreutils มาก่อนใน PATH ทำให้หา SID ไม่ได้; และกัน binary planting)
 - `powershell(script, input?)` = `-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand` (script คงที่ ไม่มีข้อมูลผู้ใช้ใน script)
 
 ## 4. ผลดี / ผลเสีย
@@ -172,7 +180,8 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-001/test-1.md) | [review-1](../reports/F-001/review-1.md) | [security-1](../reports/F-001/security-1.md) | major 6 (R1–R4, S2, S3) → แก้ |
-| 2 | [test-2](../reports/F-001/test-2.md) | | | |
+| 2 | [test-2](../reports/F-001/test-2.md) | [review-2](../reports/F-001/review-2.md) (code + security) | ↔ | R1–R4 fixed; S2/S3 partial; major ใหม่ N1, N2 → แก้ |
+| 3 | [test-3](../reports/F-001/test-3.md) | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
@@ -186,3 +195,5 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 2026-11-07 | W3 E2 | implement; ปรับ spec ให้ตรงของจริง: dev home ต้องอยู่นอก scan root, เลื่อน export ไฟล์ JSON Schema (ต้อง CR F-000), API ของ store/secrets, `systemExe` (§3.7), `NOT_LOCKED`/`PATH_OUTSIDE_HOME` |
 | 2026-11-07 | W3 E3 | test-1: 89 pass / 4 skip (ตาม OS); เทสเจอ bug 2 ตัวแก้แล้ว (whoami จาก PATH, secret ว่างทำ DPAPI พัง) |
 | 2026-11-07 | W3 E4/E5 | review-1 + security-1: critical 0, major 6 → แก้ครบ + test (test-2: 101 pass / 5 skip) |
+| 2026-11-07 | W3 E5 | ผู้ใช้ตัดสิน minor/nit รอบ 1: แก้ทั้งหมด |
+| 2026-11-07 | W3 E4/E5 | review-2: major N1, N2 + minor N3 → แก้พร้อม minor/nit ทั้งหมด (test-3: 116 pass / 5 skip) |

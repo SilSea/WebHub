@@ -37,18 +37,26 @@ async function runDpapi(op: "Protect" | "Unprotect", items: readonly Buffer[]): 
     "$scope = [System.Security.Cryptography.DataProtectionScope]::CurrentUser",
     // every item travels as "b:<base64>" so an empty secret is still exactly one line
     "$lines = [Console]::In.ReadToEnd() -split \"`n\" | Where-Object { $_.StartsWith('b:') }",
-    "foreach ($l in $lines) {",
-    `  $out = [System.Security.Cryptography.ProtectedData]::${op}([Convert]::FromBase64String($l.Substring(2).Trim()), $entropy, $scope)`,
-    "  [Console]::Out.WriteLine('b:' + [Convert]::ToBase64String($out))",
-    "}",
+    "try {",
+    "  foreach ($l in $lines) {",
+    `    $out = [System.Security.Cryptography.ProtectedData]::${op}([Convert]::FromBase64String($l.Substring(2).Trim()), $entropy, $scope)`,
+    "    [Console]::Out.WriteLine('b:' + [Convert]::ToBase64String($out))",
+    "  }",
+    // exception text from DPAPI/.NET never contains the data (input is only on stdin)
+    "} catch { [Console]::Out.WriteLine('ERR:' + $_.Exception.GetType().Name + ': ' + $_.Exception.Message); exit 1 }",
   ].join("\n");
   const input = `${items.map((b) => `b:${b.toString("base64")}`).join("\n")}\n`;
   const res = await powershell(script, input);
-  const lines = res.stdout.split(/\r?\n/).filter((l) => l.startsWith("b:"));
+  const out = res.stdout.split(/\r?\n/);
+  const lines = out.filter((l) => l.startsWith("b:"));
   if (res.code !== 0 || lines.length !== items.length) {
-    // stderr from DPAPI never contains the secret (input is only on stdin)
+    const reason = out
+      .find((l) => l.startsWith("ERR:"))
+      ?.slice(4)
+      .trim();
     throw new WebhubError("SECRET_BACKEND", `DPAPI ${op.toLowerCase()} failed`, {
-      details: [res.stderr.split(/\r?\n/)[0] ?? ""],
+      details: [reason ?? `PowerShell exited with code ${res.code}`],
+      hint: "PowerShell may be blocked (AppLocker / Constrained Language Mode); see `webhub doctor`.",
     });
   }
   return lines.map((l) => Buffer.from(l.slice(2).trim(), "base64"));
@@ -67,6 +75,7 @@ export const secretsSpec: DocSpec<SecretsFile> = {
   version: 1,
   schema: SecretsFileSchema,
   migrations: [],
+  sensitive: true,
 };
 
 /** Random secret (CSPRNG), base64url. */
@@ -123,6 +132,7 @@ export class SecretStore {
   }
 
   has(key: string): boolean {
+    checkKey(key);
     return this.#values.has(key);
   }
 
@@ -173,7 +183,8 @@ export class SecretStore {
       backend: this.backend.name,
       entries: Object.fromEntries([...cipher].sort(([a], [b]) => (a < b ? -1 : 1))),
     };
-    await writeDoc(lock, this.file, doc);
+    // no .bak: a deleted/rotated secret must not survive in a copy (security-1 S8)
+    await writeDoc(lock, this.file, doc, { keepBackup: false });
   }
 
   toJSON(): string {

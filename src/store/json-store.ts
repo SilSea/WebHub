@@ -3,6 +3,7 @@ import { copyFile, lstat, mkdir, open, readFile, rename, rm } from "node:fs/prom
 import { basename, dirname, join } from "node:path";
 import type { z } from "zod";
 import { WebhubError } from "../errors.js";
+import { jsonErrorIndex, lineCol } from "../fs/json-position.js";
 import { assertSafePath } from "../fs/safe-path.js";
 import { assertLock, type Lock } from "./lock.js";
 
@@ -19,6 +20,8 @@ export interface DocSpec<T> {
   version: number;
   schema: z.ZodType<T>;
   migrations: readonly Migration[];
+  /** Values may be credentials: never echoed in errors, no `.bak` copies (secrets.json). */
+  sensitive?: boolean;
 }
 
 export interface ReadResult<T> {
@@ -65,22 +68,45 @@ export async function readDoc<T>(
     }
     current = { ...step.migrate(structuredClone(current)), schemaVersion: v + 1 };
   }
-  const value = validate(spec.schema, current, file);
+  const sensitive = spec.sensitive === true;
+  const value = validate(spec.schema, current, file, { sensitive });
   if (version === spec.version) return { value };
   if (opts.lock !== undefined) {
+    // migration backups are kept even for sensitive docs (values there are encrypted at rest)
     const backups = opts.backupsDir ?? join(opts.home, "data", "backups");
     await backupFile(file, opts.home, backups);
-    await writeDoc(opts.lock, file, value);
+    await writeDoc(opts.lock, file, value, { keepBackup: !sensitive });
   }
   return { value, migratedFrom: version };
 }
 
-export function validate<T>(schema: z.ZodType<T>, value: unknown, file?: string): T {
+/** Keys whose values may hold credentials: never echoed in errors. */
+const SENSITIVE_KEYS = new Set(["defaultEnv", "entries", "password", "token", "secret"]);
+
+/** Short, non-sensitive received value for an error line ("" when it must not be shown). */
+function received(value: unknown, path: readonly PropertyKey[], sensitive: boolean): string {
+  if (sensitive || path.some((k) => SENSITIVE_KEYS.has(String(k)))) return "";
+  let cur: unknown = value;
+  for (const k of path) {
+    if (typeof cur !== "object" || cur === null) return "";
+    cur = (cur as Record<PropertyKey, unknown>)[k];
+  }
+  if (typeof cur === "number" || typeof cur === "boolean") return ` (got ${String(cur)})`;
+  if (typeof cur === "string" && cur.length <= 40) return ` (got ${JSON.stringify(cur)})`;
+  return "";
+}
+
+export function validate<T>(
+  schema: z.ZodType<T>,
+  value: unknown,
+  file?: string,
+  opts: { sensitive?: boolean } = {},
+): T {
   const res = schema.safeParse(value);
   if (res.success) return res.data;
   const details = res.error.issues.map((i) => {
     const path = i.path.length === 0 ? "(root)" : i.path.map(String).join(".");
-    return `${path}: ${i.message}`;
+    return `${path}: ${i.message}${received(value, i.path, opts.sensitive === true)}`;
   });
   throw new WebhubError(
     "CONFIG_INVALID",
@@ -100,11 +126,15 @@ export async function readJsonFile(file: string, home: string): Promise<unknown>
   if (st.size > MAX_FILE_BYTES) {
     throw new WebhubError("FILE_TOO_LARGE", `file exceeds ${MAX_FILE_BYTES} bytes`, { file });
   }
-  const text = await readFile(file, "utf8");
+  let text = await readFile(file, "utf8");
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1); // BOM (PowerShell 5.1 "utf8")
   try {
     return JSON.parse(text);
-  } catch (err) {
-    throw new WebhubError("JSON_PARSE", `invalid JSON: ${(err as Error).message}`, {
+  } catch {
+    // never echo V8's message: it quotes file content, which may contain credentials
+    const pos = jsonErrorIndex(text);
+    const at = pos < 0 ? "" : ` at ${lineCol(text, pos)}`;
+    throw new WebhubError("JSON_PARSE", `invalid JSON${at}`, {
       file,
       hint: "Fix the file by hand or restore it from the .bak next to it.",
     });
@@ -112,7 +142,13 @@ export async function readJsonFile(file: string, home: string): Promise<unknown>
 }
 
 /** Atomically writes `value` as JSON: tmp + fsync + rename; keeps the previous version as .bak. */
-export async function writeDoc(lock: Lock, file: string, value: unknown): Promise<void> {
+export async function writeDoc(
+  lock: Lock,
+  file: string,
+  value: unknown,
+  opts: { keepBackup?: boolean } = {},
+): Promise<void> {
+  const keepBackup = opts.keepBackup !== false;
   assertLock(lock, lock.home);
   await lock.verify();
   await assertSafePath(lock.home, file);
@@ -136,12 +172,13 @@ export async function writeDoc(lock: Lock, file: string, value: unknown): Promis
       () => true,
       () => false,
     );
-    if (exists) await copyFile(file, `${file}.bak`);
+    if (exists && keepBackup) await copyFile(file, `${file}.bak`);
     await renameWithRetry(tmp, file);
   } catch (err) {
     await rm(tmp, { force: true });
     throw err;
   }
+  if (!keepBackup) await rm(`${file}.bak`, { force: true }); // no stale copy of old values
   if (process.platform !== "win32") {
     const dh = await open(dirname(file), "r");
     try {

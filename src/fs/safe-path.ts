@@ -5,7 +5,8 @@ import { WebhubError } from "../errors.js";
 /** True when `child` resolves to `root` itself or somewhere below it. */
 export function isInside(root: string, child: string): boolean {
   const rel = relative(resolve(root), resolve(child));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  // "..foo" is a child named "..foo", not a parent: compare whole segments
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /**
