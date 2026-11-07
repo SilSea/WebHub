@@ -94,7 +94,8 @@ export function jsonErrorIndex(text: string): number {
     ws();
     return i < text.length ? i : -1;
   } catch (pos) {
-    return typeof pos === "number" ? pos : 0;
+    // anything else (e.g. stack overflow on very deep nesting): position unknown
+    return typeof pos === "number" ? pos : -1;
   }
 }
 

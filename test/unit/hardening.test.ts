@@ -92,7 +92,12 @@ describe("config minors (R8, R10, S7)", () => {
   });
 
   it("runtimes.dir / profilesDir equal to home are rejected", async () => {
-    for (const cfg of [{ runtimes: { dir: "." } }, { profilesDir: ["./"] }]) {
+    const cases: object[] = [{ runtimes: { dir: "." } }, { profilesDir: ["./"] }];
+    if (process.platform === "win32") {
+      // same folder, different letter case (review-3 F2)
+      cases.push({ runtimes: { dir: h.paths.home.toUpperCase() } });
+    }
+    for (const cfg of cases) {
       await writeFile(h.paths.config, JSON.stringify({ schemaVersion: 1, ...cfg }));
       expect((await caught(loadConfig(h.paths))).code).toBe("CONFIG_INVALID");
     }
@@ -163,6 +168,11 @@ describe("systemExe (R5 / S6)", () => {
       process.env.SystemRoot = "C:Windows";
       process.env.windir = "\\Windows";
       expect(() => systemExe("whoami.exe")).toThrow(/SystemRoot/);
+      try {
+        systemExe("whoami.exe");
+      } catch (err) {
+        expect(isWebhubError(err, "SYSTEM_TOOL")).toBe(true); // review-3 F6
+      }
     } finally {
       process.env.SystemRoot = saved.SystemRoot;
       process.env.windir = saved.windir;

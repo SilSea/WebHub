@@ -46,6 +46,7 @@
   - เจอ entry ที่ owner ไม่ใช่ user / SYSTEM / Administrators หรืออ่านไม่ได้ → `HOME_INVALID` (N2)
   - entry ที่มี ACL ของตัวเอง (explicit / protected) → `icacls <entry> /reset` ทีละตัว แล้วตั้ง ACL ที่ home (ลูกสืบทอด); POSIX: ลบ group/other bit
   - icacls ที่รายงาน `Failed processing N>0` = error (icacls คืน 0 แม้บางไฟล์พัง)
+  - home ที่ ACL ไม่ตรง (ทั้งใหม่และเก่า) ถูกล็อกก่อน audit เสมอ — หลังล็อกไม่มีใครเพิ่มของใน home ได้ audit จึงเห็นครบ (review-3 F1); reset ทีละ entry ใช้ `/L`
   - ผ่านแล้วเขียน marker → ครั้งต่อไปตรวจแค่ ACL ของ home (เร็ว)
 - test ใช้ home ใน temp dir เสมอ (ไม่แตะ home จริงของเครื่อง)
 
@@ -181,7 +182,8 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-001/test-1.md) | [review-1](../reports/F-001/review-1.md) | [security-1](../reports/F-001/security-1.md) | major 6 (R1–R4, S2, S3) → แก้ |
 | 2 | [test-2](../reports/F-001/test-2.md) | [review-2](../reports/F-001/review-2.md) (code + security) | ↔ | R1–R4 fixed; S2/S3 partial; major ใหม่ N1, N2 → แก้ |
-| 3 | [test-3](../reports/F-001/test-3.md) | | | |
+| 3 | [test-3](../reports/F-001/test-3.md) | [review-3](../reports/F-001/review-3.md) (code + security) | ↔ | N1, N2(a,c), N3 fixed; major ใหม่ F1 + minor F2 + nit 4 → ครบ 3 รอบ ผู้ใช้สั่งแก้ทั้งหมด + review อีกรอบ |
+| 4 | [test-4](../reports/F-001/test-4.md) | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §21.6 (home, lock, atomic, secrets at rest, newer-version)  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
@@ -197,3 +199,4 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 2026-11-07 | W3 E4/E5 | review-1 + security-1: critical 0, major 6 → แก้ครบ + test (test-2: 101 pass / 5 skip) |
 | 2026-11-07 | W3 E5 | ผู้ใช้ตัดสิน minor/nit รอบ 1: แก้ทั้งหมด |
 | 2026-11-07 | W3 E4/E5 | review-2: major N1, N2 + minor N3 → แก้พร้อม minor/nit ทั้งหมด (test-3: 116 pass / 5 skip) |
+| 2026-11-07 | W3 E5 | review-3 ครบเพดาน 3 รอบ (major F1) → ผู้ใช้สั่ง "แก้ทั้งหมด + review อีกรอบ"; แก้ F1–F6 (test-4: 119 pass / 5 skip) |

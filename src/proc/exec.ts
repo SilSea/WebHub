@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { WebhubError } from "../errors.js";
 
 export interface ExecResult {
   code: number;
@@ -53,14 +54,18 @@ export function systemExe(name: string): string {
     const root = [process.env.SystemRoot, process.env.windir].find(
       (v): v is string => v !== undefined && /^[A-Za-z]:[\\/]/.test(v) && isAbsolute(v),
     );
-    if (root === undefined) throw new Error("SystemRoot is not set to an absolute path");
+    if (root === undefined) {
+      throw new WebhubError("SYSTEM_TOOL", "SystemRoot is not set to an absolute path", {
+        hint: "Start webhub from a normal Windows session (SystemRoot / windir must be like C:\\Windows).",
+      });
+    }
     return join(root, "System32", name);
   }
   for (const dir of ["/bin", "/usr/bin", "/usr/sbin", "/sbin"]) {
     const p = join(dir, name);
     if (existsSync(p)) return p;
   }
-  throw new Error(`system tool not found: ${name}`);
+  throw new WebhubError("SYSTEM_TOOL", `system tool not found: ${name}`);
 }
 
 /** Runs a PowerShell script passed via -EncodedCommand (no quoting, no user data in the script). */

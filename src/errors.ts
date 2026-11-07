@@ -8,7 +8,8 @@ export type ErrorCode =
   | "SYMLINK_REFUSED"
   | "PATH_OUTSIDE_HOME"
   | "FILE_TOO_LARGE"
-  | "SECRET_BACKEND";
+  | "SECRET_BACKEND"
+  | "SYSTEM_TOOL";
 
 export interface WebhubErrorOptions {
   file?: string;

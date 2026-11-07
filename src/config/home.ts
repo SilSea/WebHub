@@ -127,8 +127,9 @@ export async function ensureHome(paths: Paths): Promise<void> {
   }
   if (process.platform === "win32") await currentUserSid(); // resolve before the dir exists
   await mkdir(paths.home, { recursive: true, mode: 0o700 });
-  // a brand-new (empty) home is locked down at once, before the slower checks
-  if (st === null) await restrictToCurrentUser(paths.home);
+  // lock the home down BEFORE auditing it: afterwards nobody else can add entries, so the
+  // audit sees everything that will ever be inside (review-3 F1). New home: at once.
+  if (st === null || !(await homeIsExact(paths.home))) await restrictToCurrentUser(paths.home);
   await assertTrustedOwner(paths.home);
   await secureTree(paths.home);
   for (const key of DIRS) {
@@ -241,15 +242,23 @@ async function secureTree(home: string): Promise<void> {
       hint: "Remove the listed links (webhub never follows links inside its home).",
     });
   }
-  if (audit.foreignOwner.length > 0 || audit.unreadable.length > 0) {
+  if (audit.foreignOwner.length > 0) {
     throw new WebhubError("HOME_INVALID", "WEBHUB_HOME contains entries owned by another user", {
       file: home,
-      details: [...audit.foreignOwner, ...audit.unreadable.map((p) => `unreadable: ${p}`)],
+      details: audit.foreignOwner,
       hint: "Delete the listed entries (or the whole home) and start webhub again.",
     });
   }
+  if (audit.unreadable.length > 0) {
+    throw new WebhubError("HOME_INVALID", "could not read some entries inside WEBHUB_HOME", {
+      file: home,
+      details: audit.unreadable,
+      hint: "Check the permissions of the listed entries, or delete them, then start again.",
+    });
+  }
   if (process.platform === "win32") {
-    for (const p of audit.reset) await icacls([p, "/reset", "/Q"]);
+    // /L: act on a link itself, never its target (defence in depth; links were refused above)
+    for (const p of audit.reset) await icacls([p, "/reset", "/L", "/Q"]);
     if (!(await homeIsExact(home))) await restrictToCurrentUser(home);
   } else {
     await chmod(home, 0o700);
@@ -295,7 +304,8 @@ async function auditWindows(home: string): Promise<Audit> {
     "      $explicit = @($a.GetAccessRules($true, $false, $sid))",
     "      if ($a.AreAccessRulesProtected -or $explicit.Count -gt 0) { W ('RESET:' + (B $e)) }",
     "      if ($attr -band [System.IO.FileAttributes]::Directory) { $stack.Push($e) }",
-    "    } catch { W ('ERR:' + (B $e)) }",
+    // an entry deleted between listing and inspection (e.g. a temp file) is not a problem
+    "    } catch { if (Test-Path -LiteralPath $e) { W ('ERR:' + (B $e)) } }",
     "  }",
     "}",
     "W 'DONE'",

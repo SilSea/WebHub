@@ -43,7 +43,7 @@ export async function readDoc<T>(
   spec: DocSpec<T>,
   opts: ReadOptions,
 ): Promise<ReadResult<T> | undefined> {
-  const raw = await readJsonFile(file, opts.home);
+  const raw = await readJsonFile(file, opts.home, { sensitive: spec.sensitive === true });
   if (raw === undefined) return undefined;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new WebhubError("CONFIG_INVALID", "document must be a JSON object", { file });
@@ -116,7 +116,11 @@ export function validate<T>(
 }
 
 /** Reads a JSON file inside home safely (no symlinks, size limit). Undefined if missing. */
-export async function readJsonFile(file: string, home: string): Promise<unknown> {
+export async function readJsonFile(
+  file: string,
+  home: string,
+  opts: { sensitive?: boolean } = {},
+): Promise<unknown> {
   await assertSafePath(home, file);
   const st = await lstat(file).catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") return null;
@@ -136,7 +140,10 @@ export async function readJsonFile(file: string, home: string): Promise<unknown>
     const at = pos < 0 ? "" : ` at ${lineCol(text, pos)}`;
     throw new WebhubError("JSON_PARSE", `invalid JSON${at}`, {
       file,
-      hint: "Fix the file by hand or restore it from the .bak next to it.",
+      hint:
+        opts.sensitive === true
+          ? "Restore the file from a webhub backup (data/backups), or remove it and set the secrets again."
+          : "Fix the file by hand or restore it from the .bak next to it.",
     });
   }
 }

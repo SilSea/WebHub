@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { WebhubError } from "../errors.js";
 import { isInside } from "../fs/safe-path.js";
 import { type DocSpec, readDoc, validate, writeDoc } from "../store/json-store.js";
@@ -32,7 +32,8 @@ export function defaultConfig(): Config {
  */
 export function resolveInHome(home: string, p: string, key: string): string {
   const abs = isAbsolute(p) ? resolve(p) : resolve(home, p);
-  if (!isInside(home, abs) || resolve(home) === abs) {
+  // relative() is case-insensitive on Windows, like isInside (review-3 F2)
+  if (!isInside(home, abs) || relative(resolve(home), abs) === "") {
     throw new WebhubError("CONFIG_INVALID", `${key} must be inside WEBHUB_HOME: ${p}`, {
       details: [`${key}: resolves outside WEBHUB_HOME`],
     });

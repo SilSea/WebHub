@@ -58,6 +58,11 @@ class FileLock implements Lock {
  * check, and put it back (link, never overwrites) if it belonged to someone else.
  */
 async function removeIf(file: string, isOurs: (raw: string | undefined) => boolean): Promise<void> {
+  // check before moving: in the common case a foreign file is never touched at all
+  if (!isOurs(await readRaw(file))) return;
+  // Known limit (review-3 F4): between rename and link-back the path is briefly empty, so a
+  // third process can create the file; then the link-back fails and the moved file is lost.
+  // Needs a foreign file appearing between the check above and rename — microseconds.
   const aside = `${file}.aside-${rand()}`;
   try {
     await rename(file, aside);

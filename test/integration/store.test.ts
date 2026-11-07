@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { stat, writeFile } from "node:fs/promises";
+import { readdir, stat, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,11 +16,13 @@ const HOME_MODULE = pathToFileURL(join(import.meta.dirname, "../../dist/config/h
 
 // child processes load the built code: refuse to test a stale dist/ (review-1 R11)
 beforeAll(async () => {
-  for (const [built, src] of [
-    ["dist/store/lock.js", "src/store/lock.ts"],
-    ["dist/config/home.js", "src/config/home.ts"],
-  ] as const) {
-    const root = join(import.meta.dirname, "../..");
+  const root = join(import.meta.dirname, "../..");
+  const sources = (await readdir(join(root, "src"), { recursive: true, encoding: "utf8" })).filter(
+    (f) => f.endsWith(".ts") && !f.endsWith(".d.ts"),
+  );
+  for (const rel of sources) {
+    const src = join("src", rel);
+    const built = join("dist", `${rel.slice(0, -3)}.js`);
     const b = await stat(join(root, built)).catch(() => null);
     if (b === null || b.mtimeMs < (await stat(join(root, src))).mtimeMs) {
       throw new Error(`${built} is missing or older than ${src} — run \`pnpm build\` first`);
