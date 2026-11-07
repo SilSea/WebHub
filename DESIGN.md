@@ -374,7 +374,7 @@ port:
   default: 8000
   via: arg                                       # env | arg | fixed
 host:
-  bind: auto            # {HOST} = 127.0.0.1 ถ้า spike ยืนยันว่า container เข้าถึงได้, ไม่งั้น 0.0.0.0 (§16)
+  bind: "127.0.0.1"     # spike ยืนยัน: nginx container เข้าถึง host 127.0.0.1 ผ่าน host.docker.internal ได้ → ไม่เปิด LAN, ไม่มี Firewall popup
 devServer:
   hostRewrite: false    # true สำหรับ vite/next: nginx ส่ง Host: localhost:<port> (แทนการแก้ allowedHosts)
 health: { path: "/docs", timeout: 60 }
@@ -493,7 +493,7 @@ Dashboard โชว์ runtime บนเครื่อง (node/bun/python/php/
 `http://<name>.localhost` (Chrome/Edge resolve เอง). Reserved (ห้ามเป็นชื่อ site, validate ตอน approve): `hub`, `db`, `sql`, `redis`, `mongo`, `api.*`
 
 - ใน container: `extra_hosts` ทุก site → `host-gateway` (§4.4) → server-side เรียก `<site>.localhost` ผ่าน nginx ได้
-- native: hosts file sync (`127.0.0.1 <site>.localhost`, admin) — เปิดเฉพาะถ้า spike พบว่า Node บน Windows resolve `*.localhost` ไม่ได้
+- native: **hosts file sync จำเป็น** (`127.0.0.1 <site>.localhost`, admin) — spike พบว่า Node / Bun / Python บน Windows resolve `*.localhost` ไม่ได้ (`ENOTFOUND`); webhub เขียน block `# webhub:begin … # webhub:end` ใน `C:\Windows\System32\drivers\etc\hosts` ผ่าน UAC prompt ครั้งเดียวตอนเพิ่ม/ลบ site; ไม่ให้สิทธิ์ admin → site ที่มี server-side call ไป `<site>.localhost` ติดป้ายเตือน
 
 ### 10.2 Generated config
 
@@ -759,7 +759,7 @@ webhub reload | ui
 
 ## 15. Roadmap
 
-0. **Spike** — nginx container → native ที่ bind `127.0.0.1` ผ่าน `host.docker.internal`; Node resolve `*.localhost`; Windows Firewall; compose `!override`/`!reset` + `extra_hosts host-gateway`
+0. ~~Spike~~ ✅ เสร็จ 2026-11-07 (ผลใน §18)
 1. **MVP-1** — profiles loader + scanner + detector (routes, via, URL env, DB) + dedupe + `scan/approve/list`; daemon + CLI client + auth (token, Host/Origin)
 2. **MVP-2** — nginx container + generator (resolver/variables, validate/swap) + static (publicDir, deny-list)
 3. **MVP-3** — Port Manager (ports.json, probe 3 ชั้น, edit/apply/rollback) + native runner + env resolver + env sets + URL rewrite
@@ -776,8 +776,6 @@ webhub reload | ui
 
 ## 16. Risks / Open
 
-- **Open (spike):** `host.docker.internal` → service ที่ bind `127.0.0.1` บน Windows ได้ไหม → ตัดสิน `host.bind: auto`; ถ้าไม่ได้ → `0.0.0.0` + Firewall rule กัน LAN
-- **Open (spike):** Node บน Windows resolve `*.localhost` → ต้อง hosts sync ไหม
 - Port/host hardcode (Backend-Hobby, PPRS `.listen(3000)`, vite `port: 5173`) → `via: fixed`, แก้ได้แค่ผ่าน container mapping
 - App bind `0.0.0.0` ใน code (Bun/Elysia default) → เปิดออก LAN; คุมได้แค่ Firewall
 - Shared DB: version/extension ต่างกัน, DB host hardcode, redis ระบุ index ไม่ได้ → `isolated`
@@ -807,7 +805,7 @@ webhub reload | ui
 | 8 | hot reload compose บน Windows | ผสม: mount source → hybrid; build image → compose + rebuild; polling fallback | §7 |
 | 9 | Windows excluded port ranges | probe 3 ชั้น + ป้าย reserved | §4.3 |
 | 10 | Zero-touch → allowedHosts / port fixed / bind | hostRewrite, `via: fixed`, Firewall rule | §4.1, §6.1 |
-| 10b | bind `127.0.0.1` vs `0.0.0.0` | **pending spike** | §15 (0), §16 |
+| 10b | bind `127.0.0.1` vs `0.0.0.0` | **`127.0.0.1`** (spike ผ่าน) + hosts sync จำเป็นสำหรับ native | §6.1, §10.1, §18 |
 | 11 | Prisma กับ shared pg | role `CREATEDB`, restore `--no-owner --no-acl` (เทคนิค) | §5.2, §5.5 |
 | 12 | redis index ระบุไม่ได้ (cloudvps/questcloud) | detect → `isolated` อัตโนมัติ (เทคนิค) | §5.2, §9 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
@@ -819,3 +817,23 @@ webhub reload | ui
 - backup ตามเวลา + retention
 - ปุ่มเปิดใน VS Code / terminal / folder, git branch/status, alias หลายชื่อต่อ site
 - export/import config ของ webhub, cleanup container/volume ที่ webhub สร้าง
+
+---
+
+## 18. Spike results (2026-11-07, Docker 29.3.1, Compose 5.1.1)
+
+| Test | ผล | ผลต่อ design |
+|---|---|---|
+| container → host service bind `127.0.0.1` ผ่าน `host.docker.internal` | ✅ ได้ | native bind `127.0.0.1` เป็น default; ไม่เปิด LAN |
+| container → host service bind `0.0.0.0` | ✅ ได้ | — |
+| container `extra_hosts: <site>.localhost:host-gateway` → host | ✅ ได้ (ทั้ง 127.0.0.1/0.0.0.0) | server-side ใน container เรียก `<site>.localhost` ผ่าน nginx ได้ |
+| Node 24 `dns.lookup('test.localhost')` บน Windows | ❌ `ENOTFOUND` | ต้อง hosts sync |
+| Bun 1.3 `fetch('http://test.localhost')` | ❌ lookup `ENOTFOUND`, fetch `ConnectionRefused` | ต้อง hosts sync |
+| Python 3.14 `gethostbyname('test.localhost')` | ❌ `getaddrinfo failed` | ต้อง hosts sync |
+| compose `container_name: !reset null` | ✅ ลบออก | ใช้ได้ |
+| compose `ports: !override [...]` | ✅ แทนที่ list (ไม่ต่อท้าย) | ใช้ได้ |
+| compose `depends_on: !override {cache}` + `profiles: [webhub-disabled]` ที่ db | ✅ db ไม่รัน, app ไม่รอ db | ใช้ได้ |
+| compose `extra_hosts` + `!override` รวมกัน รันจริง | ✅ `ok 127.0.0.1:4901 host=spike.localhost:4901` | ใช้ได้ |
+
+หมายเหตุ: `curl` ≥ 7.85 resolve `*.localhost` เป็น loopback เองโดยไม่อ่าน `/etc/hosts` (RFC 6761) → health check ใน container ห้ามใช้ curl ทดสอบ `<site>.localhost`; ใช้ `wget`/Node แทน
+Windows Firewall: bind `127.0.0.1` ไม่ trigger popup (by design) — ไม่ได้ทดสอบ popup ของ `0.0.0.0`
