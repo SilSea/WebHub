@@ -126,10 +126,12 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 ## 9. Reports
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/F-000/test-1.md) | [review-1](../reports/F-000/review-1.md) | [security-1](../reports/F-000/security-1.md) | critical 0 / major 0; minor 7+2 sec, nit 2+2 sec |
+| 1 | [test-1](../reports/F-000/test-1.md) | [review-1](../reports/F-000/review-1.md) | [security-1](../reports/F-000/security-1.md) | critical 0 / major 0; minor 7+2 sec, nit 2+2 sec → แก้ทั้งหมด |
+| 2 | [test-2](../reports/F-000/test-2.md) | [review-2](../reports/F-000/review-2.md) | [security-2](../reports/F-000/security-2.md) | sec major 1 (N1), nit 3 → แก้ |
+| 3 | [test-3](../reports/F-000/test-3.md) | รอ | รอ | 29/29 |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [x] DESIGN.md §12  - [x] PLAN.md queue  - [x] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §12  - [x] PLAN.md queue  - [x] features/README.md  - [x] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |

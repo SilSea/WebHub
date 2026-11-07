@@ -3,17 +3,7 @@
  * Works only on copies under a private temp dir; never on fixtures/ itself.
  */
 import { createHash } from "node:crypto";
-import {
-  cp,
-  lstat,
-  mkdtemp,
-  readdir,
-  readFile,
-  readlink,
-  realpath,
-  rm,
-  stat,
-} from "node:fs/promises";
+import { cp, lstat, mkdtemp, readdir, readFile, readlink, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,13 +31,20 @@ export async function assertNoSymlinks(dir: string): Promise<void> {
   }
 }
 
-/** Copies fixtures/<name> into a fresh temp dir and returns the copy's path. */
-export async function copyFixture(name: string): Promise<string> {
+/**
+ * Copies <root>/<name> (default fixtures/<name>) into a fresh temp dir and returns the copy's path.
+ * The fixture dir itself and everything below it must be real files/dirs (no links), otherwise the
+ * "copy" could be a link back to the original and the Zero-touch check would pass falsely.
+ */
+export async function copyFixture(name: string, root: string = FIXTURES_ROOT): Promise<string> {
   if (!NAME_RE.test(name)) throw new Error(`invalid fixture name: ${JSON.stringify(name)}`);
-  const src = resolve(FIXTURES_ROOT, name);
-  if (!isInside(FIXTURES_ROOT, src)) throw new Error(`fixture outside fixtures/: ${name}`);
-  if (!(await stat(src).catch(() => null))?.isDirectory()) {
-    throw new Error(`fixture not found: ${name}`);
+  const src = resolve(root, name);
+  if (!isInside(root, src)) throw new Error(`fixture outside fixtures/: ${name}`);
+  const st = await lstat(src).catch(() => null);
+  if (st?.isSymbolicLink()) throw new Error(`fixtures must not contain symlinks: ${src}`);
+  if (!st?.isDirectory()) throw new Error(`fixture not found: ${name}`);
+  if (!isInside(await realpath(root), await realpath(src))) {
+    throw new Error(`fixture resolves outside fixtures/: ${name}`);
   }
   await assertNoSymlinks(src);
   const tmp = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
@@ -83,7 +80,7 @@ export interface HashOptions {
 }
 
 /**
- * Map of posix relative path → "file:<mode>:<sha256>" | "dir" | "link:<target>".
+ * Map of posix relative path → "file:<mode>:<sha256>" | "dir:<mode>" | "link:<target>".
  * Mode = permission bits (on Windows: read-only attribute). Symlinks are not followed.
  */
 export async function hashTree(root: string, opts: HashOptions = {}): Promise<Map<string, string>> {
@@ -100,7 +97,7 @@ export async function hashTree(root: string, opts: HashOptions = {}): Promise<Ma
       if (st.isSymbolicLink()) {
         out.set(rel, `link:${await readlink(abs)}`);
       } else if (st.isDirectory()) {
-        out.set(rel, "dir");
+        out.set(rel, `dir:${(st.mode & 0o777).toString(8)}`);
         await walk(abs);
       } else if (st.isFile()) {
         const digest = createHash("sha256")

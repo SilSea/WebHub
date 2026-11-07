@@ -1,4 +1,13 @@
-import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -106,8 +115,31 @@ describe("fixture harness — security", () => {
     },
   );
 
-  it("rejects a valid name that does not exist, without leaking a temp dir", async () => {
+  it("rejects a missing fixture before creating any temp dir", async () => {
+    const count = async () =>
+      (await readdir(tmpdir())).filter((n) => n.startsWith("webhub-fx-")).length;
+    const before = await count();
     await expect(copyFixture("does-not-exist")).rejects.toThrow(/fixture not found/);
+    expect(await count()).toBe(before);
+  });
+
+  it("rejects a fixture dir that is itself a symlink/junction", async (ctx) => {
+    const root = await mkdtemp(join(tmpdir(), "webhub-fxroot-"));
+    try {
+      await mkdir(join(root, "real"));
+      await writeFile(join(root, "real", "a.txt"), "a");
+      try {
+        await symlink(join(root, "real"), join(root, "linked"), "junction");
+      } catch {
+        ctx.skip();
+      }
+      await expect(copyFixture("linked", root)).rejects.toThrow(/must not contain symlinks/);
+      const ok = await copyFixture("real", root);
+      copies.push(ok);
+      expect(isInside(root, ok)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects fixtures that contain symlinks", async (ctx) => {
