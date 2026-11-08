@@ -92,7 +92,11 @@ export const CLIENT_ERROR_DEFER_MS = 5_000;
  * must send keep-alive bytes.
  */
 export const CONNECTION_IDLE_MS = 15_000;
-export const MAX_CONNECTIONS = 256;
+/**
+ * Real need: CLI 1–2, a browser 6 per host, nginx (F-009). Each socket can cost one 64 KB parse
+ * chunk of tiny requests even after it is refused, so this bounds a flood (security-7 W2).
+ */
+export const MAX_CONNECTIONS = 64;
 
 class HttpError extends Error {
   constructor(
@@ -213,26 +217,52 @@ const busy = new WeakSet<Socket>();
  * No HTTP pipelining (security-6 U1): a request that arrives while the previous response on
  * the same socket is unfinished destroys the socket, before Fastify builds anything for it.
  * Otherwise a client that never reads could pile up thousands of pending requests per socket
- * (heap → OOM). The CLI and browsers never pipeline.
+ * (heap → OOM). The CLI and browsers never pipeline. Every way Node hands out a request goes
+ * through the same check: `request`, `checkContinue` (`Expect: 100-continue`) and
+ * `checkExpectation` (any other `Expect`, which Node would otherwise answer 417 by itself,
+ * bypassing the check — security-7 W1). Node still parses the rest of the chunk it is reading
+ * after a destroy; `MAX_CONNECTIONS` bounds that cost (security-7 W2).
  */
 function refusePipelining(server: HttpServer): void {
-  const handlers = server.listeners("request") as ((
-    req: IncomingMessage,
-    res: ServerResponse,
-  ) => void)[];
+  type Handler = (req: IncomingMessage, res: ServerResponse) => void;
+  const handlers = server.listeners("request") as Handler[];
   server.removeAllListeners("request");
-  server.on("request", (req: IncomingMessage, res: ServerResponse) => {
+  const admit = (req: IncomingMessage, res: ServerResponse): boolean => {
     const socket = req.socket;
-    if (socket.destroyed) return;
+    if (socket.destroyed) return false;
     if (busy.has(socket)) {
       socket.destroy();
-      return;
+      return false;
     }
     busy.add(socket);
     const done = () => busy.delete(socket);
     res.once("finish", done);
     res.once("close", done);
+    return true;
+  };
+  const run: Handler = (req, res) => {
     for (const h of handlers) h(req, res);
+  };
+  server.on("request", (req: IncomingMessage, res: ServerResponse) => {
+    if (admit(req, res)) run(req, res);
+  });
+  server.on("checkContinue", (req: IncomingMessage, res: ServerResponse) => {
+    if (!admit(req, res)) return;
+    res.writeContinue();
+    run(req, res);
+  });
+  server.on("checkExpectation", (req: IncomingMessage, res: ServerResponse) => {
+    if (!admit(req, res)) return;
+    const body = JSON.stringify({
+      error: { code: "EXPECTATION_FAILED", message: "expectation failed" },
+    });
+    res.writeHead(417, {
+      ...SECURITY_HEADERS,
+      connection: "close",
+      "content-type": "application/json; charset=utf-8",
+      "content-length": Buffer.byteLength(body),
+    });
+    res.end(body);
   });
 }
 
@@ -313,7 +343,8 @@ export async function createApi(
       reply.header("allow", "GET, HEAD, POST");
       return deny(reply, 405, "METHOD_NOT_ALLOWED", "not allowed");
     }
-    if (req.is404) return; // not-found handler answers (no data)
+    // unknown route: answered here, before any body is read or parsed (security-7 W3)
+    if (req.is404) return deny(reply, 404, "NOT_FOUND", "not found");
     // 4. scope
     const cfg = req.routeOptions.config;
     const scope: Scope = cfg.scope ?? "api";

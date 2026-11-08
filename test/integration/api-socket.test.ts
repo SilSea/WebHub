@@ -4,7 +4,7 @@
  * garbage (L5) and the client's overall deadline (H13).
  */
 import { randomBytes } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { Agent, createServer, request as httpRequest, type Server } from "node:http";
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -58,6 +58,12 @@ beforeEach(async () => {
         a.get("/api/v1/x/big", { config: { access: "public" } }, async () => ({
           big: "x".repeat(4 * 1024 * 1024),
         })),
+      // answers of a chosen size, GET and POST (review-7 V2)
+      (a) =>
+        a.get("/api/v1/x/size", { config: { access: "public" } }, async (req) => ({
+          s: "y".repeat(Number((req.query as { n?: string }).n ?? 0)),
+        })),
+      (a) => a.post("/api/v1/x/echo", async (req) => ({ len: JSON.stringify(req.body).length })),
     ],
   );
   await app.listen({ host: "127.0.0.1", port: 0 });
@@ -235,18 +241,155 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     expect(await connectionsDrop(2_500)).toBe(0);
   });
 
-  it("a client that never reads a large answer is cut after the idle timeout (U1 / U3)", {
+  it("a client that never reads a large answer is cut (keep-alive or idle)", {
     timeout: 30_000,
   }, async () => {
     const c = await open();
     c.s.pause();
     c.s.write(`GET /api/v1/x/big HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`);
-    const t0 = Date.now();
     await wait(200);
     expect(await count()).toBe(1);
-    expect(await connectionsDrop(22_000)).toBe(0); // idle (15 s) or keep-alive after a flush
-    expect(Date.now() - t0).toBeGreaterThan(4_000);
+    expect(await connectionsDrop(22_000)).toBe(0);
     c.s.destroy();
+  });
+
+  it("a socket silent both ways for 15 s is cut by the idle timeout (U3 / V1)", {
+    timeout: 30_000,
+  }, async () => {
+    const c = await open();
+    const t0 = Date.now();
+    c.s.write(`GET /api/v1/x/slow?ms=18000 HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`);
+    await wait(200);
+    expect(await count()).toBe(1);
+    expect(await connectionsDrop(18_000)).toBe(0);
+    const ms = Date.now() - t0;
+    expect(ms).toBeGreaterThan(14_000);
+    expect(ms).toBeLessThan(17_500);
+  });
+
+  it("Expect other than 100-continue: one 417 with security headers, pipelined → destroyed (W1)", async () => {
+    const one = await open();
+    one.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\nExpect: x\r\n\r\n`);
+    await one.ended;
+    expect(one.text()).toMatch(/^HTTP\/1\.1 417 /);
+    expect(one.text()).toContain("x-content-type-options: nosniff");
+    const c = await open();
+    c.s.write("GET / HTTP/1.1\r\nHost: x\r\nExpect: x\r\n\r\n".repeat(2_000));
+    await c.ended;
+    expect([...c.text().matchAll(/HTTP\/1\.1 417 /g)].length).toBeLessThanOrEqual(1);
+    expect(await connectionsDrop(1_000)).toBe(0);
+  });
+
+  it("Expect: 100-continue still works and goes through the same check (W1)", async () => {
+    const c = await open();
+    c.s.write(
+      `POST /api/v1/x/echo HTTP/1.1\r\nHost: ${HOST}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 7\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n`,
+    );
+    await wait(200);
+    expect(c.text()).toMatch(/^HTTP\/1\.1 100 /);
+    c.s.write('{"a":1}');
+    await c.ended;
+    expect(c.text()).toMatch(/HTTP\/1\.1 200 [\s\S]*"len":7/);
+  });
+
+  it("a body sent to an unknown path is not parsed: 404, not 400 (W3)", async () => {
+    const c = await open();
+    c.s.write(
+      `POST /api/v1/nope HTTP/1.1\r\nHost: ${HOST}\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\n[{},`,
+    );
+    await c.ended;
+    expect(c.text()).toMatch(/^HTTP\/1\.1 404 /);
+  });
+
+  it("MAX_CONNECTIONS sockets each sending one chunk of tiny requests: all cut, API answers (W2)", async () => {
+    const chunk = "GET / HTTP/1.1\r\n\r\n".repeat(3_600);
+    const clients = await Promise.all(Array.from({ length: 60 }, () => open()));
+    for (const c of clients) c.s.write(chunk);
+    await Promise.all(clients.map((c) => c.ended));
+    expect(await connectionsDrop(2_000)).toBe(0);
+    const ok = await open();
+    ok.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`);
+    await ok.ended;
+    expect(ok.text()).toMatch(/^HTTP\/1\.1 200 /);
+  });
+
+  it("keep-alive clients are never mistaken for pipelining (V2)", { timeout: 60_000 }, async () => {
+    const sockets = new Set<unknown>();
+    app.server.on("connection", (s) => sockets.add(s));
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    const call = (method: string, path: string, body?: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            method,
+            path,
+            agent,
+            headers: {
+              host: HOST,
+              ...(body === undefined
+                ? {}
+                : {
+                    authorization: `Bearer ${TOKEN}`,
+                    "content-type": "application/json",
+                    "content-length": String(Buffer.byteLength(body)),
+                  }),
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on("error", reject);
+        req.end(body);
+      });
+    const sizes = [0, 10, 70_000, 300_000, 2_000_000];
+    try {
+      for (let i = 0; i < 150; i++) {
+        const st =
+          i % 3 === 2
+            ? await call(
+                "POST",
+                "/api/v1/x/echo",
+                JSON.stringify({ d: "z".repeat((i * 997) % 200_000) }),
+              )
+            : await call("GET", `/api/v1/x/size?n=${sizes[i % sizes.length]}`);
+        expect(st).toBe(200);
+      }
+    } finally {
+      agent.destroy();
+    }
+    expect(sockets.size).toBe(1);
+    // raw socket: the next request goes out the instant the last answer byte arrived
+    const s = connect({ host: "127.0.0.1", port });
+    await new Promise((r) => s.once("connect", r));
+    let buf = Buffer.alloc(0);
+    for (let i = 0; i < 150; i++) {
+      const n = sizes[i % sizes.length];
+      s.write(`GET /api/v1/x/size?n=${n} HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`);
+      for (;;) {
+        const head = buf.indexOf("\r\n\r\n");
+        if (head >= 0) {
+          const len = Number(/content-length: (\d+)/i.exec(buf.subarray(0, head).toString())?.[1]);
+          if (buf.length >= head + 4 + len) {
+            expect(buf.subarray(0, 12).toString()).toBe("HTTP/1.1 200");
+            buf = buf.subarray(head + 4 + len);
+            break;
+          }
+        }
+        const chunk = await new Promise<Buffer | null>((r) => {
+          s.once("data", (d: Buffer) => r(d));
+          s.once("close", () => r(null));
+        });
+        if (chunk === null) throw new Error(`socket closed at request ${i}`);
+        s.removeAllListeners("close");
+        buf = Buffer.concat([buf, chunk]);
+      }
+    }
+    s.destroy();
+    expect(sockets.size).toBe(2);
   });
 
   it("a bad body of the request itself still gets a uniform 400 (M1)", async () => {

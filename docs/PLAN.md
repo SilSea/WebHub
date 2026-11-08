@@ -15,6 +15,8 @@
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
+**ติดตามต่อ (ไม่ใช่งานใน queue):** F-001 test "4 processes taking over the same stale lock → exactly one wins" fail เมื่อเครื่องโหลดหนัก (พบ 4 ครั้งระหว่าง W3 ของ F-003; รันเดี่ยวผ่าน) — อาจเป็นแค่ timeout หรือ race จริง (2 process ชนะ). ผู้ใช้สั่ง (2026-11-08): หลัง F-003 เสร็จ สืบแบบอ่านอย่างเดียว (เก็บ output ของแต่ละ process) แล้วเสนอ CR ตาม W2 — ห้ามแก้ F-001 ก่อน CR อนุมัติ (R1)
+
 ---
 
 ## 1. ลำดับ + dependency
@@ -118,4 +120,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-F-003 W3 (planned) → แล้ว W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)
+F-003 W3 (planned) → สืบ F-001 lock race + เสนอ CR (ดู §0 ติดตามต่อ) → แล้ว W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)

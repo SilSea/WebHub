@@ -483,7 +483,7 @@ describe("API server", () => {
 
   it("server limits against slowloris / socket exhaustion (K4; real timing: integration)", () => {
     expect(app.server.headersTimeout).toBe(10_000);
-    expect(app.server.maxConnections).toBe(256);
+    expect(app.server.maxConnections).toBe(64);
     expect(app.server.requestTimeout).toBe(30_000);
   });
 
