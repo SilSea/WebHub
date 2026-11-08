@@ -12,11 +12,12 @@
 **ทำ**
 - `src/daemon.ts`: process หลักของ webhub — เปิด home, ถือ single-writer lock (F-001), เปิด API, ปิดสะอาด
 - API server bind `127.0.0.1:7400` เท่านั้น (REST, JSON) + โครง route ที่ feature ต่อไปเสียบเพิ่มได้
-- auth ครบชุดตาม §10.3: master token, Host allowlist (กัน DNS rebinding), Origin / Fetch-Metadata (กัน CSRF), session cookie host-only, one-time login link, Host ภายใน `webhub.internal`
+- auth ครบชุดตาม §10.3: master token, Host allowlist (กัน DNS rebinding), Origin / Fetch-Metadata (กัน CSRF), browser session = cookie host-only **+ key ใน header** (security-2 L1), one-time login link, Host ภายใน `webhub.internal`
 - client library (`src/server/client.ts`) ที่ CLI (F-004) ใช้: หา daemon, พิสูจน์ว่าเป็น daemon ตัวจริงก่อนส่ง token, เรียก API
-- endpoint ชุดแรก: health, hello (proof), status, shutdown, สร้าง login link, `/_webhub/login`, `/_auth`
+- endpoint ชุดแรก: health, hello (proof), status, shutdown, สร้าง login link, `/_webhub/login`, logout
 
 **ไม่ทำ**
+- `/_auth` (nginx `auth_request` ของเครื่องมือเสริม) → ย้ายไป F-026 (security-2 L1/L4: cookie อย่างเดียวรั่วได้ + nginx ต้อง fail closed / ยืนยันตัว daemon — ต้องออกแบบเอง)
 - คำสั่ง CLI (`webhub daemon start|stop|status`, start daemon อัตโนมัติ) → F-004 (ดู Q4)
 - WebSocket endpoint จริง → feature ที่ต้องใช้ (dashboard F-027); F-003 ให้ฟังก์ชันตรวจ upgrade request ไว้ใช้ร่วม
 - nginx / `hub.localhost` จริง → F-009; `/_wake` → F-013; session ของเครื่องมือเสริม (`sql.` …) → F-026
@@ -52,8 +53,8 @@ crash: uncaughtException → พยายาม stop แล้ว exit 1; hook `
 |---|---|
 | `127.0.0.1:7400` | CLI เท่านั้น — **bearer อย่างเดียว ไม่มี browser session** (security-1 K1: cookie ไม่แยก port → cookie ของ `127.0.0.1` ถูกส่งไปทุก dev server ที่ `127.0.0.1:<port>`) |
 | `hub.localhost`, `db.localhost` (+ `:<httpPort>` เมื่อ ≠ 80) | ผ่าน nginx (F-009) |
-| `webhub.internal` | เฉพาะ `/_auth`, `/_webhub/login` (`/_wake` ใน F-013) — path อื่น = 404 |
-- เทียบแบบ exact (ตัวพิมพ์เล็ก, ตัด `.` ท้าย); ไม่มี / ซ้ำ / ไม่ตรง → **421** ก่อน auth ใดๆ, ไม่ส่งข้อมูลกลับ
+| `webhub.internal` | เฉพาะ `/_webhub/login` (`/_wake` ใน F-013, `/_auth` ใน F-026) — path อื่น = 404 |
+- เทียบแบบ exact (ตัวพิมพ์เล็ก, ตัด `.` ท้าย); ไม่มี / ซ้ำ / ไม่ตรง → **421** ก่อน auth ใดๆ, ไม่ส่งข้อมูลกลับ (HTTP/1.1 ไม่มี Host ก็ 421 — ปิด `requireHostHeader` ของ Node — J3)
 - `localhost:7400`, IP อื่น, `0.0.0.0` → ไม่รับ (ตาม §10.3)
 - `httpPort` มาจาก option ของ server (default 80) — ยังไม่มี key ใน config (F-001 done) → feature ที่เลือก HTTP port (F-008/F-014) ส่งค่าเข้ามา
 
@@ -61,25 +62,31 @@ crash: uncaughtException → พยายาม stop แล้ว exit 1; hook `
 | วิธี | ใครใช้ | กติกา |
 |---|---|---|
 | `Authorization: Bearer <token>` | CLI / script | เทียบแบบ constant-time; ไม่ตรง → 401 (หน่วง 50 ms ต่อครั้งที่ผิด, ไม่บอกเหตุผล) |
-| cookie `webhub_session` | browser (dashboard) | **เฉพาะ host ชื่อ `hub.`/`db.<suffix>`** (`sessionHosts`) — ไม่ออก/ไม่รับบน `127.0.0.1` (K1) → login ผ่าน browser ได้หลังมี nginx (F-009); id random 32 bytes, เก็บในหน่วยความจำ (daemon restart = login ใหม่), ผูกกับ Host ที่ออกให้ (cookie ของ `hub.` ใช้กับ `db.` ไม่ได้), idle 12 ชม. / อายุสูงสุด 7 วัน; `HttpOnly; SameSite=Strict; Path=/`, ไม่มี `Domain` (host-only), ไม่ใส่ `Secure` (http ใน MVP) |
+| cookie `webhub_session` **+** header `X-Webhub-Session: <key>` | browser (dashboard) | **ต้องมีทั้งคู่ + เป็น session เดียวกัน** (security-2 L1); **เฉพาะ host ชื่อ `hub.`/`db.<suffix>`** (`sessionHosts`) — ไม่ออก/ไม่รับบน `127.0.0.1` (K1) → login ผ่าน browser ได้หลังมี nginx (F-009); id + key random 32 bytes คนละค่า, เก็บในหน่วยความจำ (daemon restart = login ใหม่), ผูกกับ Host ที่ออกให้ (ของ `hub.` ใช้กับ `db.` ไม่ได้), idle 2 ชม. / อายุสูงสุด 24 ชม.; cookie `HttpOnly; SameSite=Strict; Path=/`, ไม่มี `Domain` (host-only), **ไม่มี `Max-Age`** (หายเมื่อปิด browser), ไม่ใส่ `Secure` (http ใน MVP) |
+
+- **ทำไมต้องมี key** (L1, ยืนยันกับ Chrome จริง): cookie ไม่แยก port และ `*.localhost` ไปถึง loopback ทุก port → โปรแกรมใดๆ ที่ฟัง `127.0.0.1:<Q>` (เช่น dev server ของ project) สั่ง browser ไป `http://hub.localhost:<Q>` ได้เองแล้วได้ cookie ของ hub (SameSite=Strict กันแค่ navigation แรก) → key อยู่ใน `sessionStorage` ซึ่งแยกตาม scheme + host + **port** → โปรแกรมบน port อื่นอ่านไม่ได้
+- key ไปถึงหน้าเว็บทาง fragment: `303 Location: /#k=<key>` (fragment ไม่ถูกส่งไป server / ไม่อยู่ใน Referer) → dashboard (F-027) ย้ายเข้า `sessionStorage` แล้ว `history.replaceState` ลบออกจาก URL; tab ใหม่ = `webhub ui` ใหม่ (ผู้ใช้เลือก sessionStorage)
+- header เองต้อง preflight ข้าม origin → `OPTIONS` 405 = กัน CSRF อีกชั้น
+- WebSocket ตั้ง header ไม่ได้ → ส่ง key เป็น subprotocol `webhub-key.<key>` (`checkUpgrade`); server ต้องตอบ subprotocol ของตัวเอง ห้าม echo ตัว key
+- cookie หลายค่า (port อื่นยัด cookie ของตัวเอง — tossing): ลองทุกค่า (≤ 8) — จับคู่ได้เฉพาะค่าที่ผูกกับ key → tossing ทำให้ logout ไม่ได้
 
 - **token**: ตาม Q2 (แนะนำ: สุ่มใหม่ทุกครั้งที่ daemon เริ่ม เก็บใน `data/auth.json` ACL เฉพาะ user, ลบตอนปิด)
 - **login link**: `POST /api/v1/login-links {host?}` (bearer เท่านั้น; host ต้องเป็น session host, default `hub.<suffix>`) → code random 32 bytes, ใช้ครั้งเดียว, อายุ 60 วิ, ผูกกับ host → `http://<host>/_webhub/login?t=<code>`
   - ข้อกำหนดถึง F-004 (security-1 K3): `webhub ui` ห้ามส่ง URL ที่มี code ผ่าน argv ของโปรแกรมเปิด browser (process อื่นอ่าน command line ได้) → เปิดผ่าน temp file เฉพาะ user / OS opener ที่ไม่โชว์ argv หรือให้หน้า GET POST code ต่อ
-  - `GET /_webhub/login?t=` บน host นั้น (หรือ `webhub.internal` + `X-Forwarded-Host` ที่อยู่ใน allowlist) → ใช้ code → `Set-Cookie` → `303` ไป `/`; code ผิด/หมดอายุ/ใช้แล้ว → 401 หน้า text ธรรมดา
+  - `GET /_webhub/login?t=` บน host นั้น (หรือ `webhub.internal` + `X-Forwarded-Host` ที่อยู่ใน allowlist) → ใช้ code → `Set-Cookie` → `303` ไป `/#k=<key>`; code ผิด/หมดอายุ/ใช้แล้ว → 401 หน้า text ธรรมดา; `HEAD` ไม่มี (404) → link preview ไม่เผา code (J4)
   - response: `Cache-Control: no-store`, `Referrer-Policy: no-referrer` (code ไม่หลุดผ่าน Referer / cache)
-- `/_auth` (สำหรับ nginx `auth_request` — F-026 ใช้): Host `webhub.internal` เท่านั้น, ตรวจ cookie ของ `X-Forwarded-Host` → 204 / 401
 - **logout**: `POST /api/v1/logout` ลบ session ปัจจุบัน
+- ข้อกำหนดถึง F-009 / F-026 (security-2 L4): ตอน daemon ไม่รัน user อื่นยึด 7400 ได้ — CLI ปลอดภัย (handshake) แต่ nginx จะส่ง dashboard / `auth_request` ไปตัวปลอม → nginx ต้อง fail closed และ link nginx→daemon ต้องยืนยันตัว daemon (pipe + ACL หรือ proof ต่อ response); `/_auth` ใช้ cookie อย่างเดียวไม่ได้ (L1)
 
 ### 3.4 CSRF / cross-origin
 - ไม่ส่ง CORS header ใดๆ เลย; `OPTIONS` → 405 (preflight ไม่ผ่าน → browser ส่ง `Authorization` / JSON ข้าม origin ไม่ได้)
-- request ที่ไม่ใช่ `GET`/`HEAD` และ auth ด้วย cookie: ต้องมี `Origin` = `http://<Host ของ request>` **และ** ถ้ามี `Sec-Fetch-Site` ต้องเป็น `same-origin` → ไม่งั้น 403
+- request ที่ไม่ใช่ `GET`/`HEAD` และ auth ด้วย session: ต้องมี `Origin` = `http://<Host ของ request>` **และ** ถ้ามี `Sec-Fetch-Site` ต้องเป็น `same-origin` → ไม่งั้น 403
 - request ที่ auth ด้วย bearer: ถ้ามี `Origin` ต้องตรงแบบเดียวกัน (CLI ไม่ส่ง Origin)
 - `GET`/`HEAD` ไม่เปลี่ยนข้อมูลเด็ดขาด (กติกาสำหรับทุก feature ต่อไป — review checklist)
 - body: JSON เท่านั้น (`Content-Type: application/json`, อย่างอื่น 415; body ว่าง = ไม่มี body), สูงสุด 1 MB (ค่า default; feature อัปโหลดกำหนดเองทีหลัง)
-- request target ต้องเป็น `/path` (absolute-form `http://other/…` → 400 — K5); error ก่อน routing (URL encoding ผิด) และ error ของ parser ของ Node ใช้รูปแบบ error + header เดียวกัน, Host ผิด → 421 (H3/K8); ระหว่างปิด → 503 `SHUTTING_DOWN` (H4)
-- กัน slowloris: `headersTimeout` 10 วิ, `requestTimeout` 30 วิ, `maxConnections` 256 (K4)
-- WebSocket (feature ถัดไป): ตรวจ upgrade ด้วย `checkUpgrade()` ใน `auth.ts` — กติกาเดียวกับ request ที่แก้ข้อมูล (Host, bearer/session, Origin) (H6)
+- request target ต้องเป็น `/path` (absolute-form `http://other/…` → 400 — K5); error ก่อน routing (URL encoding ผิด) และ error ของ parser ของ Node ใช้รูปแบบ error + header เดียวกัน, Host ผิด → 421 (H3/K8); ระหว่างปิด → 503 `SHUTTING_DOWN` (H4); error ของ parser ระหว่างที่ response ก่อนหน้ายังค้าง (pipelining) → ตัด connection แทนการตอบสลับลำดับ (L5); URL ผิดถูก log เป็น `(invalid target)` (J5)
+- กัน slowloris: `headersTimeout` 10 วิ, `requestTimeout` 30 วิ, ตรวจทุก 1 วิ (`connectionsCheckingInterval` — default 30 วิทำให้ตัดจริงที่ 30 วิ — L2/J1), `maxConnections` 256 (K4)
+- WebSocket (feature ถัดไป): ตรวจ upgrade ด้วย `checkUpgrade()` ใน `auth.ts` — กติกาเดียวกับ request ที่แก้ข้อมูล (Host, bearer/session + key, Origin) (H6)
 - ทุก response: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store` (API), CSP เข้มสำหรับหน้า HTML (`default-src 'none'`) — dashboard F-027 กำหนด CSP ของตัวเอง
 
 ### 3.5 พิสูจน์ daemon ก่อนส่ง token (client)
@@ -92,7 +99,7 @@ client: อ่าน auth.json (ไม่มี → DAEMON_NOT_RUNNING)
      → request จริงพร้อม Bearer
 ```
 - โปรแกรมที่ไม่รู้ token สร้าง proof ไม่ได้; nonce ใหม่ทุกครั้ง → replay ไม่ได้; ใช้ ~1 ms ไม่ต้องเรียก CIM
-- client ใช้ `node:http` ตรง (ไม่ต้องมี dependency ฝั่ง client), deadline รวม 10 วิ (ไม่ใช่แค่ idle — H13), ไม่ตาม redirect; connection error / 401 → พิสูจน์ใหม่ก่อน request ถัดไป
+- client ใช้ `node:http` ตรง (ไม่ต้องมี dependency ฝั่ง client), deadline รวม 10 วิ (ไม่ใช่แค่ idle — H13), ไม่ตาม redirect; connection error / 401 → พิสูจน์ใหม่ก่อน request ถัดไป; proof ไม่ผ่าน → อ่าน `auth.json` ใหม่ 1 ครั้ง (daemon restart = token ใหม่ → ไม่รายงานผิดว่าเป็น impostor; ไฟล์หาย = `DAEMON_NOT_RUNNING` — J7)
 - ข้อกำหนดถึง F-004: daemon เขียน `auth.json` **ก่อน** listen (H16) → หลัง spawn ให้รอจน `auth.pid` = PID ที่ spawn และ port ตอบ; ไฟล์ค้างจาก crash + port ปฏิเสธ = "ไม่ได้รัน" (K2)
 
 ### 3.6 Endpoints (F-003)
@@ -100,12 +107,11 @@ client: อ่าน auth.json (ไม่มี → DAEMON_NOT_RUNNING)
 |---|---|---|---|
 | GET | `/api/v1/health` | ไม่มี | `{ ok: true }` (ไม่มี version/pid) |
 | GET | `/api/v1/hello?n=` | ไม่มี | `{ proof }` (§3.5) |
-| GET | `/api/v1/status` | bearer/cookie | `{ version, pid, startedAt, home, mode }` |
+| GET | `/api/v1/status` | bearer/session | `{ version, pid, startedAt, home, mode }` |
 | POST | `/api/v1/shutdown` | bearer | 202 แล้วปิด (ปิดแม้ client ตัดก่อนได้คำตอบ — H10; มาก่อน ready → เข้าคิว — H5) |
 | POST | `/api/v1/login-links` | bearer | `{ url, expiresAt }` |
-| POST | `/api/v1/logout` | cookie | 204 |
-| GET | `/_webhub/login?t=` | code | 303 + cookie |
-| GET | `/_auth` | cookie (internal) | 204 / 401 |
+| POST | `/api/v1/logout` | session | 204 |
+| GET | `/_webhub/login?t=` | code | 303 + cookie, `Location: /#k=<key>` |
 - path อื่น → 404 JSON; error ทุกตัวรูปแบบ `{ error: { code, message } }` ไม่มี stack / path ภายใน
 - route ของ feature ต่อไปลงทะเบียนผ่าน `registerRoutes(app, ctx)` ใต้ `/api/v1/` → ได้ Host/auth/CSRF อัตโนมัติ (default = ต้อง auth; route สาธารณะต้องประกาศชัด)
 
@@ -113,7 +119,7 @@ client: อ่าน auth.json (ไม่มี → DAEMON_NOT_RUNNING)
 `ServerError` (`src/server/errors.ts`) แยกจาก `WebhubError` ของ F-001 แบบเดียวกับ `PlatformError` (R1 — รวมทีหลังผ่าน CR): `DAEMON_RUNNING`, `DAEMON_PORT_BUSY`, `DAEMON_NOT_RUNNING`, `DAEMON_IMPOSTOR`, `DAEMON_UNREACHABLE`, `API_ERROR` (client ได้ error จาก API)
 
 ### 3.8 Logging
-- บรรทัด JSON ไป stdout: method, path (**ไม่มี query string**, absolute-form = `(invalid target)`), status, ms; ไม่ log header `Authorization`/`Cookie`/`Set-Cookie`, body, code, token (redact + test)
+- บรรทัด JSON ไป stdout: method, path (**ไม่มี query string**, absolute-form = `(invalid target)`), status, ms; ไม่ log header `Authorization`/`Cookie`/`Set-Cookie`/`X-Webhub-Session`, body, code, token, key (redact + test)
 - error 5xx: log แค่ชื่อ class / code ของ error ไม่ log message (อาจมี path / secret ของ feature ถัดไป — H2)
 
 ### 3.9 Platform
@@ -145,19 +151,23 @@ client: อ่าน auth.json (ไม่มี → DAEMON_NOT_RUNNING)
 | master token | user อื่นในเครื่อง / ไฟล์ backup | `auth.json` ACL เฉพาะ user (F-001 writeDoc); token ใหม่ทุก start; ลบตอนปิด | ACL ของไฟล์; token เปลี่ยนหลัง restart |
 | master token / code | หลุดทาง log, Referer, history, cache | ไม่ log query/header ลับ; `no-referrer`, `no-store`; code ใช้ครั้งเดียว 60 วิ | log ไม่มี token/code/cookie; code ใช้ซ้ำ → 401 |
 | session | cookie รั่วไปเว็บ `<site>.localhost` ของ project (โค้ด project อ่าน/ส่งต่อ) | host-only (ไม่มี `Domain`), HttpOnly, ผูก session กับ host | cookie ของ hub ใช้กับ db ไม่ได้ |
-| session | dev server ของ project ที่ `127.0.0.1:<port>` ได้ cookie ของ `127.0.0.1` (cookie ไม่แยก port; ทุก port = same-site) แล้ว replay (security-1 K1 — critical) | session มีเฉพาะ `hub.`/`db.<suffix>`; `127.0.0.1:<apiPort>` = bearer เท่านั้น | link/login บน IP host → 400/401; cookie ของ hub ส่งมากับ Host IP → 401 |
-| session | เว็บอื่นยัด `webhub_session` ซ้ำ (cookie tossing) | cookie ซ้ำ = ไม่มี session (ไม่ fixation) | test cookie ซ้ำ → 401 |
-| daemon | slowloris / เปิด socket ค้างจาก process ในเครื่อง | `headersTimeout` 10 วิ, `maxConnections` 256 | test ค่า server |
+| session | dev server ของ project ที่ `127.0.0.1:<port>` ได้ cookie ของ `127.0.0.1` (cookie ไม่แยก port; ทุก port = same-site) แล้ว replay (security-1 K1 — critical) | session มีเฉพาะ `hub.`/`db.<suffix>`; `127.0.0.1:<apiPort>` = bearer เท่านั้น | link/login บน IP host → 400/401; session ของ hub ส่งมากับ Host IP → 401 |
+| session | โปรแกรมบน `127.0.0.1:<Q>` บังคับ browser ไป `hub.localhost:<Q>` แล้วได้ cookie ของ hub ไป replay (security-2 L1 — critical, ยืนยันกับ Chrome) | session = cookie **+ key** ใน header (key อยู่ใน sessionStorage แยกตาม port, ส่งทาง fragment); cookie ไม่มี Max-Age; idle 2 ชม. / สูงสุด 24 ชม. | cookie อย่างเดียว / key ของ session อื่น / key ผิด → 401; Location มี `#k=`; ไม่มี Max-Age |
+| session | port อื่นของ host เดียวกันยัด `webhub_session` (cookie tossing) | ลองทุกค่า ≤ 8 — ค่าที่ไม่ผูกกับ key ไม่มีผล (ไม่ fixation, ไม่ DoS) | cookie ปลอม/ของ session อื่นมาก่อน → ยัง 200 |
+| daemon | slowloris / เปิด socket ค้างจาก process ในเครื่อง | `headersTimeout` 10 วิ ตรวจทุก 1 วิ, `requestTimeout` 30 วิ, `maxConnections` 256 | integration: header ค้าง → 408 ใน ~10 วิ |
+| daemon | user อื่นเปิด socket ค้างเกิน 256 → CLI ต่อไม่ได้ (security-2 L3 — DoS) | timeout จริง 10 วิ ลดเวลาถือ socket; **ยอมรับเป็น residual risk** (แก้เต็มไม่ได้บน TCP loopback) | — |
 | session | เดา id / brute force token | 32 bytes random; constant-time; หน่วงเมื่อผิด | — (review) |
-| `webhub.internal` | process ในเครื่องตั้ง Host เอง | endpoint ภายในทำได้แค่ตรวจ cookie / ใช้ code (ต้องรู้ code อยู่แล้ว); browser ตั้ง Host นี้ไม่ได้ | path อื่นบน internal → 404 |
+| `webhub.internal` | process ในเครื่องตั้ง Host เอง | endpoint ภายในทำได้แค่ใช้ code (ต้องรู้ code อยู่แล้ว); browser ตั้ง Host นี้ไม่ได้ | path อื่นบน internal → 404 |
 | daemon | request ใหญ่ / ค้าง (slowloris) | body ≤ 1 MB, header/request timeout, keep-alive timeout | body เกิน → 413 |
 | data | daemon 2 ตัวเขียนพร้อมกัน | F-001 lock → ตัวที่ 2 exit 3 | integration |
 | ข้อมูลภายใน | error เผย path / stack | error JSON รูปแบบเดียว ไม่มี stack | test |
 
 ข้อจำกัดที่รู้ (ยอมรับ):
-- cookie ของ `hub.<suffix>` ถูกส่งไป `hub.<suffix>:<port อื่น>` ด้วย (ไม่แยก port) — เกิดเมื่อผู้ใช้เปิด URL แบบนั้นที่โปรแกรมอื่นเสิร์ฟเท่านั้น; Host allowlist ของ daemon ไม่รับ port อื่นอยู่แล้ว
-- browser บางตัวอาจยอม `Domain=localhost` จาก `<site>.localhost` (ยังไม่ทดสอบ — K6) → ได้แค่ DoS (cookie ซ้ำ = ไม่มี session); `__Host-` prefix ต้องใช้ Secure (http ใช้ไม่ได้) → ทบทวนตอนทำ HTTPS
-- process ที่ถือ session id อยู่แล้วต่ออายุได้ด้วยการเรียกเรื่อยๆ (สูงสุด 7 วัน — K9)
+- cookie ของ `hub.<suffix>` ยังถูกส่งไป `hub.<suffix>:<port อื่น>` (ไม่แยก port) — แต่ cookie อย่างเดียวใช้ไม่ได้แล้ว (ต้องมี key — L1); XSS บนหน้า dashboard เองอ่าน key ได้ → CSP เข้มของ F-027 สำคัญ
+- key อยู่ใน history ของ browser ช่วงสั้นๆ ก่อน `replaceState` ลบ (F-027 ต้องทำทันทีที่โหลด)
+- browser บางตัวอาจยอม `Domain=localhost` จาก `<site>.localhost` (ยังไม่ทดสอบ — K6) → ไม่มีผลแล้ว (cookie ที่ไม่ผูก key ถูกข้าม); `__Host-` prefix ต้องใช้ Secure (http ใช้ไม่ได้) → ทบทวนตอนทำ HTTPS
+- process ที่ถือ session (cookie + key) อยู่แล้วต่ออายุได้ด้วยการเรียกเรื่อยๆ (สูงสุด 24 ชม. — K9)
+- DoS ด้วย socket ค้างจาก user อื่น (L3) — ยอมรับ; ย้าย CLI ไป named pipe + ACL ได้ในอนาคตผ่าน CR
 
 Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Dependency
 
@@ -175,9 +185,9 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 1 | Host allowlist: ตรง → ผ่าน; ไม่ตรง/ไม่มี/ซ้ำ/`localhost:7400`/ต่อท้ายโดเมน/ตัวพิมพ์ใหญ่/จุดท้าย → ตามกติกา | unit (inject) |
 | 2 | bearer: ถูก/ผิด/ไม่มี/รูปแบบผิด; constant-time compare ใช้ `timingSafeEqual` | unit |
 | 3 | CSRF: cookie + POST ไม่มี Origin / Origin อื่น / `Sec-Fetch-Site: cross-site` → 403; `text/plain` → 415; `OPTIONS` → 405; ไม่มี CORS header ในทุก response | unit |
-| 4 | login link: ใช้ได้ครั้งเดียว, หมดอายุ 60 วิ, ผูก host (ใช้กับ host อื่น → 401), cookie flags ครบ, ไม่มี `Domain` | unit |
-| 5 | session: ผูก host, idle/absolute expiry (นาฬิกาปลอม), logout | unit |
-| 6 | `webhub.internal`: เฉพาะ `/_auth` + `/_webhub/login`; `X-Forwarded-Host` นอก allowlist → 401 | unit |
+| 4 | login link: ใช้ได้ครั้งเดียว, หมดอายุ 60 วิ, ผูก host (ใช้กับ host อื่น → 401), cookie flags ครบ, ไม่มี `Domain` / `Max-Age`, `Location: /#k=<key>`; HEAD ไม่เผา code | unit |
+| 5 | session: ผูก id + key + host, idle/absolute expiry (นาฬิกาปลอม), logout; cookie อย่างเดียว / key ของคนอื่น → 401; cookie ปลอมมาก่อน → ยัง 200 | unit |
+| 6 | `webhub.internal`: เฉพาะ `/_webhub/login` (`/_auth` → 404); `X-Forwarded-Host` นอก allowlist / หลายค่า / IP → 401 | unit |
 | 7 | handshake: daemon จริงผ่าน; server ปลอม (proof ผิด) → `DAEMON_IMPOSTOR` และ server ปลอมไม่เห็น `Authorization` | integration |
 | 8 | lifecycle: start → `auth.json` (ACL เฉพาะ user) → status → shutdown → `auth.json` หาย + lock ปล่อย; daemon ตัวที่ 2 → exit 3; port ไม่ว่าง → exit 4 + PID ที่ถือ | integration (spawn `dist/daemon.js`, `WEBHUB_HOME` temp) |
 | 9 | token ใหม่หลัง restart; token เก่า → 401 | integration |
@@ -188,13 +198,16 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 14 | ไม่มี session บน IP host (link/login/cookie replay → 400/401); cookie ซ้ำ → 401; Set-Cookie จริงของ 303 ครบ flag | unit |
 | 15 | HEAD คง auth; URL ผิด → 400 / 421 รูปแบบเดียว + header; OPTIONS มี `Allow`; header ความปลอดภัยทุก response; JSON body ว่าง = ok | unit |
 | 16 | log 5xx ไม่มี message / token; `checkUpgrade` ทุกกรณี; ค่า timeout / maxConnections | unit |
-| 17 | raw socket: ไม่มี Host → 421, absolute-form → 400 (ไม่ log host); config ผิด → exit 2 + ไม่มีไฟล์ค้าง; in-process: abort signal (ก่อน/หลัง ready) + API shutdown → `stopped`, ไฟล์หาย | integration |
+| 17 | raw socket: ไม่มี Host (HTTP/1.0 และ 1.1) → 421, absolute-form → 400 (ไม่ log host); config ผิด → exit 2 + ไม่มีไฟล์ค้าง; in-process: abort signal (ก่อน/หลัง ready) + API shutdown → `stopped`, ไฟล์หาย | integration |
+| 18 | socket จริง: header ค้าง → 408 ใน 9–12.5 วิ; request ที่เสร็จระหว่างปิด → 503; shutdown แล้วตัดทันที → ยังปิด; garbage ตาม pipelining ไม่ตอบสลับลำดับ; client deadline (server หยดช้า → ETIMEDOUT) | integration (`api-socket.test.ts`) |
+| 19 | close ล้ม (onClose hook throw) → ไม่มี unhandled rejection, `stopped = {clean:false}`, ไฟล์ + lock หาย; `onAuthFile` remover; client reload `auth.json` หลัง restart (ไม่ใช่ impostor), ไฟล์หาย → NOT_RUNNING; login-links body ว่าง / `__proto__` / `constructor` | integration + unit |
 
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-003/test-1.md) | [review-1](../reports/F-003/review-1.md) | [security-1](../reports/F-003/security-1.md) | critical K1 (= major H1); ผู้ใช้: แก้ทั้งหมด |
-| 2 | [test-2](../reports/F-003/test-2.md) | | | รอ review รอบ 2 |
+| 2 | [test-2](../reports/F-003/test-2.md) | [review-2](../reports/F-003/review-2.md) | [security-2](../reports/F-003/security-2.md) | review: 0 critical/major (J1–J3 minor, J4–J8 nit); security: **L1 critical** (cookie บน `hub.localhost` รั่วไป port อื่น), L2–L3 minor → ผู้ใช้: L1 = cookie + key ใน sessionStorage, L3 = residual risk, minor/nit แก้ทั้งหมด |
+| 3 | [test-3](../reports/F-003/test-3.md) | | | รอ review รอบ 3 |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [ ] DESIGN.md §10.3, §12  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
@@ -206,3 +219,5 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 2026-11-08 | W1 ②③④ | ผู้ใช้: Q1 Fastify 5, Q2 token สุ่มใหม่ทุก start, Q3 port 7400 ตายตัว, Q4 คำสั่ง daemon อยู่ F-004 → DESIGN §10.3/§12, เข้า Plan queue `planned` |
 | 2026-11-08 | W3 รอบ 1 | implement + test-1; review-1 (H1–H16), security-1 (K1 critical, K2–K12) |
 | 2026-11-08 | W3 รอบ 2 | ผู้ใช้ "แก้ทั้งหมด" → session เฉพาะ hub./db. (K1), framework/client errors, 503, timeouts, log, signal/SIGHUP/exit cleanup, auth.json ก่อน listen, `checkUpgrade`, test เพิ่ม → test-2 |
+| 2026-11-08 | W3 รอบ 2 review | review-2 (J1–J8, ไม่มี critical/major), security-2 (L1 critical) |
+| 2026-11-08 | W3 รอบ 3 | ผู้ใช้: L1 = cookie + header key (sessionStorage), L3 ยอมรับ, minor/nit แก้ทั้งหมด → session key + fragment, ไม่มี Max-Age, idle 2 ชม./สูงสุด 24 ชม., `/_auth` ย้ายไป F-026, timeout ตรวจทุก 1 วิ, `requireHostHeader: false`, HEAD login, log URL ผิด, stop ไม่ reject, hook ก่อน start, client reload, pipelining → test-3 |

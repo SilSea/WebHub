@@ -5,12 +5,22 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SESSION_COOKIE = "webhub_session";
+/**
+ * Second session secret, sent by the dashboard's JS on every API call (security-2 L1).
+ * Cookies are not port-scoped and `*.localhost` reaches every loopback port, so any program
+ * on `127.0.0.1:<Q>` can be opened as `http://hub.localhost:<Q>` and receives the hub cookie.
+ * The key lives in the page's sessionStorage, which IS scoped to scheme + host + port.
+ */
+export const SESSION_HEADER = "x-webhub-session";
+/** WebSocket clients cannot set headers: the key travels as a subprotocol `webhub-key.<key>`. */
+export const SESSION_SUBPROTOCOL_PREFIX = "webhub-key.";
 export const INTERNAL_HOST = "webhub.internal";
-export const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
-export const SESSION_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+export const SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
+export const SESSION_MAX_MS = 24 * 60 * 60 * 1000;
 export const LOGIN_CODE_TTL_MS = 60_000;
 const MAX_SESSIONS = 1000;
 const MAX_CODES = 100;
+const MAX_COOKIE_VALUES = 8;
 
 /** 32 random bytes, base64url (43 chars). */
 export const randomId = (): string => randomBytes(32).toString("base64url");
@@ -40,10 +50,9 @@ export function apiHosts(o: HostOptions): string[] {
 
 /**
  * Hosts that may hold a browser session: named hosts only (security-1 K1). Never an IP host:
- * cookies are not port-scoped, so a cookie for `127.0.0.1` would also be sent to every
- * project dev server on `http://127.0.0.1:<any port>`. `127.0.0.1:<apiPort>` = bearer only.
- * Known limit: a hub./db. cookie is likewise sent to `hub.<suffix>:<other port>` if the user
- * ever opens such a URL served by another program.
+ * `127.0.0.1:<apiPort>` = bearer only. The hub./db. cookie still reaches
+ * `hub.<suffix>:<any port>` (any local program can force that navigation — security-2 L1), so
+ * a session needs the cookie AND the port-scoped key header (`SESSION_HEADER`).
  */
 export function sessionHosts(o: HostOptions): string[] {
   return apiHosts(o).filter((h) => !h.startsWith("127.0.0.1:"));
@@ -104,24 +113,29 @@ export function helloProof(token: string, nonce: string): string {
 
 // ---------- cookies ----------
 
-/** Value of `name` in a Cookie header; duplicates → undefined (ambiguous). */
-export function readCookie(header: string | undefined, name: string): string | undefined {
-  if (header === undefined) return undefined;
-  let found: string | undefined;
-  let count = 0;
+/**
+ * All values of `name` in a Cookie header (more than 8 → none). Several values appear when
+ * another port of the same host tosses its own cookie (security-2 L1): the session check tries
+ * each and only the one bound to the key header can match, so tossing cannot log anyone out.
+ */
+export function readCookies(header: string | undefined, name: string): string[] {
+  if (header === undefined) return [];
+  const out: string[] = [];
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     if (part.slice(0, eq).trim() !== name) continue;
-    count++;
-    found = part.slice(eq + 1).trim();
+    out.push(part.slice(eq + 1).trim());
   }
-  return count === 1 ? found : undefined;
+  return out.length <= MAX_COOKIE_VALUES ? out : [];
 }
 
-/** Host-only (no Domain), HttpOnly, SameSite=Strict session cookie. */
+/**
+ * Host-only (no Domain), HttpOnly, SameSite=Strict browser-session cookie. No Max-Age: gone
+ * when the browser closes (security-2 L1).
+ */
 export function sessionCookie(id: string): string {
-  return `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_MAX_MS / 1000}`;
+  return `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; SameSite=Strict`;
 }
 
 export function clearSessionCookie(): string {
@@ -164,7 +178,41 @@ export interface UpgradeRequest {
     authorization?: string | undefined;
     cookie?: string | undefined;
     "sec-fetch-site"?: string | string[] | undefined;
+    "x-webhub-session"?: string | string[] | undefined;
+    "sec-websocket-protocol"?: string | string[] | undefined;
   };
+}
+
+/** Session key from a `Sec-WebSocket-Protocol` list (`webhub-key.<key>`). Never echo it back. */
+export function keyFromSubprotocols(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const found = value
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.startsWith(SESSION_SUBPROTOCOL_PREFIX));
+  return found.length === 1 ? found[0]?.slice(SESSION_SUBPROTOCOL_PREFIX.length) : undefined;
+}
+
+/**
+ * Session id for a request on `host`: a session host, one cookie value and the key of that same
+ * session (default: the `x-webhub-session` header). Undefined otherwise.
+ */
+export function sessionFor(
+  headers: { cookie?: string | undefined; "x-webhub-session"?: string | string[] | undefined },
+  host: string,
+  o: HostOptions,
+  sessions: SessionStore,
+  key: string | undefined = headerKey(headers),
+): string | undefined {
+  if (!sessionHosts(o).includes(host) || key === undefined) return undefined;
+  return sessions.findSession(readCookies(headers.cookie, SESSION_COOKIE), key, host);
+}
+
+function headerKey(headers: {
+  "x-webhub-session"?: string | string[] | undefined;
+}): string | undefined {
+  const v = headers[SESSION_HEADER];
+  return typeof v === "string" ? v : undefined;
 }
 
 export type UpgradeResult =
@@ -173,7 +221,9 @@ export type UpgradeResult =
 
 /**
  * Same rules as an unsafe HTTP request (an upgrade is never "safe"): one allowed API Host,
- * valid bearer or a session for that host, and same-origin (Origin required with a cookie).
+ * valid bearer or a session for that host (cookie + key from the `x-webhub-session` header or
+ * the `webhub-key.<key>` subprotocol), and same-origin (Origin required with a session). The
+ * caller must answer with its own subprotocol, never the key one.
  */
 export function checkUpgrade(
   req: UpgradeRequest,
@@ -191,8 +241,13 @@ export function checkUpgrade(
       return { ok: false, status: 401, reason: "not authorized" };
     auth = "bearer";
   } else if (
-    sessionHosts(o).includes(h.host) &&
-    o.sessions.checkSession(readCookie(req.headers.cookie, SESSION_COOKIE), h.host)
+    sessionFor(
+      req.headers,
+      h.host,
+      o,
+      o.sessions,
+      headerKey(req.headers) ?? keyFromSubprotocols(req.headers["sec-websocket-protocol"]),
+    ) !== undefined
   ) {
     auth = "session";
   } else {
@@ -213,6 +268,7 @@ export function checkUpgrade(
 
 interface Session {
   host: string;
+  key: string;
   created: number;
   lastSeen: number;
 }
@@ -249,31 +305,40 @@ export class SessionStore {
     return c.host === host && this.now() <= c.expires;
   }
 
-  createSession(host: string): string {
+  /** New session: `id` goes into the cookie, `key` to the page (URL fragment → sessionStorage). */
+  createSession(host: string): { id: string; key: string } {
     this.#sweep();
     if (this.#sessions.size >= MAX_SESSIONS) {
       const oldest = this.#sessions.keys().next().value;
       if (oldest !== undefined) this.#sessions.delete(oldest);
     }
     const id = randomId();
+    const key = randomId();
     const t = this.now();
-    this.#sessions.set(id, { host, created: t, lastSeen: t });
-    return id;
+    this.#sessions.set(id, { host, key, created: t, lastSeen: t });
+    return { id, key };
   }
 
-  /** Valid session for exactly this host (refreshes idle time). */
-  checkSession(id: string | undefined, host: string): boolean {
-    if (!isId(id)) return false;
-    const s = this.#sessions.get(id);
-    if (s === undefined) return false;
+  /**
+   * The id (one of the cookie values) of a live session for exactly this host whose key equals
+   * `key`; refreshes its idle time. Undefined when none matches.
+   */
+  findSession(ids: readonly string[], key: string, host: string): string | undefined {
+    if (!isId(key)) return undefined;
     const t = this.now();
-    if (t - s.lastSeen > SESSION_IDLE_MS || t - s.created > SESSION_MAX_MS) {
-      this.#sessions.delete(id);
-      return false;
+    for (const id of ids) {
+      if (!isId(id)) continue;
+      const s = this.#sessions.get(id);
+      if (s === undefined) continue;
+      if (t - s.lastSeen > SESSION_IDLE_MS || t - s.created > SESSION_MAX_MS) {
+        this.#sessions.delete(id);
+        continue;
+      }
+      if (s.host !== host || !safeEqual(s.key, key)) continue;
+      s.lastSeen = t;
+      return id;
     }
-    if (s.host !== host) return false;
-    s.lastSeen = t;
-    return true;
+    return undefined;
   }
 
   deleteSession(id: string | undefined): void {

@@ -25,6 +25,7 @@ function send(
   path: string,
   headers: Record<string, string>,
   body: string | undefined,
+  timeoutMs = TIMEOUT_MS,
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -43,7 +44,7 @@ function send(
                 "content-length": String(Buffer.byteLength(body)),
               }),
         },
-        timeout: TIMEOUT_MS,
+        timeout: timeoutMs,
         agent: false,
       },
       (res) => {
@@ -73,7 +74,7 @@ function send(
     // overall deadline, not only socket idle time: a slow-drip server cannot stall us (H13)
     const deadline = setTimeout(
       () => req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
-      TIMEOUT_MS,
+      timeoutMs,
     );
     req.on("close", () => clearTimeout(deadline));
     req.on("timeout", () =>
@@ -86,34 +87,66 @@ function send(
 
 function unreachable(err: unknown): ServerError {
   const code = (err as NodeJS.ErrnoException).code;
-  if (code === "ECONNREFUSED") {
-    return new ServerError("DAEMON_NOT_RUNNING", "the webhub daemon is not running", {
-      hint: "Start it (webhub daemon start).",
-    });
-  }
+  if (code === "ECONNREFUSED") return notRunning();
   return new ServerError("DAEMON_UNREACHABLE", "could not talk to the webhub daemon", {
     details: [code ?? (err instanceof Error ? err.message : "error")],
   });
 }
 
+const notRunning = () =>
+  new ServerError("DAEMON_NOT_RUNNING", "the webhub daemon is not running", {
+    hint: "Start it (webhub daemon start).",
+  });
+
+export type SendFn = (
+  port: number,
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+) => Promise<RawResponse>;
+
 export class DaemonClient {
   #verified = false;
+  #auth: AuthFile;
+  /**
+   * @param reload re-reads auth.json (undefined = gone). When a proof fails, the daemon may
+   *   have restarted with a new token: the client reloads once before reporting an impostor (J7).
+   */
   constructor(
-    private readonly auth: AuthFile,
-    private readonly sendFn: typeof send = send,
-  ) {}
+    auth: AuthFile,
+    private readonly sendFn: SendFn = send,
+    private readonly reload?: () => Promise<AuthFile | undefined>,
+  ) {
+    this.#auth = auth;
+  }
 
   get port(): number {
-    return this.auth.port;
+    return this.#auth.port;
   }
 
   /** Proves the server on the port is the daemon that wrote auth.json (no token sent). */
   async verify(): Promise<void> {
     if (this.#verified) return;
+    try {
+      await this.#prove();
+    } catch (err) {
+      if (this.reload === undefined) throw err;
+      const fresh = await this.reload().catch(() => undefined);
+      if (fresh === undefined) throw notRunning();
+      if (fresh.token === this.#auth.token && fresh.port === this.#auth.port) throw err;
+      this.#auth = fresh;
+      await this.#prove();
+    }
+    this.#verified = true;
+  }
+
+  async #prove(): Promise<void> {
+    const { port, token } = this.#auth;
     const nonce = randomBytes(32).toString("base64url");
     let res: RawResponse;
     try {
-      res = await this.sendFn(this.auth.port, "GET", `/api/v1/hello?n=${nonce}`, {}, undefined);
+      res = await this.sendFn(port, "GET", `/api/v1/hello?n=${nonce}`, {}, undefined);
     } catch (err) {
       throw unreachable(err);
     }
@@ -121,17 +154,16 @@ export class DaemonClient {
     if (
       res.status !== 200 ||
       typeof proof !== "string" ||
-      !safeEqual(proof, helloProof(this.auth.token, nonce))
+      !safeEqual(proof, helloProof(token, nonce))
     ) {
       throw new ServerError(
         "DAEMON_IMPOSTOR",
-        `the program on port ${this.auth.port} is not the webhub daemon (token not sent)`,
+        `the program on port ${port} is not the webhub daemon (token not sent)`,
         {
           hint: "The daemon is probably not running and another program uses its port. Start webhub again; if this repeats, check which program listens on that port.",
         },
       );
     }
-    this.#verified = true;
   }
 
   /** Authenticated JSON request. Non-2xx → API_ERROR with the API's error code. */
@@ -140,10 +172,10 @@ export class DaemonClient {
     let res: RawResponse;
     try {
       res = await this.sendFn(
-        this.auth.port,
+        this.#auth.port,
         method,
         path,
-        { authorization: `Bearer ${this.auth.token}` },
+        { authorization: `Bearer ${this.#auth.token}` },
         body === undefined ? undefined : JSON.stringify(body),
       );
     } catch (err) {
@@ -172,13 +204,10 @@ export class DaemonClient {
  * spawned (review-1 H16). A file left by a crash + refused port = not running (K2).
  */
 export async function connectDaemon(paths: Paths): Promise<DaemonClient> {
-  const res = await readDoc(paths.auth, authFileSpec, { home: paths.home });
-  if (res === undefined) {
-    throw new ServerError("DAEMON_NOT_RUNNING", "the webhub daemon is not running", {
-      hint: "Start it (webhub daemon start).",
-    });
-  }
-  return new DaemonClient(res.value);
+  const read = async () => (await readDoc(paths.auth, authFileSpec, { home: paths.home }))?.value;
+  const auth = await read();
+  if (auth === undefined) throw notRunning();
+  return new DaemonClient(auth, send, read);
 }
 
 export { send as sendRaw };

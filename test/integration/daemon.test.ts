@@ -194,6 +194,9 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
         s.on("error", reject);
       });
     expect(await raw("GET /api/v1/health HTTP/1.0\r\n\r\n")).toMatch(/^HTTP\/1\.1 421 /);
+    expect(await raw("GET /api/v1/health HTTP/1.1\r\nConnection: close\r\n\r\n")).toMatch(
+      /^HTTP\/1\.1 421 /,
+    );
     const abs = await raw(
       `GET http://evil.example/api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`,
     );
@@ -238,6 +241,52 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
     await c.stopped;
     expect(existsSync(h.paths.auth)).toBe(false);
     expect(existsSync(h.paths.lock)).toBe(false);
+  });
+
+  it("a failing close still cleans up, never rejects, and reports clean: false (J2)", async () => {
+    const env = { ...process.env, WEBHUB_HOME: h.paths.home };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const d = await startDaemon({
+        env,
+        port: await freePort(),
+        log: () => {},
+        registrars: [
+          (app) =>
+            app.addHook("onClose", async () => {
+              throw new Error("onClose boom");
+            }),
+        ],
+      });
+      await (await connectDaemon(h.paths)).request("POST", "/api/v1/shutdown");
+      expect(await d.stopped).toEqual({ clean: false });
+      await d.stop(); // idempotent, resolves
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+      expect(existsSync(h.paths.auth)).toBe(false);
+      expect(existsSync(h.paths.lock)).toBe(false);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("onAuthFile hands out a remover that only deletes our own file (J6)", async () => {
+    const env = { ...process.env, WEBHUB_HOME: h.paths.home };
+    let remove: (() => void) | undefined;
+    const d = await startDaemon({
+      env,
+      port: await freePort(),
+      log: () => {},
+      onAuthFile: (r) => {
+        remove = r;
+      },
+    });
+    expect(remove).toBeDefined();
+    remove?.();
+    expect(existsSync(h.paths.auth)).toBe(false);
+    await d.stop();
   });
 
   it("an impostor on the port never receives the token", async () => {

@@ -38,6 +38,11 @@ export interface DaemonOptions {
   registrars?: readonly RouteRegistrar[];
   /** Aborted (e.g. by a signal) → the daemon stops as soon as it is ready. */
   signal?: AbortSignal;
+  /**
+   * Called right after auth.json is written, with a synchronous remover (only removes it while
+   * it holds our token): lets `main()` clean up even when start-up crashes later (J6).
+   */
+  onAuthFile?: (removeSync: () => void) => void;
 }
 
 export interface RunningDaemon {
@@ -45,12 +50,13 @@ export interface RunningDaemon {
   readonly port: number;
   readonly app: FastifyInstance;
   /**
-   * Idempotent clean stop: close server, remove auth.json (if ours), release lock. Also
-   * triggered by POST /api/v1/shutdown and by `signal`.
+   * Idempotent stop: close server, remove auth.json (if ours), release lock. Also triggered by
+   * POST /api/v1/shutdown and by `signal`. Never rejects (J2): a failing close is logged and
+   * reported through `stopped`.
    */
   stop(): Promise<void>;
-  /** Resolves once the daemon has stopped (any trigger). */
-  readonly stopped: Promise<void>;
+  /** Resolves once the daemon has stopped (any trigger); `clean` = the server closed without error. */
+  readonly stopped: Promise<{ clean: boolean }>;
   /** Synchronous last-resort removal of our auth.json (process `exit` hook). */
   removeAuthFileSync(): void;
 }
@@ -135,8 +141,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     if (stopFn === undefined) stopQueued = true;
     else void stopFn();
   };
-  let resolveStopped: () => void = () => {};
-  const stopped = new Promise<void>((r) => {
+  let resolveStopped: (r: { clean: boolean }) => void = () => {};
+  const stopped = new Promise<{ clean: boolean }>((r) => {
     resolveStopped = r;
   });
   try {
@@ -171,6 +177,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       startedAt,
     };
     await writeDoc(lock, paths.auth, doc, { keepBackup: false });
+    opts.onAuthFile?.(() => removeAuthFileSync(paths.auth, token));
     try {
       await app.listen({ host: "127.0.0.1", port });
     } catch (err) {
@@ -196,14 +203,19 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     stopFn = () => {
       stopping ??= (async () => {
         const timer = setTimeout(() => running.server.closeAllConnections(), STOP_GRACE_MS);
+        let clean = true;
         try {
           await running.close();
+        } catch (err) {
+          // e.g. an onClose hook of a later feature throws: still clean up, never reject (J2)
+          clean = false;
+          log({ level: "error", msg: "stop failed", error: (err as Error).name ?? "Error" });
         } finally {
           clearTimeout(timer);
           await removeAuthFile(paths.auth, token).catch(() => {});
           await lock.release().catch(() => {});
           log({ msg: "stopped" });
-          resolveStopped();
+          resolveStopped({ clean });
         }
       })();
       return stopping;
@@ -273,26 +285,32 @@ export async function main(): Promise<number> {
     void daemon?.stop();
   };
   for (const sig of STOP_SIGNALS) process.on(sig, onSignal);
-  try {
-    daemon = await startDaemon({ signal: abort.signal });
-  } catch (err) {
-    for (const line of describe(err)) process.stderr.write(`${line}\n`);
-    return exitCodeFor(err);
-  }
-  const running = daemon;
-  // last resort: never leave our token file behind (K2); the lock is taken over by the next
-  // daemon anyway (F-001: dead PID / start time)
-  process.once("exit", () => running.removeAuthFileSync());
+  // last resort, installed BEFORE start (J6): never leave our token file behind (K2); the lock
+  // is taken over by the next daemon anyway (F-001: dead PID / start time)
+  let removeAuthSync: (() => void) | undefined;
+  process.once("exit", () => removeAuthSync?.());
   process.once("uncaughtException", (err) => {
     process.stderr.write(`webhub daemon: internal error (${err.name})\n`);
+    if (daemon === undefined) process.exit(1); // during start-up: the `exit` hook cleans up
     const force = setTimeout(() => process.exit(1), STOP_GRACE_MS + 1_000);
-    void running.stop().finally(() => {
+    void daemon.stop().finally(() => {
       clearTimeout(force);
       process.exit(1);
     });
   });
-  await running.stopped;
-  return 0;
+  try {
+    daemon = await startDaemon({
+      signal: abort.signal,
+      onAuthFile: (remove) => {
+        removeAuthSync = remove;
+      },
+    });
+  } catch (err) {
+    for (const line of describe(err)) process.stderr.write(`${line}\n`);
+    return exitCodeFor(err);
+  }
+  const { clean } = await daemon.stopped;
+  return clean ? 0 : 1;
 }
 
 function isMain(): boolean {

@@ -8,16 +8,17 @@ import {
   classifyHost,
   csrfProblem,
   helloProof,
+  keyFromSubprotocols,
   LOGIN_CODE_TTL_MS,
   normaliseHost,
   parseBearer,
-  readCookie,
+  readCookies,
   SESSION_IDLE_MS,
   SESSION_MAX_MS,
   SessionStore,
   sessionCookie,
 } from "../../src/server/auth.js";
-import { DaemonClient } from "../../src/server/client.js";
+import { DaemonClient, type SendFn } from "../../src/server/client.js";
 import { isServerError } from "../../src/server/errors.js";
 
 const TOKEN = randomBytes(32).toString("base64url");
@@ -72,15 +73,25 @@ describe("pure auth helpers", () => {
     }
   });
 
-  it("readCookie refuses duplicates; session cookie is host-only, HttpOnly, Strict", () => {
-    expect(readCookie("a=1; webhub_session=x; b=2", "webhub_session")).toBe("x");
-    expect(readCookie("webhub_session=x; webhub_session=y", "webhub_session")).toBeUndefined();
-    expect(readCookie(undefined, "webhub_session")).toBeUndefined();
+  it("readCookies returns every value (≤ 8); session cookie is a host-only browser-session cookie", () => {
+    expect(readCookies("a=1; webhub_session=x; b=2", "webhub_session")).toEqual(["x"]);
+    expect(readCookies("webhub_session=x; webhub_session=y", "webhub_session")).toEqual(["x", "y"]);
+    expect(readCookies(undefined, "webhub_session")).toEqual([]);
+    expect(readCookies(Array(9).fill("webhub_session=x").join("; "), "webhub_session")).toEqual([]);
     const c = sessionCookie("id");
     expect(c).toContain("HttpOnly");
     expect(c).toContain("SameSite=Strict");
     expect(c).toContain("Path=/");
     expect(c.toLowerCase()).not.toContain("domain");
+    expect(c).not.toContain("Max-Age"); // gone with the browser (L1)
+  });
+
+  it("keyFromSubprotocols takes exactly one webhub-key.<key>", () => {
+    const k = "K".repeat(43);
+    expect(keyFromSubprotocols(`webhub.v1, webhub-key.${k}`)).toBe(k);
+    expect(keyFromSubprotocols("webhub.v1")).toBeUndefined();
+    expect(keyFromSubprotocols(`webhub-key.${k}, webhub-key.x`)).toBeUndefined();
+    expect(keyFromSubprotocols(undefined)).toBeUndefined();
   });
 
   it("csrfProblem: unsafe methods need same origin; cookie auth needs Origin", () => {
@@ -125,25 +136,29 @@ describe("pure auth helpers", () => {
     expect(s.consumeCode("not-a-code", "hub.localhost")).toBe(false);
   });
 
-  it("sessions: host-bound, idle and absolute expiry", () => {
+  it("sessions: id + key + host bound, idle and absolute expiry", () => {
     let now = 0;
     const s = new SessionStore(() => now);
-    const id = s.createSession("hub.localhost");
-    expect(s.checkSession(id, "hub.localhost")).toBe(true);
-    expect(s.checkSession(id, "db.localhost")).toBe(false);
+    const { id, key } = s.createSession("hub.localhost");
+    const other = s.createSession("hub.localhost");
+    expect(s.findSession([id], key, "hub.localhost")).toBe(id);
+    expect(s.findSession([id], key, "db.localhost")).toBeUndefined();
+    expect(s.findSession([id], other.key, "hub.localhost")).toBeUndefined(); // key of another session
+    expect(s.findSession([other.id, id], key, "hub.localhost")).toBe(id); // tossed cookie first
+    expect(s.findSession([id], "short", "hub.localhost")).toBeUndefined();
     now += SESSION_IDLE_MS - 1;
-    expect(s.checkSession(id, "hub.localhost")).toBe(true); // refreshes idle
-    for (let t = 0; t < 20; t++) {
+    expect(s.findSession([id], key, "hub.localhost")).toBe(id); // refreshes idle
+    for (let t = 0; t < 40; t++) {
       now += SESSION_IDLE_MS / 2;
       if (now > SESSION_MAX_MS) break;
-      s.checkSession(id, "hub.localhost");
+      s.findSession([id], key, "hub.localhost");
     }
     now = SESSION_MAX_MS + 1;
-    expect(s.checkSession(id, "hub.localhost")).toBe(false);
+    expect(s.findSession([id], key, "hub.localhost")).toBeUndefined();
     const idle = s.createSession("hub.localhost");
     now += SESSION_IDLE_MS + 1;
-    expect(s.checkSession(idle, "hub.localhost")).toBe(false);
-    expect(s.checkSession(undefined, "hub.localhost")).toBe(false);
+    expect(s.findSession([idle.id], idle.key, "hub.localhost")).toBeUndefined();
+    expect(s.findSession([], key, "hub.localhost")).toBeUndefined();
   });
 });
 
@@ -192,7 +207,10 @@ describe("API server", () => {
       ...(payload === undefined ? {} : { payload }),
     });
 
-  /** Logs in through a login link; returns the cookie header for `host`. */
+  /**
+   * Logs in through a login link. `cookie` = Cookie header, `key` = the fragment secret,
+   * `as` = the headers the dashboard sends (host + cookie + key).
+   */
   const login = async (host = "hub.localhost") => {
     const link = await req(
       "POST",
@@ -204,8 +222,10 @@ describe("API server", () => {
     const url = new URL(link.json().url as string);
     const res = await req("GET", `${url.pathname}${url.search}`, { host });
     expect(res.statusCode).toBe(303);
-    const set = String(res.headers["set-cookie"]);
-    return set.split(";")[0] ?? "";
+    const cookie = String(res.headers["set-cookie"]).split(";")[0] ?? "";
+    const key = /^\/#k=([A-Za-z0-9_-]{43})$/.exec(String(res.headers.location))?.[1] ?? "";
+    expect(key).not.toBe("");
+    return { cookie, key, as: { host, cookie, "x-webhub-session": key } };
   };
 
   it("unknown / missing / duplicate Host → 421 before auth, no data", async () => {
@@ -256,13 +276,11 @@ describe("API server", () => {
     expect((await req("GET", "/api/v1/hello?n=short")).statusCode).toBe(400);
   });
 
-  it("login link → cookie for that host only; code single use; wrong host refused", async () => {
-    const cookie = await login("hub.localhost");
+  it("login link → session for that host only; code single use; wrong host refused", async () => {
+    const { cookie, as } = await login("hub.localhost");
     expect(cookie.startsWith("webhub_session=")).toBe(true);
-    expect((await req("GET", "/api/v1/status", { host: "hub.localhost", cookie })).statusCode).toBe(
-      200,
-    );
-    expect((await req("GET", "/api/v1/status", { host: "db.localhost", cookie })).statusCode).toBe(
+    expect((await req("GET", "/api/v1/status", as)).statusCode).toBe(200);
+    expect((await req("GET", "/api/v1/status", { ...as, host: "db.localhost" })).statusCode).toBe(
       401,
     );
 
@@ -287,18 +305,61 @@ describe("API server", () => {
     const viaCookie = await req(
       "POST",
       "/api/v1/login-links",
-      {
-        host: "hub.localhost",
-        cookie,
-        origin: "http://hub.localhost",
-        "content-type": "application/json",
-      },
+      { ...as, origin: "http://hub.localhost", "content-type": "application/json" },
       "{}",
     );
     expect(viaCookie.statusCode).toBe(401);
   });
 
-  it("login response: real Set-Cookie flags; code does not leak (no-store, no-referrer)", async () => {
+  it("a stolen cookie alone is useless: the key header is required (L1)", async () => {
+    const a = await login("hub.localhost");
+    const b = await login("hub.localhost");
+    // what a program on hub.localhost:<other port> can capture: the cookie, never the key
+    expect(
+      (await req("GET", "/api/v1/status", { host: "hub.localhost", cookie: a.cookie })).statusCode,
+    ).toBe(401);
+    expect(
+      (await req("GET", "/api/v1/status", { ...a.as, "x-webhub-session": b.key })).statusCode,
+    ).toBe(401);
+    expect(
+      (await req("GET", "/api/v1/status", { ...a.as, "x-webhub-session": "x" })).statusCode,
+    ).toBe(401);
+    // a tossed cookie next to the real one does not log the user out (no DoS)
+    const tossed = { ...a.as, cookie: `webhub_session=${"A".repeat(43)}; ${a.cookie}` };
+    expect((await req("GET", "/api/v1/status", tossed)).statusCode).toBe(200);
+    // ... nor does another valid session's cookie get used with this key
+    const mixed = { ...a.as, cookie: `${b.cookie}; ${a.cookie}` };
+    expect((await req("GET", "/api/v1/status", mixed)).statusCode).toBe(200);
+  });
+
+  it("HEAD on a login link is not a login and does not burn the code (J4)", async () => {
+    const link = await req("POST", "/api/v1/login-links", bearer);
+    const url = new URL(link.json().url as string);
+    const head = await req("HEAD", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    expect([404, 405]).toContain(head.statusCode);
+    expect(head.headers["set-cookie"]).toBeUndefined();
+    const get = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    expect(get.statusCode).toBe(303);
+  });
+
+  it("login-links: empty JSON body ok; prototype poisoning refused", async () => {
+    const empty = await req("POST", "/api/v1/login-links", {
+      ...bearer,
+      "content-type": "application/json",
+    });
+    expect(empty.statusCode).toBe(200);
+    for (const body of ['{"__proto__":{"host":"evil.com"}}', '{"constructor":{"prototype":{}}}']) {
+      const res = await req(
+        "POST",
+        "/api/v1/login-links",
+        { ...bearer, "content-type": "application/json" },
+        body,
+      );
+      expect(res.statusCode, body).toBe(400);
+    }
+  });
+
+  it("login response: real Set-Cookie flags, key in the fragment; nothing leaks", async () => {
     const link = await req("POST", "/api/v1/login-links", bearer);
     expect(link.statusCode).toBe(200);
     const url = new URL(link.json().url as string);
@@ -307,13 +368,16 @@ describe("API server", () => {
     expect(res.statusCode).toBe(303);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["referrer-policy"]).toBe("no-referrer");
-    expect(res.headers.location).toBe("/");
+    expect(res.headers.location).toMatch(/^\/#k=[A-Za-z0-9_-]{43}$/);
     const set = String(res.headers["set-cookie"]);
     expect(set).toMatch(/^webhub_session=[A-Za-z0-9_-]{43}; /);
     expect(set).toContain("HttpOnly");
     expect(set).toContain("SameSite=Strict");
     expect(set).toContain("Path=/");
     expect(set.toLowerCase()).not.toContain("domain");
+    expect(set).not.toContain("Max-Age");
+    // cookie id and key are different secrets
+    expect(set).not.toContain(String(res.headers.location).slice(4));
   });
 
   it("no browser session on the IP host: cookies are not port-scoped (K1)", async () => {
@@ -330,18 +394,9 @@ describe("API server", () => {
     const onIp = await req("GET", `${url.pathname}${url.search}`, { host: API });
     expect(onIp.statusCode).toBe(401);
     expect(onIp.headers["set-cookie"]).toBeUndefined();
-    // a hub session replayed with the IP Host (e.g. by a dev server on 127.0.0.1) is useless
-    const cookie = await login("hub.localhost");
-    expect((await req("GET", "/api/v1/status", { host: API, cookie })).statusCode).toBe(401);
-    // two webhub_session cookies (tossed by another site) → no session at all
-    expect(
-      (
-        await req("GET", "/api/v1/status", {
-          host: "hub.localhost",
-          cookie: `${cookie}; webhub_session=${"A".repeat(43)}`,
-        })
-      ).statusCode,
-    ).toBe(401);
+    // a hub session replayed with the IP Host is useless, even with its key
+    const { as } = await login("hub.localhost");
+    expect((await req("GET", "/api/v1/status", { ...as, host: API })).statusCode).toBe(401);
   });
 
   it("HEAD keeps auth; bad URL → uniform 400 / 421 with headers; OPTIONS has Allow", async () => {
@@ -354,17 +409,20 @@ describe("API server", () => {
     const badEvil = await req("GET", "/%E0%A4%A", { host: "evil.com" });
     expect(badEvil.statusCode).toBe(421);
     expect(badEvil.body).not.toContain("E0");
+    // logged, without the target (J5)
+    expect(logs.filter((l) => l.path === "(invalid target)" && l.status === 400)).toHaveLength(2);
+    expect(JSON.stringify(logs)).not.toContain("E0");
     expect((await req("OPTIONS", "/api/v1/status")).headers.allow).toBe("GET, HEAD, POST");
   });
 
   it("no CORS / security headers on every kind of response", async () => {
-    const cookie = await login();
+    const { as } = await login();
     const responses = [
       await req("GET", "/api/v1/health"),
       await req("GET", "/api/v1/status"),
       await req("GET", "/api/v1/status", { host: "evil.com" }),
       await req("GET", "/nope", bearer),
-      await req("POST", "/api/v1/logout", { host: "hub.localhost", cookie }),
+      await req("POST", "/api/v1/logout", as),
       await req("POST", "/api/v1/login-links", { ...bearer, "content-type": "text/plain" }, "x"),
       await req("GET", "/_webhub/login?t=x", { host: "hub.localhost" }),
       await req("GET", "/api/v1/hello?n=x"),
@@ -376,26 +434,24 @@ describe("API server", () => {
     }
   });
 
-  it("server limits against slowloris / socket exhaustion (K4)", () => {
+  it("server limits against slowloris / socket exhaustion (K4; real timing: integration)", () => {
     expect(app.server.headersTimeout).toBe(10_000);
     expect(app.server.maxConnections).toBe(256);
     expect(app.server.requestTimeout).toBe(30_000);
   });
 
   it("logout accepts a JSON content type with an empty body", async () => {
-    const cookie = await login();
+    const { as } = await login();
     const res = await req("POST", "/api/v1/logout", {
-      host: "hub.localhost",
-      cookie,
+      ...as,
       origin: "http://hub.localhost",
       "content-type": "application/json",
     });
     expect(res.statusCode).toBe(204);
   });
 
-  it("CSRF: cookie POST needs Origin; cross-site and text/plain refused", async () => {
-    const cookie = await login();
-    const base = { host: "hub.localhost", cookie };
+  it("CSRF: session POST needs Origin; cross-site and text/plain refused", async () => {
+    const { as: base } = await login();
     expect((await req("POST", "/api/v1/logout", base)).statusCode).toBe(403);
     expect(
       (await req("POST", "/api/v1/logout", { ...base, origin: "http://evil.com" })).statusCode,
@@ -429,41 +485,38 @@ describe("API server", () => {
     expect((await req("GET", "/api/v1/status", base)).statusCode).toBe(401);
   });
 
-  it("webhub.internal: only /_auth and /_webhub/login; forwarded host must be allowed", async () => {
+  it("webhub.internal: only /_webhub/login (no /_auth yet — F-026); forwarded host checked", async () => {
     const internal = { host: "webhub.internal" };
     expect((await req("GET", "/api/v1/status", { ...internal, ...bearer })).statusCode).toBe(404);
     expect((await req("GET", "/api/v1/health", internal)).statusCode).toBe(404);
-    expect((await req("GET", "/_auth", { host: "hub.localhost" })).statusCode).toBe(404);
-    const cookie = await login("db.localhost");
-    expect(
-      (await req("GET", "/_auth", { ...internal, cookie, "x-forwarded-host": "db.localhost" }))
-        .statusCode,
-    ).toBe(204);
-    expect(
-      (await req("GET", "/_auth", { ...internal, cookie, "x-forwarded-host": "hub.localhost" }))
-        .statusCode,
-    ).toBe(401);
-    expect(
-      (await req("GET", "/_auth", { ...internal, cookie, "x-forwarded-host": "evil.com" }))
-        .statusCode,
-    ).toBe(401);
-    expect(
-      (
-        await req("GET", "/_auth", {
-          ...internal,
-          cookie,
-          "x-forwarded-host": "db.localhost, evil.com",
-        })
-      ).statusCode,
-    ).toBe(401);
+    const { cookie } = await login("db.localhost");
+    for (const h of [internal, { host: "db.localhost" }]) {
+      expect(
+        (await req("GET", "/_auth", { ...h, cookie, "x-forwarded-host": "db.localhost" }))
+          .statusCode,
+      ).toBe(404);
+    }
+    const link = async () =>
+      new URL(
+        (
+          await req(
+            "POST",
+            "/api/v1/login-links",
+            { ...bearer, "content-type": "application/json" },
+            JSON.stringify({ host: "hub.localhost" }),
+          )
+        ).json().url as string,
+      );
+    for (const xfh of ["evil.com", "hub.localhost, evil.com", API]) {
+      const u = await link();
+      const bad = await req("GET", `${u.pathname}${u.search}`, {
+        ...internal,
+        "x-forwarded-host": xfh,
+      });
+      expect(bad.statusCode, xfh).toBe(401);
+    }
     // login through nginx (internal Host + forwarded host)
-    const link = await req(
-      "POST",
-      "/api/v1/login-links",
-      { ...bearer, "content-type": "application/json" },
-      JSON.stringify({ host: "hub.localhost" }),
-    );
-    const url = new URL(link.json().url as string);
+    const url = await link();
     const res = await req("GET", `${url.pathname}${url.search}`, {
       ...internal,
       "x-forwarded-host": "hub.localhost",
@@ -472,15 +525,9 @@ describe("API server", () => {
   });
 
   it("shutdown: bearer only, 202 then callback once", async () => {
-    const cookie = await login();
+    const { as } = await login();
     expect(
-      (
-        await req("POST", "/api/v1/shutdown", {
-          host: "hub.localhost",
-          cookie,
-          origin: "http://hub.localhost",
-        })
-      ).statusCode,
+      (await req("POST", "/api/v1/shutdown", { ...as, origin: "http://hub.localhost" })).statusCode,
     ).toBe(401);
     const res = await req("POST", "/api/v1/shutdown", bearer);
     expect(res.statusCode).toBe(202);
@@ -539,7 +586,7 @@ describe("API server", () => {
   });
 
   it("checkUpgrade: same Host / auth / Origin rules as unsafe requests (H6)", async () => {
-    const cookie = await login("hub.localhost");
+    const { cookie, key, as } = await login("hub.localhost");
     const opts = { ...HOSTS, token: TOKEN, sessions };
     const up = (headers: Record<string, string>) =>
       checkUpgrade({ rawHeaders: Object.entries(headers).flat(), headers }, opts);
@@ -548,16 +595,21 @@ describe("API server", () => {
       host: API,
       auth: "bearer",
     });
-    expect(up({ host: "hub.localhost", cookie, origin: "http://hub.localhost" })).toMatchObject({
-      ok: true,
-      auth: "session",
-    });
-    expect(up({ host: "hub.localhost", cookie })).toMatchObject({ ok: false, status: 403 });
-    expect(up({ host: "hub.localhost", cookie, origin: "http://evil.com" })).toMatchObject({
-      ok: false,
-      status: 403,
-    });
-    expect(up({ host: API, cookie, origin: `http://${API}` })).toMatchObject({
+    const origin = "http://hub.localhost";
+    expect(up({ ...as, origin })).toMatchObject({ ok: true, auth: "session" });
+    // browsers' WebSocket: the key as a subprotocol
+    expect(
+      up({
+        host: "hub.localhost",
+        cookie,
+        origin,
+        "sec-websocket-protocol": `webhub.v1, webhub-key.${key}`,
+      }),
+    ).toMatchObject({ ok: true, auth: "session" });
+    expect(up({ host: "hub.localhost", cookie, origin })).toMatchObject({ ok: false, status: 401 }); // no key (L1)
+    expect(up(as)).toMatchObject({ ok: false, status: 403 });
+    expect(up({ ...as, origin: "http://evil.com" })).toMatchObject({ ok: false, status: 403 });
+    expect(up({ ...as, host: API, origin: `http://${API}` })).toMatchObject({
       ok: false,
       status: 401,
     });
@@ -578,16 +630,17 @@ describe("API server", () => {
     ).toMatchObject({ ok: false, status: 421 });
   });
 
-  it("log lines never contain token, code, cookie or query string", async () => {
-    const cookie = await login();
+  it("log lines never contain token, code, cookie, key or query string", async () => {
+    const { cookie, key, as } = await login();
     await req("GET", `/api/v1/hello?n=${randomBytes(32).toString("base64url")}`);
-    await req("GET", "/api/v1/status", { host: "hub.localhost", cookie });
+    await req("GET", "/api/v1/status", as);
     const text = JSON.stringify(logs);
     expect(logs.length).toBeGreaterThan(3);
     expect(text).not.toContain(TOKEN);
     expect(text).not.toContain("?");
     expect(text).not.toContain(cookie.split("=")[1] ?? "x");
-    expect(text).not.toMatch(/authorization|cookie/i);
+    expect(text).not.toContain(key);
+    expect(text).not.toMatch(/authorization|cookie|x-webhub-session/i);
   });
 });
 
@@ -635,5 +688,38 @@ describe("client handshake", () => {
       throw Object.assign(new Error("x"), { code: "ECONNREFUSED" });
     });
     await expect(refused.verify()).rejects.toSatisfy((e) => isServerError(e, "DAEMON_NOT_RUNNING"));
+  });
+
+  it("after a daemon restart (401, new token) the client reloads auth.json — not an impostor (J7)", async () => {
+    const NEW = randomBytes(32).toString("base64url");
+    let serverToken = TOKEN;
+    const sent: string[] = [];
+    const daemon: SendFn = async (_p, _m, path, headers) => {
+      if (path.startsWith("/api/v1/hello")) {
+        const n = new URL(path, "http://x").searchParams.get("n") ?? "";
+        return { status: 200, body: { proof: helloProof(serverToken, n) } };
+      }
+      sent.push(headers.authorization ?? "");
+      return headers.authorization === `Bearer ${serverToken}`
+        ? { status: 200, body: { ok: true } }
+        : { status: 401, body: { error: { code: "UNAUTHORIZED", message: "not authorized" } } };
+    };
+    let file: typeof auth | undefined = auth;
+    const c = new DaemonClient(auth, daemon, async () => file);
+    expect(await c.request("GET", "/api/v1/status")).toEqual({ ok: true });
+    serverToken = NEW; // restart
+    file = { ...auth, token: NEW };
+    await expect(c.request("GET", "/api/v1/status")).rejects.toSatisfy(
+      (e) => isServerError(e, "API_ERROR") && e.status === 401,
+    );
+    expect(await c.request("GET", "/api/v1/status")).toEqual({ ok: true }); // re-verified with NEW
+    expect(sent.at(-1)).toBe(`Bearer ${NEW}`);
+    // daemon stopped and its file gone → not running (not "impostor")
+    serverToken = "other";
+    file = undefined;
+    await c.request("GET", "/api/v1/status").catch(() => {});
+    await expect(c.request("GET", "/api/v1/status")).rejects.toSatisfy((e) =>
+      isServerError(e, "DAEMON_NOT_RUNNING"),
+    );
   });
 });

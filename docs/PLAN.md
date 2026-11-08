@@ -55,7 +55,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 ### MVP-2 — Routing
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro` | **spike**: Next ≥15 `allowedDevOrigins` |
+| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4) | **spike**: Next ≥15 `allowedDevOrigins` |
 | F-010 | Static serving + publicDir + deny-list | §10.4 | `.git`/`.env`/source ไม่หลุด | deny-list ไม่ครบ |
 | F-011 | Hosts sync (UAC, block webhub) | §10.1 | แก้เฉพาะ block ของตัวเอง, backup hosts | AV/EDR บล็อกการเขียน hosts |
 | F-012 | Lite mode proxy (Node) | §21.2 | logic เดียวกับ nginx, bind 127.0.0.1 | พฤติกรรมต่างจาก nginx |
@@ -84,12 +84,12 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-023 | Provision + env injection + disable DB services | §5.3–5.5 | role ต่อ site (least privilege) | dependents ของ DB |
 | F-024 | Backup / restore | §5.6 | ไฟล์ backup สิทธิ์ user เท่านั้น | restore ไม่ครบ |
 | F-025 | Import จาก volume เดิม + pre-upgrade check | §5.5, §19.2 | DB ชั่วคราวไม่ publish port | ข้อมูลเสีย → ไม่ลบ volume เดิม |
-| F-026 | เครื่องมือเสริม (CloudBeaver, RedisInsight, Hoppscotch) + session ต่อ tool host | §5.7, §10.3, §22.6 | ไม่ส่ง master token เข้า tool | tool image มีช่องโหว่ → pin digest |
+| F-026 | เครื่องมือเสริม (CloudBeaver, RedisInsight, Hoppscotch) + session ต่อ tool host | §5.7, §10.3, §22.6 | ไม่ส่ง master token เข้า tool; ออกแบบ `/_auth` เอง — cookie อย่างเดียวรั่วข้าม port ได้ (F-003 L1/L4) | tool image มีช่องโหว่ → pin digest |
 
 ### MVP-6 — Dashboard + Ops
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check | — |
+| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check; key จาก `#k=` → sessionStorage + `replaceState` ทันที, ส่ง `X-Webhub-Session` ทุก call (F-003 L1) | — |
 | F-028 | Autostart + tray | §20 | Task Scheduler ระดับ user (ไม่ admin) | — |
 | F-029 | Metrics + notify | §20 | — | — |
 
