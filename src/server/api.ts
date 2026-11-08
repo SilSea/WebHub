@@ -81,6 +81,8 @@ export const HEADERS_TIMEOUT_MS = 10_000;
 export const REQUEST_TIMEOUT_MS = 30_000;
 /** How often Node enforces the two timeouts above (default 30 s would stretch them — L2/J1). */
 export const TIMEOUT_CHECK_MS = 1_000;
+/** Longest a socket lives after its parser-error reply was written (review-5 R1 / S1). */
+export const CLIENT_ERROR_CLOSE_MS = 2_000;
 export const MAX_CONNECTIONS = 256;
 
 class HttpError extends Error {
@@ -147,13 +149,40 @@ function clientError(err: Error & { code?: string }, socket: Socket): void {
   ) {
     deferred.add(socket);
     socket.pause();
-    pending.once("finish", () => writeClientError(err, socket));
-    pending.once("close", () => {
-      if (pending.writableFinished !== true) socket.destroy();
-    });
+    waitForResponses(err, s, pending);
     return;
   }
   writeClientError(err, socket);
+}
+
+type PendingResponse = NodeJS.EventEmitter & { writableFinished?: boolean };
+
+/**
+ * Waits for `pending`, then for every further pipelined response Node hands the socket to
+ * (Node's own `finish` handler runs first and assigns the next queued one), so the error
+ * reply comes last and no earlier response is lost (review-5 R2 / security-5 S2). One
+ * `finish` / `close` pair per socket at a time.
+ */
+function waitForResponses(
+  err: Error & { code?: string },
+  socket: Socket & { _httpMessage?: PendingResponse | null },
+  pending: PendingResponse,
+): void {
+  const onFinish = () => {
+    pending.removeListener("close", onClose);
+    const next = socket._httpMessage;
+    if (next && next !== pending && next.writableFinished !== true) {
+      waitForResponses(err, socket, next);
+      return;
+    }
+    writeClientError(err, socket);
+  };
+  const onClose = () => {
+    pending.removeListener("finish", onFinish);
+    if (pending.writableFinished !== true) socket.destroy();
+  };
+  pending.once("finish", onFinish);
+  pending.once("close", onClose);
 }
 
 function writeClientError(err: Error & { code?: string }, socket: Socket): void {
@@ -168,8 +197,15 @@ function writeClientError(err: Error & { code?: string }, socket: Socket): void 
   const headers = Object.entries(SECURITY_HEADERS)
     .map(([k, v]) => `${k}: ${v}\r\n`)
     .join("");
+  // The socket must close for sure: a paused (deferred) socket never reads the peer's FIN, and
+  // the server is allowHalfOpen — `end()` alone would leave it in the connection count forever
+  // (review-5 R1 / security-5 S1). Destroy once flushed; backstop for a peer that never reads.
+  const backstop = setTimeout(() => socket.destroy(), CLIENT_ERROR_CLOSE_MS);
+  backstop.unref();
+  socket.once("close", () => clearTimeout(backstop));
   socket.end(
     `HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-type: application/json; charset=utf-8\r\n${headers}content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    () => socket.destroy(),
   );
 }
 

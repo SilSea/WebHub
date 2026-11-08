@@ -338,6 +338,31 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
     });
   }
 
+  it("a stop that is not clean still ends the process with exit 1 (R4 / Q4)", async () => {
+    const port = await freePort();
+    const child = spawn(
+      process.execPath,
+      ["--import", pathToFileURL(join(ROOT, "test/fixtures/hang-close-daemon.mjs")).href, DAEMON],
+      {
+        env: { ...process.env, WEBHUB_HOME: h.paths.home, WEBHUB_API_PORT: String(port) },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    children.push(child);
+    const out: string[] = [];
+    child.stdout?.on("data", (b: Buffer) => out.push(b.toString()));
+    const exit = new Promise<number | null>((r) => child.once("close", r));
+    await ready({ child, out, err: [], exit });
+    await new Promise((r) => setTimeout(r, 200)); // the fixture patches close() after ready
+    const client = await connectDaemon(h.paths);
+    const t0 = Date.now();
+    await client.request("POST", "/api/v1/shutdown");
+    expect(await exit).toBe(1);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
+  });
+
   it("onAuthFile hands out a remover that only deletes our own file (J6)", async () => {
     const env = { ...process.env, WEBHUB_HOME: h.paths.home };
     let remove: (() => void) | undefined;

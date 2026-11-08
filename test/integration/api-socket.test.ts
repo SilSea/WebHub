@@ -40,9 +40,10 @@ beforeEach(async () => {
     [
       // a slow public route, like later features may have (security-4 Q3)
       (a) =>
-        a.get("/api/v1/x/slow", { config: { access: "public" } }, async () => {
-          await new Promise((r) => setTimeout(r, 400));
-          return { ok: true };
+        a.get("/api/v1/x/slow", { config: { access: "public" } }, async (req) => {
+          const ms = Number((req.query as { ms?: string }).ms ?? 400);
+          await new Promise((r) => setTimeout(r, ms));
+          return { ms };
         }),
     ],
   );
@@ -148,6 +149,37 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     }
   });
 
+  it("pipelined requests + garbage: the server socket is closed, never leaked (R1 / S1)", async () => {
+    const clients = await Promise.all([1, 2, 3, 4, 5].map(() => open()));
+    const get = `GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`;
+    for (const c of clients) c.s.write(`${get}${get}${get}\x00garbage\r\n\r\n`);
+    await Promise.all(clients.map((c) => c.ended)); // the server closes, the client did not
+    for (const c of clients) {
+      const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
+      expect(statuses).toEqual(["200", "200", "200", "400"]);
+    }
+    const count = () =>
+      new Promise<number>((r, j) => app.server.getConnections((e, n) => (e ? j(e) : r(n))));
+    const deadline = Date.now() + 1_000;
+    while ((await count()) > 0 && Date.now() < deadline) await wait(20);
+    expect(await count()).toBe(0);
+    const t0 = performance.now();
+    await app.close();
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it("garbage behind two slow pipelined requests: both answered, then the 400 (R2 / S2)", async () => {
+    const c = await open();
+    c.s.write(
+      `GET /api/v1/x/slow?ms=200 HTTP/1.1\r\nHost: ${HOST}\r\n\r\nGET /api/v1/x/slow?ms=600 HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`,
+    );
+    await c.ended;
+    const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
+    expect(statuses).toEqual(["200", "200", "400"]);
+    expect(c.text()).toContain('{"ms":200}');
+    expect(c.text()).toContain('{"ms":600}');
+  });
+
   it("a bad body of the request itself still gets a uniform 400 (M1)", async () => {
     const c = await open();
     c.s.write(
@@ -244,7 +276,9 @@ describe("client vs a 101 answer (Q2)", () => {
         startedAt: "x",
       });
       const t0 = performance.now();
-      await expect(c.verify()).rejects.toSatisfy((e) => isServerError(e, "DAEMON_UNREACHABLE"));
+      await expect(c.verify()).rejects.toSatisfy(
+        (e) => isServerError(e, "DAEMON_UNREACHABLE") && e.details.join() === "EUPGRADE",
+      );
       expect(performance.now() - t0).toBeLessThan(3_000);
     } finally {
       await new Promise((r) => srv.close(r));
