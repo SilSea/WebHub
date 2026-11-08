@@ -62,7 +62,11 @@ describe("lock across processes", () => {
     const { child, ready } = holder(h.paths.home);
     try {
       await ready;
+      // fail fast on a live lock (no waiting / retrying): one or two process checks, not the
+      // ~20 retries a "wait for the lock" regression would take (CR-002 C2)
+      const t0 = Date.now();
       await expect(acquireLock(h.paths)).rejects.toSatisfy((e) => isWebhubError(e, "LOCKED"));
+      expect(Date.now() - t0).toBeLessThan(5_000);
     } finally {
       const exited = new Promise((r) => child.once("exit", r));
       child.kill();
@@ -87,10 +91,11 @@ function racer(home: string): Promise<string> {
       const lock = await acquireLock(pathsFor(${JSON.stringify(home)}));
       const acquired = Date.now();
       await new Promise((r) => setTimeout(r, 2000));
+      await lock.verify(); // the file is still ours: nobody stole the live lock (CR-002 C1)
       const released = Date.now();
       await lock.release();
       console.log("WON " + acquired + " " + released);
-    } catch (e) { console.log(e.code === "LOCKED" ? "LOST" : "ERR " + e.message); }
+    } catch (e) { console.log(e.code === "LOCKED" ? "LOST" : "ERR " + (e.code ?? e.message)); }
   `;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: "pipe" });

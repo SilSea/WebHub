@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (approved + `planned` 2026-11-08 ก่อนเริ่มแก้; merge พร้อม F-003) |
 | Feature ที่แก้ | F-001 (locked) |
 | ประเภท | bugfix — test เท่านั้น (ไม่เปลี่ยน spec, ไม่แตะ `src/`) |
 | **อนุญาตโดย (R1)** | ผู้ใช้ / 2026-11-08 ("อนุญาต ทำเลย") |
@@ -11,7 +11,7 @@
 ## 1. ของเดิม → ของใหม่
 | ของเดิม | ของใหม่ | ทำไม |
 |---|---|---|
-| racer ถือ lock 2 วิ แล้วปล่อย; test ยืนยัน `WON` = 1 และ `LOST` = 3 | racer พิมพ์เวลาได้ lock + เวลาปล่อย; test ยืนยัน (ก) มีผู้ชนะ ≥ 1, (ข) ช่วงถือ lock ของผู้ชนะ**ไม่ซ้อนกัน**, (ค) ที่เหลือ `LOST` (ไม่มี `ERR`) | สิ่งที่ lock ต้องรับประกันคือ mutual exclusion ไม่ใช่ "ชนะได้ตัวเดียวตลอดกาล" — racer ที่ช้าเกิน 2 วิ (PowerShell CIM ใน `isStale` ช้าตอนเครื่องโหลด) ได้ lock ที่ว่างแล้วหลังตัวแรกปล่อย = ถูกต้อง แต่ test เดิมนับเป็น fail |
+| racer ถือ lock 2 วิ แล้วปล่อย; test ยืนยัน `WON` = 1 และ `LOST` = 3 | racer พิมพ์เวลาได้ lock + เวลาปล่อย และเรียก `lock.verify()` ก่อนปล่อย (ไฟล์ยังเป็นของตัวเอง — C1); test ยืนยัน (ก) มีผู้ชนะ ≥ 1, (ข) ช่วงถือ lock ของผู้ชนะ**ไม่ซ้อนกัน**, (ค) ที่เหลือ `LOST` (ไม่มี `ERR`); test "lock across processes" ยืนยันเพิ่มว่า lock ที่มีเจ้าของได้ `LOCKED` ภายใน 5 วิ (fail fast — C2) | สิ่งที่ lock ต้องรับประกันคือ mutual exclusion ไม่ใช่ "ชนะได้ตัวเดียวตลอดกาล" — racer ที่ช้าเกิน 2 วิ (PowerShell CIM ใน `isStale` ช้าตอนเครื่องโหลด) ได้ lock ที่ว่างแล้วหลังตัวแรกปล่อย = ถูกต้อง แต่ test เดิมนับเป็น fail |
 
 **สาเหตุ (ยืนยันแล้ว).** Spike นอก repo `scratchpad/f001-race/` รัน racer 4 ตัว × 20 รอบ กับ `dist/store/lock.js` ระหว่างที่ `pnpm test:full` รันอยู่ — 4 รอบมีผู้ชนะ 2 ตัว และ**ทุกครั้งเป็นแบบต่อกัน** (ตัวที่ 2 ได้ lock หลังตัวแรกปล่อยแล้ว) ไม่มีซ้อน → โค้ด lock ถูก, test ตั้งสมมติฐานผิด. รันแบบ CPU เต็มอย่างเดียว (ไม่มี I/O ของ suite) 8 รอบ ไม่เกิด.
 
@@ -25,22 +25,22 @@
 ## 3. ผลดี / ผลเสีย (R3)
 | | รายละเอียด |
 |---|---|
-| ผลดี | test ตรวจสิ่งที่ lock สัญญาจริง (ไม่ถือซ้อน) และจับ bug จริงได้ดีกว่าเดิม (เดิมผู้ชนะซ้อนกัน 2 ตัวแบบ "ตัวหนึ่ง ERR" อาจหลุด); ไม่ flaky ตามโหลด |
-| ผลเสีย | แก้ test ของ feature ที่ done; เทียบเวลาข้าม process ใช้นาฬิกาเครื่องเดียวกัน (`Date.now()`) — ถ้านาฬิกาถูกปรับระหว่าง test อาจผิด (เกิดยาก, ทำให้ fail ไม่ใช่ผ่านผิด ถ้าถอยหลัง) |
+| ผลดี | ไม่ fail ผิดตอนเครื่องโหลด (แม่นขึ้น ไม่ได้จับได้มากขึ้น); การถือซ้อนยังจับได้ (mutation 2 แบบ); `verify()` จับการแย่ง lock ที่มีเจ้าของได้ทุกจังหวะโดยไม่พึ่งนาฬิกา |
+| ผลเสีย | แก้ test ของ feature ที่ done; ยอมผู้ชนะต่อกัน → เงื่อนไข "ชนะตัวเดียว" หายไป จึงเพิ่มขอบเวลา fail fast 5 วิ ใน test อื่นแทน (review-1 C2/C3); เทียบเวลาข้าม process ใช้นาฬิกาเครื่องเดียวกัน (`Date.now()`) — ถ้านาฬิกาถูกปรับระหว่าง test อาจผิด (เกิดยาก, ทำให้ fail ไม่ใช่ผ่านผิด ถ้าถอยหลัง) |
 | ทางเลือกที่ไม่เลือก | (1) ถือ lock นานขึ้น (เช่น 15 วิ) — ลดโอกาสแต่ยัง flaky และ test ช้า; (2) ให้ผู้ชนะถือจนทุก racer จบ (ไฟล์สัญญาณ) — ตรง "ชนะตัวเดียว" แต่ซับซ้อนกว่าและพิสูจน์น้อยกว่า; (3) แก้ `lock.ts` — ไม่มี bug ให้แก้ |
 
 ## 4. Migration + Rollback
 - ไม่มี migration; rollback = revert commit ของ CR นี้
 
 ## 5. ขอบเขตการแก้ (ห้ามแตะนอกนี้)
-- `test/integration/store.test.ts`: ฟังก์ชัน `racer()` และ test "stale lock race across processes" เท่านั้น
+- `test/integration/store.test.ts`: ฟังก์ชัน `racer()`, test "stale lock race across processes" และ (ขยายตามผู้ใช้ 2026-11-08, review-1 C2) ขอบเวลาใน test "lock across processes" เท่านั้น
 - เอกสาร: CR นี้, spec F-001 (แถว test ที่เกี่ยว + log), PLAN §0, reports `CR-002/`
 
 ## 6. Test plan
 | # | กรณี | ยืนยันพฤติกรรมเก่าที่ไม่เปลี่ยน? | ผล |
 |---|---|---|---|
-| 1 | test ใหม่ผ่านรันเดี่ยว 10 ครั้ง และใน `pnpm test:full` 3 ครั้ง | ใช่ (lock ไม่แตะ) | ดู test-1 |
-| 2 | mutation: ทำให้ `takeOver` ลบ lock ที่ไม่ stale (ข้ามการตรวจ `judged`) ใน build ชั่วคราว → test ใหม่ fail (จับ overlap ได้) | — | ดู test-1 |
+| 1 | test ใหม่ผ่านรันเดี่ยว 3 ครั้ง และใน `pnpm test:full` 3 ครั้ง (+ หลังแก้ C1/C2: ดู test-2) | ใช่ (lock ไม่แตะ) | test-1, test-2 |
+| 2 | mutation ใน build ชั่วคราว: `isStale()` = true เสมอ (test-1) และ `takeOver` ข้ามการตรวจ `judged` (review-1, 6/6) → test ใหม่ fail; retry บน lock ที่มีเจ้าของ → test fail fast fail (test-2) | — | test-1, review-1, test-2 |
 | 3 | test อื่นของ F-001 ไม่เปลี่ยน, ผ่าน | ใช่ | ดู test-1 |
 
 ## 7. Security impact (R6)
@@ -49,7 +49,8 @@
 ## 8. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/CR-002/test-1.md) | [review-1](../reports/CR-002/review-1.md) | [security-1](../reports/CR-002/security-1.md) | |
+| 1 | [test-1](../reports/CR-002/test-1.md) | [review-1](../reports/CR-002/review-1.md) | [security-1](../reports/CR-002/security-1.md) | PASS ทั้งคู่ (0 critical/major; minor C1–C5, D1) → ผู้ใช้: แก้ทั้งหมด + ขยาย scope |
+| 2 | [test-2](../reports/CR-002/test-2.md) | — | — | แก้ minor → `done` |
 
 ## 9. เอกสารที่อัปเดต (R4)
-- [ ] spec F-001  - [ ] PLAN.md  - [ ] features/README.md  - [ ] reports/README.md
+- [x] spec F-001  - [x] PLAN.md  - [x] features/README.md  - [x] reports/README.md

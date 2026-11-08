@@ -204,4 +204,4 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 2026-11-07 | W3 E4/E5 | review-2: major N1, N2 + minor N3 → แก้พร้อม minor/nit ทั้งหมด (test-3: 116 pass / 5 skip) |
 | 2026-11-07 | W3 E5 | review-3 ครบเพดาน 3 รอบ (major F1) → ผู้ใช้สั่ง "แก้ทั้งหมด + review อีกรอบ"; แก้ F1–F6 (test-4: 119 pass / 5 skip) |
 | 2026-11-07 | W3 E5 | review-4: major 0; G1–G3 แก้ (test-5: 121 pass / 5 skip) → done, merge → develop |
-| 2026-11-08 | CR-002 | test lock race: ตรวจ mutual exclusion (ไม่ถือซ้อน) แทน "ชนะตัวเดียว" — racer ที่ช้าได้ lock ต่อหลังผู้ชนะปล่อย = ถูกต้อง (พบระหว่าง W3 ของ F-003); `src/` ไม่เปลี่ยน |
+| 2026-11-08 | CR-002 | test lock race: ตรวจ mutual exclusion (ไม่ถือซ้อน) แทน "ชนะตัวเดียว" — racer ที่ช้าได้ lock ต่อหลังผู้ชนะปล่อย = ถูกต้อง (พบระหว่าง W3 ของ F-003); `racer` เรียก `verify()` ก่อนปล่อย; lock ที่มีเจ้าของต้องได้ `LOCKED` ภายใน 5 วิ; approved + planned 2026-11-08 ก่อนแก้; `src/` ไม่เปลี่ยน |

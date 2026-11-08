@@ -12,7 +12,7 @@
 | 2 | F-001 Config + `$WEBHUB_HOME` + migration | `done` | [spec](features/F-001-config.md) |
 | 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
 | 4 | F-003 Daemon + API server + auth | `planned` | [spec](features/F-003-daemon-api-auth.md) |
-| 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `review` | [CR](changes/CR-002-lock-race-test.md) |
+| 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
