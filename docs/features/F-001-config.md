@@ -171,7 +171,7 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 6 | atomic write: tmp ค้าง/ไฟล์หลักไม่เสีย, `.bak` ถูกสร้าง | unit |
 | 7 | migration v0 → v1: backup ก่อน, ผลถูก, เขียนกลับ; migration พัง → ไฟล์เดิมไม่เปลี่ยน | unit |
 | 8 | schemaVersion ใหม่กว่า → `CONFIG_FROM_NEWER_VERSION` + ไฟล์ไม่เปลี่ยน | unit |
-| 9 | lock: process ที่ 2 ได้ `LOCKED`; lock ค้างจาก PID ตาย → ยึดคืน | integration |
+| 9 | lock: process ที่ 2 ได้ `LOCKED`; lock ค้างจาก PID ตาย → ยึดคืน; 4 process แย่งยึด lock ค้าง → ไม่มีช่วงถือ lock ซ้อนกัน (ผู้ชนะต่อกันได้ — [CR-002](../changes/CR-002-lock-race-test.md)) | integration |
 | 10 | symlink ใน `data/` → ปฏิเสธทั้งอ่าน/เขียน | security |
 | 11 | ไฟล์ > 5 MB → `FILE_TOO_LARGE` | security |
 | 12 | secrets: set/get/delete; ค่าไม่อยู่ใน error/`inspect`/JSON ของ error; at-rest ตาม Q2 (ไฟล์ไม่มี plaintext ถ้า DPAPI) | security |
@@ -204,3 +204,4 @@ Checklist ที่เกี่ยว: Secrets, Input, Privilege (ไม่ต�
 | 2026-11-07 | W3 E4/E5 | review-2: major N1, N2 + minor N3 → แก้พร้อม minor/nit ทั้งหมด (test-3: 116 pass / 5 skip) |
 | 2026-11-07 | W3 E5 | review-3 ครบเพดาน 3 รอบ (major F1) → ผู้ใช้สั่ง "แก้ทั้งหมด + review อีกรอบ"; แก้ F1–F6 (test-4: 119 pass / 5 skip) |
 | 2026-11-07 | W3 E5 | review-4: major 0; G1–G3 แก้ (test-5: 121 pass / 5 skip) → done, merge → develop |
+| 2026-11-08 | CR-002 | test lock race: ตรวจ mutual exclusion (ไม่ถือซ้อน) แทน "ชนะตัวเดียว" — racer ที่ช้าได้ lock ต่อหลังผู้ชนะปล่อย = ถูกต้อง (พบระหว่าง W3 ของ F-003); `src/` ไม่เปลี่ยน |

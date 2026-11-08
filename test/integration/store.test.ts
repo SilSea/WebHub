@@ -73,16 +73,23 @@ describe("lock across processes", () => {
   });
 });
 
-/** Separate process: tries the lock once, prints WON or LOST, holds a WON lock for 2 s. */
+/**
+ * Separate process: tries the lock once and prints `WON <acquired> <released>` (ms, same
+ * machine clock) after holding it for 2 s, or `LOST`. A slow racer may legitimately win the
+ * lock AFTER the first winner released it (CR-002), so the test checks mutual exclusion
+ * (no overlapping hold) instead of "exactly one winner".
+ */
 function racer(home: string): Promise<string> {
   const code = `
     const { acquireLock } = await import(${JSON.stringify(LOCK_MODULE)});
     const { pathsFor } = await import(${JSON.stringify(HOME_MODULE)});
     try {
       const lock = await acquireLock(pathsFor(${JSON.stringify(home)}));
-      console.log("WON");
+      const acquired = Date.now();
       await new Promise((r) => setTimeout(r, 2000));
+      const released = Date.now();
       await lock.release();
+      console.log("WON " + acquired + " " + released);
     } catch (e) { console.log(e.code === "LOCKED" ? "LOST" : "ERR " + e.message); }
   `;
   return new Promise((resolve) => {
@@ -96,15 +103,23 @@ function racer(home: string): Promise<string> {
 }
 
 describe("stale lock race across processes", () => {
-  it("4 processes taking over the same stale lock → exactly one wins", async () => {
+  it("4 processes taking over the same stale lock → never two holders at once (CR-002)", async () => {
     for (let round = 0; round < 3; round++) {
       await writeFile(
         h.paths.lock,
         JSON.stringify({ pid: 2 ** 22 + 7, startedAt: "x", hostname: hostname(), token: "dead" }),
       );
       const results = await Promise.all(Array.from({ length: 4 }, () => racer(h.paths.home)));
-      expect(results.filter((r) => r === "WON")).toHaveLength(1);
-      expect(results.filter((r) => r === "LOST")).toHaveLength(3);
+      const holds = results
+        .filter((r) => r.startsWith("WON "))
+        .map((r) => r.split(" ").slice(1).map(Number) as [number, number])
+        .sort((a, b) => a[0] - b[0]);
+      expect(holds.length).toBeGreaterThanOrEqual(1);
+      expect(results.filter((r) => r === "LOST")).toHaveLength(4 - holds.length); // no ERR
+      // mutual exclusion: each winner got the lock only after the previous one gave it up
+      for (let i = 1; i < holds.length; i++) {
+        expect(holds[i]?.[0]).toBeGreaterThanOrEqual(holds[i - 1]?.[1] ?? Number.POSITIVE_INFINITY);
+      }
     }
   });
 });
