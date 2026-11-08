@@ -89,7 +89,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 ### MVP-6 — Dashboard + Ops
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check; key จาก `#k=` → sessionStorage + `replaceState` ทันที, ส่ง `X-Webhub-Session` ทุก call (F-003 L1) | — |
+| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check; key จาก `#k=` → sessionStorage + `replaceState` ทันที, ส่ง `X-Webhub-Session` ทุก call (F-003 L1); WS: ใช้ `delay` ของ `checkUpgrade`, ปฏิเสธ absolute-form target, echo เฉพาะ `protocol` ที่คืนมา (F-003 Q6) | — |
 | F-028 | Autostart + tray | §20 | Task Scheduler ระดับ user (ไม่ admin) | — |
 | F-029 | Metrics + notify | §20 | — | — |
 
