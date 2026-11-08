@@ -22,3 +22,4 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 | วันที่ | ผล |
 |---|---|
 | 2026-11-07 | `develop` หลัง merge CR-001 + F-002 (`ad7988d`): lint, typecheck, build, test:full 173 pass / 5 skip, audit — ผ่าน (Windows, Node 24.20; CI ถูกบล็อกจาก billing) |
+| 2026-11-08 | `develop` หลัง merge CR-002 + F-003 (`98dd58d`): lint, typecheck, build, test:full 248 pass / 5 skip, audit — ผ่าน (Windows, Node 24.20; ชุด F-003 ผ่าน Node 22.12 ด้วย; CI ถูกบล็อกจาก billing) |
