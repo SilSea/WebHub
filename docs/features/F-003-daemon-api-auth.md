@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` |
+| Status | `review` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §2 (API + Dashboard), §10.3 (auth), §12 (`src/daemon.ts`, `src/server/`), §13 (CLI = client), §21.6 |
 | Depends on | F-000, F-001 (home, lock, json-store, config), F-002 (ports — ตรวจว่าใครถือ port) |
@@ -43,6 +43,7 @@ crash: lock ของ F-001 ตรวจ PID + start time → daemon ใหม�
 ```
 - entry: `node dist/daemon.js` (foreground, log ไป stdout/stderr) — CLI F-004 จะ spawn แบบ detached + เขียน log ลง `logs/`
 - exit code: 0 ปกติ, 2 config ผิด, 3 มี daemon อยู่แล้ว, 4 port ไม่ว่าง, 1 อื่นๆ
+- env `WEBHUB_API_PORT` = สำหรับ test/dev เท่านั้น (integration test รันหลาย daemon พร้อมกัน); client อ่าน port จาก `auth.json` จึงตามได้เสมอ
 
 ### 3.2 Host allowlist (กัน DNS rebinding)
 | Host ที่รับ | ใช้ทำอะไร |
@@ -172,6 +173,7 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-003/test-1.md) | | | รอ review |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [ ] DESIGN.md §10.3, §12  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
