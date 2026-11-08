@@ -5,7 +5,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { connect, type Socket } from "node:net";
+import { connect, createServer as createNetServer, type Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApi } from "../../src/server/api.js";
@@ -25,17 +25,27 @@ beforeEach(async () => {
   shutdowns = 0;
   logs = [];
   const hosts = { apiPort: 0, httpPort: 80, domainSuffix: "localhost" };
-  app = await createApi({
-    token: TOKEN,
-    hosts,
-    sessions: new SessionStore(),
-    status: () => ({}),
-    onShutdown: () => {
-      shutdowns++;
+  app = await createApi(
+    {
+      token: TOKEN,
+      hosts,
+      sessions: new SessionStore(),
+      status: () => ({}),
+      onShutdown: () => {
+        shutdowns++;
+      },
+      log: (e) => logs.push(e),
+      failDelayMs: 0,
     },
-    log: (e) => logs.push(e),
-    failDelayMs: 0,
-  });
+    [
+      // a slow public route, like later features may have (security-4 Q3)
+      (a) =>
+        a.get("/api/v1/x/slow", { config: { access: "public" } }, async () => {
+          await new Promise((r) => setTimeout(r, 400));
+          return { ok: true };
+        }),
+    ],
+  );
   await app.listen({ host: "127.0.0.1", port: 0 });
   const a = app.server.address();
   port = typeof a === "object" && a !== null ? a.port : 0;
@@ -111,8 +121,31 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     c.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`);
     await c.ended;
     const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
-    expect(statuses[0]).toBe("200"); // the valid request is answered first, always
-    expect(statuses.slice(1).every((s) => s === "400")).toBe(true);
+    expect(statuses).toEqual(["200", "400"]); // the valid request first, then exactly one 400
+  });
+
+  it("garbage in many chunks behind a slow response: one 400, no listener pile-up (Q3)", async () => {
+    const warnings: string[] = [];
+    const onWarning = (w: Error) => warnings.push(w.name);
+    process.on("warning", onWarning);
+    try {
+      const c = await open();
+      c.s.write(`GET /api/v1/x/slow HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`);
+      await wait(20);
+      for (let i = 0; i < 60; i++) {
+        c.s.write("\x00");
+        await wait(2);
+      }
+      const t0 = performance.now();
+      await c.ended;
+      const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
+      expect(statuses).toEqual(["200", "400"]);
+      expect(performance.now() - t0).toBeLessThan(2_000);
+      await wait(50);
+      expect(warnings).not.toContain("MaxListenersExceededWarning");
+    } finally {
+      process.off("warning", onWarning);
+    }
   });
 
   it("a bad body of the request itself still gets a uniform 400 (M1)", async () => {
@@ -188,6 +221,34 @@ describe("client: the token only travels on a proven connection (N2)", () => {
     expect(sockets.size).toBe(1);
     await client.request("GET", "/api/v1/status");
     expect(sockets.size).toBe(2); // next request: new connection, new proof
+  });
+});
+
+describe("client vs a 101 answer (Q2)", () => {
+  it("an impostor answering 101 makes the call fail, never hang", async () => {
+    const srv = createNetServer((s) => {
+      s.once("data", () =>
+        s.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n"),
+      );
+      s.on("error", () => {});
+    });
+    await new Promise<void>((r) => srv.listen({ host: "127.0.0.1", port: 0 }, () => r()));
+    try {
+      const a = srv.address();
+      const p = typeof a === "object" && a !== null ? a.port : 0;
+      const c = new DaemonClient({
+        schemaVersion: 1,
+        token: TOKEN,
+        pid: 1,
+        port: p,
+        startedAt: "x",
+      });
+      const t0 = performance.now();
+      await expect(c.verify()).rejects.toSatisfy((e) => isServerError(e, "DAEMON_UNREACHABLE"));
+      expect(performance.now() - t0).toBeLessThan(3_000);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
   });
 });
 

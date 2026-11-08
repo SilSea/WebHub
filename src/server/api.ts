@@ -118,14 +118,20 @@ function forwardedHost(
   return h !== undefined && sessionHosts(hosts).includes(h) ? h : undefined;
 }
 
+/** Sockets whose error reply already waits for an earlier response (one wait per socket). */
+const deferred = new WeakSet<Socket>();
+
 /** Raw reply for errors Node's HTTP parser raises before Fastify sees a request (H3/K8). */
 function clientError(err: Error & { code?: string }, socket: Socket): void {
   if (!socket.writable) return;
+  // Node raises one error per further chunk: after the first, nothing more is done for this
+  // socket — no listener pile-up / O(n²) event-loop freeze (security-4 Q3)
+  if (deferred.has(socket)) return;
   // The response of an EARLIER pipelined request is still pending: writing ours now would put
-  // it out of order on the wire (security-2 L5) → write it after that response finished. An
-  // error in the request being parsed itself (bad body, timeout) gets its 400 / 408 right away
-  // (review-3 M1). The error belongs to a later message when the pending response's request
-  // was already fully parsed.
+  // it out of order on the wire (security-2 L5) → stop reading and write it once, after that
+  // response finished. An error in the request being parsed itself (bad body, timeout) gets
+  // its 400 / 408 right away (review-3 M1). The error belongs to a later message when the
+  // pending response's request was already fully parsed.
   const s = socket as Socket & {
     _httpMessage?:
       | (NodeJS.EventEmitter & { _headerSent?: boolean; writableFinished?: boolean; req?: unknown })
@@ -139,12 +145,19 @@ function clientError(err: Error & { code?: string }, socket: Socket): void {
     pending.writableFinished !== true &&
     (pending._headerSent === true || pending.req !== incoming || incoming?.complete === true)
   ) {
-    pending.once("finish", () => clientError(err, socket));
+    deferred.add(socket);
+    socket.pause();
+    pending.once("finish", () => writeClientError(err, socket));
     pending.once("close", () => {
       if (pending.writableFinished !== true) socket.destroy();
     });
     return;
   }
+  writeClientError(err, socket);
+}
+
+function writeClientError(err: Error & { code?: string }, socket: Socket): void {
+  if (!socket.writable) return;
   const [status, text] =
     err.code === "ERR_HTTP_REQUEST_TIMEOUT"
       ? [408, "Request Timeout"]

@@ -289,6 +289,24 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
     expect(existsSync(h.paths.lock)).toBe(false);
   });
 
+  it("a hanging preClose hook: port released anyway, not clean (P1 / Q4)", async () => {
+    const env = { ...process.env, WEBHUB_HOME: h.paths.home };
+    const port = await freePort();
+    const d = await startDaemon({
+      env,
+      port,
+      log: () => {},
+      registrars: [(app) => app.addHook("preClose", () => new Promise<void>(() => {}))],
+    });
+    await d.stop();
+    expect(await d.stopped).toEqual({ clean: false });
+    expect(d.app.server.listening).toBe(false);
+    // the port is free again: another daemon can start right away
+    const again = await startDaemon({ env, port, log: () => {} });
+    await again.stop();
+    expect(existsSync(h.paths.lock)).toBe(false);
+  });
+
   for (const mode of ["twice", "null"] as const) {
     it(`crash after ready (${mode}) → exit 1, class name only, nothing left (M4 / J6)`, async () => {
       const port = await freePort();

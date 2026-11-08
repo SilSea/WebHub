@@ -99,6 +99,40 @@ async function portOwner(port: number): Promise<string[]> {
   }
 }
 
+/**
+ * `app.close()` bounded to STOP_GRACE_MS + 1 s: open connections are cut after the grace, and
+ * when close still has not finished (a `preClose` / `onClose` hook of a later feature hangs or
+ * throws) the listening socket is closed by force so the port is released anyway (review-3
+ * M3, review-4 P1). Never rejects; `false` = not clean.
+ */
+async function closeBounded(
+  app: FastifyInstance,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<boolean> {
+  const cut = setTimeout(() => app.server.closeAllConnections(), STOP_GRACE_MS);
+  let bound: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      app.close(),
+      new Promise<never>((_, reject) => {
+        bound = setTimeout(
+          () => reject(Object.assign(new Error("close timed out"), { name: "StopTimeout" })),
+          STOP_GRACE_MS + 1_000,
+        );
+      }),
+    ]);
+    return true;
+  } catch (err) {
+    log({ level: "error", msg: "stop failed", error: errorClass(err) });
+    app.server.close();
+    app.server.closeAllConnections();
+    return false;
+  } finally {
+    clearTimeout(bound);
+    clearTimeout(cut);
+  }
+}
+
 /** Removes auth.json only if it still holds our token (never another daemon's file). */
 async function removeAuthFile(file: string, token: string): Promise<void> {
   try {
@@ -206,33 +240,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
     const running = app;
     stopFn = () => {
       stopping ??= (async () => {
-        const timer = setTimeout(() => running.server.closeAllConnections(), STOP_GRACE_MS);
-        let clean = true;
-        let bound: NodeJS.Timeout | undefined;
-        try {
-          // bounded: a hook of a later feature that never resolves must not hang the daemon
-          // with auth.json + lock left behind (review-3 M3)
-          await Promise.race([
-            running.close(),
-            new Promise<never>((_, reject) => {
-              bound = setTimeout(
-                () => reject(Object.assign(new Error("close timed out"), { name: "StopTimeout" })),
-                STOP_GRACE_MS + 1_000,
-              );
-            }),
-          ]);
-        } catch (err) {
-          // e.g. an onClose hook of a later feature throws: still clean up, never reject (J2)
-          clean = false;
-          log({ level: "error", msg: "stop failed", error: errorClass(err) });
-        } finally {
-          clearTimeout(bound);
-          clearTimeout(timer);
-          await removeAuthFile(paths.auth, token).catch(() => {});
-          await lock.release().catch(() => {});
-          log({ msg: "stopped" });
-          resolveStopped({ clean });
-        }
+        // port is released even when not clean (closeBounded forces it), so releasing the lock
+        // cannot let a second daemon run next to a still-serving one; main() exits anyway (Q4)
+        const clean = await closeBounded(running, log);
+        await removeAuthFile(paths.auth, token).catch(() => {});
+        await lock.release().catch(() => {});
+        log({ msg: "stopped" });
+        resolveStopped({ clean });
       })();
       return stopping;
     };
@@ -248,8 +262,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       removeAuthFileSync: () => removeAuthFileSync(paths.auth, token),
     };
   } catch (err) {
-    // cleanup must never hide the original error (exit code — H14)
-    await app?.close().catch(() => {});
+    // cleanup must never hide the original error (exit code — H14); bounded too (P1)
+    if (app !== undefined) await closeBounded(app, log);
     await removeAuthFile(paths.auth, token).catch(() => {});
     await lock.release().catch(() => {});
     throw err;
@@ -334,6 +348,11 @@ export async function main(): Promise<number> {
     return exitCodeFor(err);
   }
   const { clean } = await daemon.stopped;
+  if (!clean) {
+    // a hung hook may still hold handles: never stay alive after "stopped" (security-4 Q4);
+    // unref'd → leaves earlier if nothing else is pending, after stdout/stderr had a moment
+    setTimeout(() => process.exit(1), 1_000).unref();
+  }
   return clean ? 0 : 1;
 }
 

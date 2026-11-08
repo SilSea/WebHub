@@ -71,7 +71,18 @@ export class OneConnectionAgent extends Agent {
 
 const send: SendFn = (port, method, path, headers, body, opts = {}) => {
   const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
-  return new Promise((resolve, reject) => {
+  return new Promise((done, fail) => {
+    // settles exactly once; a close without any result is an error, never a silent hang (Q2)
+    let settled = false;
+    const resolve = (r: RawResponse) => {
+      settled = true;
+      done(r);
+    };
+    const reject = (e: unknown) => {
+      if (settled) return;
+      settled = true;
+      fail(e);
+    };
     const req = httpRequest(
       {
         host: "127.0.0.1",
@@ -120,10 +131,20 @@ const send: SendFn = (port, method, path, headers, body, opts = {}) => {
       () => req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
       timeoutMs,
     );
-    req.on("close", () => clearTimeout(deadline));
+    req.on("close", () => {
+      clearTimeout(deadline);
+      reject(
+        Object.assign(new Error("connection closed without a response"), { code: "ECONNRESET" }),
+      );
+    });
     req.on("timeout", () =>
       req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
     );
+    // the daemon never switches protocols: a 101 (e.g. from an impostor) is an error (Q2)
+    req.on("upgrade", (_res, socket) => {
+      socket.destroy();
+      reject(Object.assign(new Error("unexpected protocol switch"), { code: "EUPGRADE" }));
+    });
     req.on("error", reject);
     req.end(body);
   });
