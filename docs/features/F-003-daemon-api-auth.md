@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §2 (API + Dashboard), §10.3 (auth), §12 (`src/daemon.ts`, `src/server/`), §13 (CLI = client), §21.6 |
 | Depends on | F-000, F-001 (home, lock, json-store, config), F-002 (ports — ตรวจว่าใครถือ port) |
@@ -244,10 +244,10 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 6 | [test-6](../reports/F-003/test-6.md) | [review-6](../reports/F-003/review-6.md) | [security-6](../reports/F-003/security-6.md) | review: **T1 major** (chain ของ R2 พังบน Node 22), T2 minor, T3 nit; security: **U1 critical** (pipelining flood → OOM, มีตั้งแต่รอบแรก), **U2 major latent**, U3 minor, U4 info → ถามผู้ใช้ → ไม่รับ pipelining + idle 15 วิ, จำกัดเวลารอ 5 วิ + ข้อกำหนด, แก้ทั้งหมด |
 | 7 | [test-7](../reports/F-003/test-7.md) | [review-7](../reports/F-003/review-7.md) | [security-7](../reports/F-003/security-7.md) | review: 0 critical/major (V1–V2 minor, V3 nit, V4–V5 info); security: **W1 major** (`Expect:` หลบการปฏิเสธ pipelining), **W2 major** (parse ต่อหลัง destroy × 256 socket), W3 minor, W4–W5 info → ถามผู้ใช้ → แก้ + ปิดรอบ DoS (`maxConnections` 64, CPU DoS = residual), แก้ทั้งหมด, V5 (F-001 lock race) สืบแล้วเปิด CR หลัง F-003 |
 | 8 | [test-8](../reports/F-003/test-8.md) | [review-8](../reports/F-003/review-8.md) | [security-8](../reports/F-003/security-8.md) | review: 0 critical/major (X1–X2 minor, X3–X4 nit, X5–X6 info); security: **PASS** (Y1 minor, Y2–Y5 info) → ผู้ใช้: แก้ทั้งหมดแล้ว merge (ไม่มีรอบ 9) |
-| 9 | [test-9](../reports/F-003/test-9.md) | — | — | แก้ minor/nit/info รอบ 8 → `done` |
+| 9 | [test-9](../reports/F-003/test-9.md) | — | — | แก้ minor/nit/info รอบ 8; full suite fail เพราะ test F-001 → แก้ด้วย CR-002 แล้ว full suite ผ่าน → `done` |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [ ] DESIGN.md §10.3, §12  - [ ] PLAN.md queue  - [ ] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §10.3, §12  - [x] PLAN.md queue  - [x] features/README.md  - [x] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
@@ -270,3 +270,4 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 2026-11-08 | W3 รอบ 8 | ผู้ใช้: แก้ + ปิดรอบ DoS, แก้ทั้งหมด, V5 สืบแล้วเปิด CR → `checkContinue` / `checkExpectation` ผ่าน busy check, `MAX_CONNECTIONS` 64, 404 ใน `onRequest`, residual CPU DoS + นโยบายใน §6, test V1/V2/W1–W3 → test-8 |
 | 2026-11-08 | W3 รอบ 8 review | review-8 (X1–X2 minor, X3–X4 nit), security-8 PASS (Y1 minor, Y2–Y5 info) → ถามผู้ใช้ |
 | 2026-11-08 | W3 รอบ 9 | ผู้ใช้: แก้ทั้งหมดแล้ว merge → `logPath` (≤ 200 + foreign host), header comment, test X1/Y1/Y4, X4, PLAN F-004/F-009/F-027 (Y2, X2, Y5, X5), residual Y3 → test-9 → `done` |
+| 2026-11-08 | W3 ปิด | full suite fail จาก test lock race ของ F-001 → ผู้ใช้: สืบก่อน → CR-002 (test เท่านั้น) merge เข้า develop → merge develop เข้า branch นี้, check ทั้งหมดผ่าน → `done`, merge เข้า develop |
