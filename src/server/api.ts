@@ -8,6 +8,7 @@
  * never on `127.0.0.1:<port>` (security-1 K1), and need the cookie plus the port-scoped key
  * header `x-webhub-session` (security-2 L1).
  */
+import type { Server as HttpServer, IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 import { type FastifyInstance, type FastifyReply, fastify } from "fastify";
@@ -83,6 +84,14 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 export const TIMEOUT_CHECK_MS = 1_000;
 /** Longest a socket lives after its parser-error reply was written (review-5 R1 / S1). */
 export const CLIENT_ERROR_CLOSE_MS = 2_000;
+/** Longest a parser-error reply waits for the pending response (security-6 U2). */
+export const CLIENT_ERROR_DEFER_MS = 5_000;
+/**
+ * A socket with no traffic either way for this long is cut — e.g. a client that sent its request
+ * and never reads the answer (security-6 U1/U3). Routes that may stay silent longer (streams)
+ * must send keep-alive bytes.
+ */
+export const CONNECTION_IDLE_MS = 15_000;
 export const MAX_CONNECTIONS = 256;
 
 class HttpError extends Error {
@@ -120,8 +129,14 @@ function forwardedHost(
   return h !== undefined && sessionHosts(hosts).includes(h) ? h : undefined;
 }
 
-/** Sockets whose error reply already waits for an earlier response (one wait per socket). */
+/** Sockets whose error reply already waits for the pending response (one wait per socket). */
 const deferred = new WeakSet<Socket>();
+
+type PendingResponse = NodeJS.EventEmitter & { _headerSent?: boolean; req?: unknown };
+type HttpSocket = Socket & {
+  _httpMessage?: PendingResponse | null;
+  parser?: { incoming?: { complete?: boolean } | null } | null;
+};
 
 /** Raw reply for errors Node's HTTP parser raises before Fastify sees a request (H3/K8). */
 function clientError(err: Error & { code?: string }, socket: Socket): void {
@@ -129,60 +144,41 @@ function clientError(err: Error & { code?: string }, socket: Socket): void {
   // Node raises one error per further chunk: after the first, nothing more is done for this
   // socket — no listener pile-up / O(n²) event-loop freeze (security-4 Q3)
   if (deferred.has(socket)) return;
-  // The response of an EARLIER pipelined request is still pending: writing ours now would put
-  // it out of order on the wire (security-2 L5) → stop reading and write it once, after that
-  // response finished. An error in the request being parsed itself (bad body, timeout) gets
-  // its 400 / 408 right away (review-3 M1). The error belongs to a later message when the
-  // pending response's request was already fully parsed.
-  const s = socket as Socket & {
-    _httpMessage?:
-      | (NodeJS.EventEmitter & { _headerSent?: boolean; writableFinished?: boolean; req?: unknown })
-      | null;
-    parser?: { incoming?: { complete?: boolean } | null } | null;
-  };
+  // The response of the EARLIER request is still pending (garbage sent right behind a request):
+  // writing ours now would put it out of order on the wire (security-2 L5) → stop reading and
+  // write it once that response finished. Pipelining is refused (security-6 U1), so there is at
+  // most one pending response — no chain (review-6 T1). An error in the request being parsed
+  // itself (bad body, timeout) gets its 400 / 408 right away (review-3 M1). A response that is
+  // still `_httpMessage` has not emitted `finish` (Node's own handler detaches it first) — no
+  // `writableFinished` check, which Node 22 computes differently (review-6 T1).
+  const s = socket as HttpSocket;
   const pending = s._httpMessage;
   const incoming = s.parser?.incoming;
   if (
     pending &&
-    pending.writableFinished !== true &&
     (pending._headerSent === true || pending.req !== incoming || incoming?.complete === true)
   ) {
     deferred.add(socket);
     socket.pause();
-    waitForResponses(err, s, pending);
+    // bounded: a long-running response (stream, long-poll) must not hold a socket whose FIN
+    // we no longer read (security-6 U2)
+    const bound = setTimeout(() => socket.destroy(), CLIENT_ERROR_DEFER_MS);
+    bound.unref();
+    const onFinish = () => {
+      clearTimeout(bound);
+      pending.removeListener("close", onClose);
+      writeClientError(err, socket);
+    };
+    const onClose = () => {
+      clearTimeout(bound);
+      pending.removeListener("finish", onFinish);
+      socket.destroy();
+    };
+    pending.once("finish", onFinish);
+    pending.once("close", onClose);
     return;
   }
   writeClientError(err, socket);
-}
-
-type PendingResponse = NodeJS.EventEmitter & { writableFinished?: boolean };
-
-/**
- * Waits for `pending`, then for every further pipelined response Node hands the socket to
- * (Node's own `finish` handler runs first and assigns the next queued one), so the error
- * reply comes last and no earlier response is lost (review-5 R2 / security-5 S2). One
- * `finish` / `close` pair per socket at a time.
- */
-function waitForResponses(
-  err: Error & { code?: string },
-  socket: Socket & { _httpMessage?: PendingResponse | null },
-  pending: PendingResponse,
-): void {
-  const onFinish = () => {
-    pending.removeListener("close", onClose);
-    const next = socket._httpMessage;
-    if (next && next !== pending && next.writableFinished !== true) {
-      waitForResponses(err, socket, next);
-      return;
-    }
-    writeClientError(err, socket);
-  };
-  const onClose = () => {
-    pending.removeListener("finish", onFinish);
-    if (pending.writableFinished !== true) socket.destroy();
-  };
-  pending.once("finish", onFinish);
-  pending.once("close", onClose);
 }
 
 function writeClientError(err: Error & { code?: string }, socket: Socket): void {
@@ -197,16 +193,47 @@ function writeClientError(err: Error & { code?: string }, socket: Socket): void 
   const headers = Object.entries(SECURITY_HEADERS)
     .map(([k, v]) => `${k}: ${v}\r\n`)
     .join("");
-  // The socket must close for sure: a paused (deferred) socket never reads the peer's FIN, and
-  // the server is allowHalfOpen — `end()` alone would leave it in the connection count forever
-  // (review-5 R1 / security-5 S1). Destroy once flushed; backstop for a peer that never reads.
+  // The socket must close for sure: the server is allowHalfOpen, and a paused (deferred) socket
+  // never reads the peer's FIN (review-5 R1 / security-5 S1). Keep reading (the failed parser
+  // discards it) so the FIN is seen and a client still sending gets the reply, not an RST
+  // (review-6 T2); backstop for a peer that never closes.
   const backstop = setTimeout(() => socket.destroy(), CLIENT_ERROR_CLOSE_MS);
   backstop.unref();
   socket.once("close", () => clearTimeout(backstop));
+  socket.resume();
   socket.end(
     `HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-type: application/json; charset=utf-8\r\n${headers}content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
-    () => socket.destroy(),
   );
+}
+
+/** Sockets with a request whose response has not finished yet. */
+const busy = new WeakSet<Socket>();
+
+/**
+ * No HTTP pipelining (security-6 U1): a request that arrives while the previous response on
+ * the same socket is unfinished destroys the socket, before Fastify builds anything for it.
+ * Otherwise a client that never reads could pile up thousands of pending requests per socket
+ * (heap → OOM). The CLI and browsers never pipeline.
+ */
+function refusePipelining(server: HttpServer): void {
+  const handlers = server.listeners("request") as ((
+    req: IncomingMessage,
+    res: ServerResponse,
+  ) => void)[];
+  server.removeAllListeners("request");
+  server.on("request", (req: IncomingMessage, res: ServerResponse) => {
+    const socket = req.socket;
+    if (socket.destroyed) return;
+    if (busy.has(socket)) {
+      socket.destroy();
+      return;
+    }
+    busy.add(socket);
+    const done = () => busy.delete(socket);
+    res.once("finish", done);
+    res.once("close", done);
+    for (const h of handlers) h(req, res);
+  });
 }
 
 export async function createApi(
@@ -220,6 +247,7 @@ export async function createApi(
     bodyLimit: BODY_LIMIT,
     requestTimeout: REQUEST_TIMEOUT_MS,
     keepAliveTimeout: 5_000,
+    connectionTimeout: CONNECTION_IDLE_MS,
     http: {
       // slowloris from local processes (K4): enforce the timeouts every second (L2/J1)
       headersTimeout: HEADERS_TIMEOUT_MS,
@@ -244,6 +272,15 @@ export async function createApi(
     },
   });
   app.server.maxConnections = MAX_CONNECTIONS;
+  refusePipelining(app.server);
+  // Idle sockets (no traffic either way for CONNECTION_IDLE_MS, or the keep-alive timeout) are
+  // destroyed — e.g. a client that never reads its answer (security-6 U1/U3). A request still
+  // being received is left to the header / request timeouts, which answer 408 (M1).
+  app.server.on("timeout", (socket: Socket) => {
+    const incoming = (socket as HttpSocket).parser?.incoming;
+    if (incoming && incoming.complete !== true) return;
+    socket.destroy();
+  });
   // JSON only: a browser can send text/plain or form bodies cross-site without a preflight.
   // An empty JSON body is "no body" (fetch with a JSON content type and no payload — H15).
   app.removeContentTypeParser(["text/plain", "application/json"]);

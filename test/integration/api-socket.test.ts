@@ -20,9 +20,11 @@ let app: FastifyInstance;
 let port: number;
 let shutdowns: number;
 let logs: Record<string, unknown>[];
+let counted: number;
 
 beforeEach(async () => {
   shutdowns = 0;
+  counted = 0;
   logs = [];
   const hosts = { apiPort: 0, httpPort: 80, domainSuffix: "localhost" };
   app = await createApi(
@@ -45,6 +47,17 @@ beforeEach(async () => {
           await new Promise((r) => setTimeout(r, ms));
           return { ms };
         }),
+      (a) =>
+        a.get("/api/v1/x/count", { config: { access: "public" } }, async () => {
+          counted++;
+          await new Promise((r) => setTimeout(r, 50));
+          return { counted };
+        }),
+      // a large answer a client may refuse to read (security-6 U1/U3)
+      (a) =>
+        a.get("/api/v1/x/big", { config: { access: "public" } }, async () => ({
+          big: "x".repeat(4 * 1024 * 1024),
+        })),
     ],
   );
   await app.listen({ host: "127.0.0.1", port: 0 });
@@ -149,35 +162,91 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     }
   });
 
-  it("pipelined requests + garbage: the server socket is closed, never leaked (R1 / S1)", async () => {
+  const count = () =>
+    new Promise<number>((r, j) => app.server.getConnections((e, n) => (e ? j(e) : r(n))));
+  async function connectionsDrop(ms: number): Promise<number> {
+    const deadline = Date.now() + ms;
+    while ((await count()) > 0 && Date.now() < deadline) await wait(20);
+    return count();
+  }
+
+  it("pipelining is refused: socket destroyed, the second request never runs (U1)", async () => {
+    const c = await open();
+    const get = `GET /api/v1/x/count HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`;
+    c.s.write(`${get}${get}${get}`);
+    await c.ended;
+    await wait(100);
+    expect(counted).toBeLessThanOrEqual(1);
+    expect(await connectionsDrop(1_000)).toBe(0);
+  });
+
+  it("a flood of tiny pipelined requests that are never read: sockets cut, nothing piles up (U1)", async () => {
+    const tiny = "GET / HTTP/1.1\r\nHost:x\r\n\r\n".repeat(2_000);
+    const clients = await Promise.all(Array.from({ length: 20 }, () => open()));
+    for (const c of clients) {
+      c.s.pause(); // never reads
+      c.s.write(tiny);
+    }
+    await Promise.all(clients.map((c) => c.ended));
+    expect(await connectionsDrop(2_000)).toBe(0);
+    expect(logs.length).toBeLessThan(200); // at most one handled request per socket
+    // the API still answers
+    const ok = await open();
+    ok.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`);
+    await ok.ended;
+    expect(ok.text()).toMatch(/^HTTP\/1\.1 200 /);
+  });
+
+  it("request + garbage: 200, 400, and the server socket is closed, never leaked (R1 / S1)", async () => {
     const clients = await Promise.all([1, 2, 3, 4, 5].map(() => open()));
-    const get = `GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`;
-    for (const c of clients) c.s.write(`${get}${get}${get}\x00garbage\r\n\r\n`);
+    for (const c of clients) {
+      c.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`);
+    }
     await Promise.all(clients.map((c) => c.ended)); // the server closes, the client did not
     for (const c of clients) {
       const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
-      expect(statuses).toEqual(["200", "200", "200", "400"]);
+      expect(statuses).toEqual(["200", "400"]);
     }
-    const count = () =>
-      new Promise<number>((r, j) => app.server.getConnections((e, n) => (e ? j(e) : r(n))));
-    const deadline = Date.now() + 1_000;
-    while ((await count()) > 0 && Date.now() < deadline) await wait(20);
-    expect(await count()).toBe(0);
+    expect(await connectionsDrop(1_000)).toBe(0);
     const t0 = performance.now();
     await app.close();
     expect(performance.now() - t0).toBeLessThan(500);
   });
 
-  it("garbage behind two slow pipelined requests: both answered, then the 400 (R2 / S2)", async () => {
+  it("garbage behind a long-running response, client gone: socket freed within the bound (U2)", async () => {
+    const clients = await Promise.all([1, 2, 3].map(() => open()));
+    for (const c of clients) {
+      c.s.end(`GET /api/v1/x/slow?ms=12000 HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`);
+    }
+    await wait(200);
+    expect(await count()).toBe(3);
+    expect(await connectionsDrop(7_000)).toBe(0);
+  });
+
+  it("a client still sending a huge header gets its 431, not a reset (T2)", async () => {
+    for (let i = 0; i < 3; i++) {
+      const c = await open();
+      c.s.write(
+        `GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\nX-Big: ${"a".repeat(2 * 1024 * 1024)}\r\n\r\n`,
+      );
+      await c.ended;
+      expect(c.text()).toMatch(/^HTTP\/1\.1 431 /);
+    }
+    expect(await connectionsDrop(2_500)).toBe(0);
+  });
+
+  it("a client that never reads a large answer is cut after the idle timeout (U1 / U3)", {
+    timeout: 30_000,
+  }, async () => {
     const c = await open();
-    c.s.write(
-      `GET /api/v1/x/slow?ms=200 HTTP/1.1\r\nHost: ${HOST}\r\n\r\nGET /api/v1/x/slow?ms=600 HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`,
-    );
-    await c.ended;
-    const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
-    expect(statuses).toEqual(["200", "200", "400"]);
-    expect(c.text()).toContain('{"ms":200}');
-    expect(c.text()).toContain('{"ms":600}');
+    c.s.pause();
+    c.s.write(`GET /api/v1/x/big HTTP/1.1\r\nHost: ${HOST}\r\n\r\n`);
+    const t0 = Date.now();
+    await wait(200);
+    expect(await count()).toBe(1);
+    expect(await connectionsDrop(22_000)).toBe(0); // idle (15 s) or keep-alive after a flush
+    expect(Date.now() - t0).toBeGreaterThan(4_000);
+    c.s.destroy();
   });
 
   it("a bad body of the request itself still gets a uniform 400 (M1)", async () => {
