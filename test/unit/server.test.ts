@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type ApiContext, BODY_LIMIT, createApi } from "../../src/server/api.js";
 import {
   apiHosts,
+  checkUpgrade,
   classifyHost,
   csrfProblem,
   helloProof,
@@ -250,7 +251,7 @@ describe("API server", () => {
   it("hello proves the token without revealing it", async () => {
     const n = randomBytes(32).toString("base64url");
     const res = await req("GET", `/api/v1/hello?n=${n}`);
-    expect(res.json().proof).toBe(helloProof(TOKEN, n));
+    expect(res.json()).toEqual({ proof: helloProof(TOKEN, n) }); // no pid (K7)
     expect(res.body).not.toContain(TOKEN);
     expect((await req("GET", "/api/v1/hello?n=short")).statusCode).toBe(400);
   });
@@ -297,15 +298,99 @@ describe("API server", () => {
     expect(viaCookie.statusCode).toBe(401);
   });
 
-  it("login response does not leak the code (no-store, no-referrer)", async () => {
+  it("login response: real Set-Cookie flags; code does not leak (no-store, no-referrer)", async () => {
     const link = await req("POST", "/api/v1/login-links", bearer);
     expect(link.statusCode).toBe(200);
     const url = new URL(link.json().url as string);
-    expect(url.host).toBe(API); // default = host the request came in on
-    const res = await req("GET", `${url.pathname}${url.search}`);
+    expect(url.host).toBe("hub.localhost"); // default = dashboard host, never the IP host (K1)
+    const res = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    expect(res.statusCode).toBe(303);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["referrer-policy"]).toBe("no-referrer");
     expect(res.headers.location).toBe("/");
+    const set = String(res.headers["set-cookie"]);
+    expect(set).toMatch(/^webhub_session=[A-Za-z0-9_-]{43}; /);
+    expect(set).toContain("HttpOnly");
+    expect(set).toContain("SameSite=Strict");
+    expect(set).toContain("Path=/");
+    expect(set.toLowerCase()).not.toContain("domain");
+  });
+
+  it("no browser session on the IP host: cookies are not port-scoped (K1)", async () => {
+    const forIp = await req(
+      "POST",
+      "/api/v1/login-links",
+      { ...bearer, "content-type": "application/json" },
+      JSON.stringify({ host: API }),
+    );
+    expect(forIp.statusCode).toBe(400);
+    // a valid code for hub cannot be redeemed on the IP host
+    const link = await req("POST", "/api/v1/login-links", bearer);
+    const url = new URL(link.json().url as string);
+    const onIp = await req("GET", `${url.pathname}${url.search}`, { host: API });
+    expect(onIp.statusCode).toBe(401);
+    expect(onIp.headers["set-cookie"]).toBeUndefined();
+    // a hub session replayed with the IP Host (e.g. by a dev server on 127.0.0.1) is useless
+    const cookie = await login("hub.localhost");
+    expect((await req("GET", "/api/v1/status", { host: API, cookie })).statusCode).toBe(401);
+    // two webhub_session cookies (tossed by another site) → no session at all
+    expect(
+      (
+        await req("GET", "/api/v1/status", {
+          host: "hub.localhost",
+          cookie: `${cookie}; webhub_session=${"A".repeat(43)}`,
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
+  it("HEAD keeps auth; bad URL → uniform 400 / 421 with headers; OPTIONS has Allow", async () => {
+    expect((await req("HEAD", "/api/v1/status")).statusCode).toBe(401);
+    expect((await req("HEAD", "/api/v1/status", bearer)).statusCode).toBe(200);
+    const badGood = await req("GET", "/%E0%A4%A", bearer);
+    expect(badGood.statusCode).toBe(400);
+    expect(badGood.json()).toEqual({ error: { code: "BAD_REQUEST", message: "bad request" } });
+    expect(badGood.headers["x-content-type-options"]).toBe("nosniff");
+    const badEvil = await req("GET", "/%E0%A4%A", { host: "evil.com" });
+    expect(badEvil.statusCode).toBe(421);
+    expect(badEvil.body).not.toContain("E0");
+    expect((await req("OPTIONS", "/api/v1/status")).headers.allow).toBe("GET, HEAD, POST");
+  });
+
+  it("no CORS / security headers on every kind of response", async () => {
+    const cookie = await login();
+    const responses = [
+      await req("GET", "/api/v1/health"),
+      await req("GET", "/api/v1/status"),
+      await req("GET", "/api/v1/status", { host: "evil.com" }),
+      await req("GET", "/nope", bearer),
+      await req("POST", "/api/v1/logout", { host: "hub.localhost", cookie }),
+      await req("POST", "/api/v1/login-links", { ...bearer, "content-type": "text/plain" }, "x"),
+      await req("GET", "/_webhub/login?t=x", { host: "hub.localhost" }),
+      await req("GET", "/api/v1/hello?n=x"),
+    ];
+    for (const res of responses) {
+      expect(Object.keys(res.headers).filter((k) => k.startsWith("access-control"))).toEqual([]);
+      expect(res.headers["x-content-type-options"], String(res.statusCode)).toBe("nosniff");
+      expect(res.headers["cache-control"]).toBe("no-store");
+    }
+  });
+
+  it("server limits against slowloris / socket exhaustion (K4)", () => {
+    expect(app.server.headersTimeout).toBe(10_000);
+    expect(app.server.maxConnections).toBe(256);
+    expect(app.server.requestTimeout).toBe(30_000);
+  });
+
+  it("logout accepts a JSON content type with an empty body", async () => {
+    const cookie = await login();
+    const res = await req("POST", "/api/v1/logout", {
+      host: "hub.localhost",
+      cookie,
+      origin: "http://hub.localhost",
+      "content-type": "application/json",
+    });
+    expect(res.statusCode).toBe(204);
   });
 
   it("CSRF: cookie POST needs Origin; cross-site and text/plain refused", async () => {
@@ -446,6 +531,51 @@ describe("API server", () => {
     expect(boom.json()).toEqual({ error: { code: "INTERNAL", message: "internal error" } });
     expect(boom.body).not.toContain("path");
     expect(boom.body).not.toContain(TOKEN);
+    // the 5xx log line names the error class only, never its message (H2)
+    const text = JSON.stringify(logs);
+    expect(text).toContain('"error":"Error"');
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("internal\\\\path");
+  });
+
+  it("checkUpgrade: same Host / auth / Origin rules as unsafe requests (H6)", async () => {
+    const cookie = await login("hub.localhost");
+    const opts = { ...HOSTS, token: TOKEN, sessions };
+    const up = (headers: Record<string, string>) =>
+      checkUpgrade({ rawHeaders: Object.entries(headers).flat(), headers }, opts);
+    expect(up({ host: API, authorization: `Bearer ${TOKEN}` })).toEqual({
+      ok: true,
+      host: API,
+      auth: "bearer",
+    });
+    expect(up({ host: "hub.localhost", cookie, origin: "http://hub.localhost" })).toMatchObject({
+      ok: true,
+      auth: "session",
+    });
+    expect(up({ host: "hub.localhost", cookie })).toMatchObject({ ok: false, status: 403 });
+    expect(up({ host: "hub.localhost", cookie, origin: "http://evil.com" })).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+    expect(up({ host: API, cookie, origin: `http://${API}` })).toMatchObject({
+      ok: false,
+      status: 401,
+    });
+    expect(up({ host: "evil.com", authorization: `Bearer ${TOKEN}` })).toMatchObject({
+      ok: false,
+      status: 421,
+    });
+    expect(up({ host: "webhub.internal", authorization: `Bearer ${TOKEN}` })).toMatchObject({
+      ok: false,
+      status: 421,
+    });
+    expect(up({ host: API, authorization: "Bearer nope" })).toMatchObject({
+      ok: false,
+      status: 401,
+    });
+    expect(
+      checkUpgrade({ rawHeaders: ["Host", API, "host", API], headers: { host: API } }, opts),
+    ).toMatchObject({ ok: false, status: 421 });
   });
 
   it("log lines never contain token, code, cookie or query string", async () => {
@@ -473,7 +603,7 @@ describe("client handshake", () => {
       headers: Record<string, string>,
     ) => {
       seen.push(headers);
-      return { status: 200, body: { proof: "forged", pid: 9 } };
+      return { status: 200, body: { proof: "forged" } };
     };
     const c = new DaemonClient(auth, impostor);
     await expect(c.request("GET", "/api/v1/status")).rejects.toSatisfy((e) =>

@@ -70,7 +70,15 @@ function send(
         res.on("error", reject);
       },
     );
-    req.on("timeout", () => req.destroy(new Error("timed out")));
+    // overall deadline, not only socket idle time: a slow-drip server cannot stall us (H13)
+    const deadline = setTimeout(
+      () => req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
+      TIMEOUT_MS,
+    );
+    req.on("close", () => clearTimeout(deadline));
+    req.on("timeout", () =>
+      req.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" })),
+    );
     req.on("error", reject);
     req.end(body);
   });
@@ -139,8 +147,11 @@ export class DaemonClient {
         body === undefined ? undefined : JSON.stringify(body),
       );
     } catch (err) {
+      // the daemon may have restarted (new token) or another program took the port: prove again
+      this.#verified = false;
       throw unreachable(err);
     }
+    if (res.status === 401) this.#verified = false;
     if (res.status >= 200 && res.status < 300) return res.body as T;
     const e = (res.body as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
     throw new ServerError(
@@ -154,7 +165,12 @@ export class DaemonClient {
   }
 }
 
-/** Reads `data/auth.json` (missing → DAEMON_NOT_RUNNING) and returns a client. */
+/**
+ * Reads `data/auth.json` (missing → DAEMON_NOT_RUNNING) and returns a client.
+ * The daemon writes auth.json just before it listens, so right after a start the port may
+ * refuse for a moment (DAEMON_NOT_RUNNING) — F-004 retries until `auth.pid` is the process it
+ * spawned (review-1 H16). A file left by a crash + refused port = not running (K2).
+ */
 export async function connectDaemon(paths: Paths): Promise<DaemonClient> {
   const res = await readDoc(paths.auth, authFileSpec, { home: paths.home });
   if (res === undefined) {

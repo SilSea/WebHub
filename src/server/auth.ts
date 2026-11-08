@@ -38,6 +38,17 @@ export function apiHosts(o: HostOptions): string[] {
   ];
 }
 
+/**
+ * Hosts that may hold a browser session: named hosts only (security-1 K1). Never an IP host:
+ * cookies are not port-scoped, so a cookie for `127.0.0.1` would also be sent to every
+ * project dev server on `http://127.0.0.1:<any port>`. `127.0.0.1:<apiPort>` = bearer only.
+ * Known limit: a hub./db. cookie is likewise sent to `hub.<suffix>:<other port>` if the user
+ * ever opens such a URL served by another program.
+ */
+export function sessionHosts(o: HostOptions): string[] {
+  return apiHosts(o).filter((h) => !h.startsWith("127.0.0.1:"));
+}
+
 export type HostKind = "api" | "internal";
 
 /**
@@ -141,6 +152,61 @@ export function csrfProblem(
   if (site !== undefined && site !== "same-origin") return "cross-site request";
   if (auth === "session" && origin === undefined) return "missing Origin";
   return undefined;
+}
+
+// ---------- WebSocket upgrade (shared by later features, e.g. dashboard F-027) ----------
+
+export interface UpgradeRequest {
+  rawHeaders: readonly string[];
+  headers: {
+    host?: string | undefined;
+    origin?: string | undefined;
+    authorization?: string | undefined;
+    cookie?: string | undefined;
+    "sec-fetch-site"?: string | string[] | undefined;
+  };
+}
+
+export type UpgradeResult =
+  | { ok: true; host: string; auth: Exclude<AuthKind, "none"> }
+  | { ok: false; status: 401 | 403 | 421; reason: string };
+
+/**
+ * Same rules as an unsafe HTTP request (an upgrade is never "safe"): one allowed API Host,
+ * valid bearer or a session for that host, and same-origin (Origin required with a cookie).
+ */
+export function checkUpgrade(
+  req: UpgradeRequest,
+  o: HostOptions & { token: string; sessions: SessionStore },
+): UpgradeResult {
+  if (hostHeaderCount(req.rawHeaders) !== 1)
+    return { ok: false, status: 421, reason: "unknown host" };
+  const h = classifyHost(req.headers.host, o);
+  if (h === undefined || h.kind !== "api")
+    return { ok: false, status: 421, reason: "unknown host" };
+  let auth: Exclude<AuthKind, "none">;
+  if (req.headers.authorization !== undefined) {
+    const t = parseBearer(req.headers.authorization);
+    if (t === undefined || !safeEqual(t, o.token))
+      return { ok: false, status: 401, reason: "not authorized" };
+    auth = "bearer";
+  } else if (
+    sessionHosts(o).includes(h.host) &&
+    o.sessions.checkSession(readCookie(req.headers.cookie, SESSION_COOKIE), h.host)
+  ) {
+    auth = "session";
+  } else {
+    return { ok: false, status: 401, reason: "not authorized" };
+  }
+  const site = req.headers["sec-fetch-site"];
+  const problem = csrfProblem(
+    "UPGRADE",
+    { origin: req.headers.origin, "sec-fetch-site": typeof site === "string" ? site : undefined },
+    h.host,
+    auth,
+  );
+  if (problem !== undefined) return { ok: false, status: 403, reason: problem };
+  return { ok: true, host: h.host, auth };
 }
 
 // ---------- sessions + login codes (in memory) ----------

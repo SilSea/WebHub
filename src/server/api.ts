@@ -1,16 +1,18 @@
 /**
  * API server (F-003 §3.2–3.8, DESIGN §10.3). Every request passes, in order:
- * exactly one allowed Host (else 421) → no OPTIONS / CORS (405) → route scope (api host vs
- * `webhub.internal`) → authentication per route `access` (default: bearer or session) →
- * CSRF rules for unsafe methods. Routes of later features go through `RouteRegistrar` and
- * get all of this by default; a public route must say `access: "public"` explicitly.
+ * exactly one allowed Host (else 421) → origin-form target only → no OPTIONS / CORS (405) →
+ * route scope (api host vs `webhub.internal`) → authentication per route `access` (default:
+ * bearer or session) → CSRF rules for unsafe methods. Routes of later features go through
+ * `RouteRegistrar` and get all of this by default; a public route must say
+ * `access: "public"` explicitly. Browser sessions exist only on named hosts (`hub.`/`db.`),
+ * never on `127.0.0.1:<port>` (security-1 K1).
  */
+import type { Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 import { type FastifyInstance, type FastifyReply, fastify } from "fastify";
 import { z } from "zod";
 import {
   type AuthKind,
-  apiHosts,
   classifyHost,
   clearSessionCookie,
   csrfProblem,
@@ -26,6 +28,7 @@ import {
   type SessionStore,
   safeEqual,
   sessionCookie,
+  sessionHosts,
 } from "./auth.js";
 
 /** Who may call a route. `internal` = the handler checks a login code / forwarded cookie itself. */
@@ -49,9 +52,9 @@ export interface ApiContext {
   sessions: SessionStore;
   /** Body of GET /api/v1/status. */
   status: () => Record<string, unknown>;
-  /** Called once after the 202 of POST /api/v1/shutdown was sent. */
+  /** Called once after POST /api/v1/shutdown was answered (or the client went away). */
   onShutdown: () => void;
-  /** One structured log line (never gets tokens, codes, cookies or query strings). */
+  /** One structured log line (never gets tokens, codes, cookies, queries or error messages). */
   log: (entry: Record<string, unknown>) => void;
   /** Delay after a wrong bearer token (ms). */
   failDelayMs?: number;
@@ -60,6 +63,8 @@ export interface ApiContext {
 export type RouteRegistrar = (app: FastifyInstance, ctx: ApiContext) => void;
 
 export const BODY_LIMIT = 1024 * 1024;
+export const HEADERS_TIMEOUT_MS = 10_000;
+export const MAX_CONNECTIONS = 256;
 
 class HttpError extends Error {
   constructor(
@@ -73,11 +78,7 @@ class HttpError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function deny(reply: FastifyReply, status: number, code: string, message: string) {
-  return reply.code(status).send({ error: { code, message } });
-}
-
-const SECURITY_HEADERS: Record<string, string> = {
+export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "cache-control": "no-store",
@@ -86,31 +87,77 @@ const SECURITY_HEADERS: Record<string, string> = {
   "cross-origin-resource-policy": "same-origin",
 };
 
-/** Single forwarded host from nginx (internal requests only); must be an API host. */
+function deny(reply: FastifyReply, status: number, code: string, message: string) {
+  return reply.code(status).headers(SECURITY_HEADERS).send({ error: { code, message } });
+}
+
+/** Single forwarded host from nginx (internal requests only); must be a session host. */
 function forwardedHost(
   value: string | string[] | undefined,
   hosts: HostOptions,
 ): string | undefined {
   if (typeof value !== "string" || value.includes(",")) return undefined;
   const h = normaliseHost(value);
-  return h !== undefined && apiHosts(hosts).includes(h) ? h : undefined;
+  return h !== undefined && sessionHosts(hosts).includes(h) ? h : undefined;
+}
+
+/** Raw reply for errors Node's HTTP parser raises before Fastify sees a request (H3/K8). */
+function clientError(err: Error & { code?: string }, socket: Socket): void {
+  if (!socket.writable) return;
+  const [status, text] =
+    err.code === "ERR_HTTP_REQUEST_TIMEOUT"
+      ? [408, "Request Timeout"]
+      : err.code === "HPE_HEADER_OVERFLOW"
+        ? [431, "Request Header Fields Too Large"]
+        : [400, "Bad Request"];
+  const body = JSON.stringify({ error: { code: "BAD_REQUEST", message: "bad request" } });
+  const headers = Object.entries(SECURITY_HEADERS)
+    .map(([k, v]) => `${k}: ${v}\r\n`)
+    .join("");
+  socket.end(
+    `HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-type: application/json; charset=utf-8\r\n${headers}content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+  );
 }
 
 export async function createApi(
   ctx: ApiContext,
   registrars: readonly RouteRegistrar[] = [],
 ): Promise<FastifyInstance> {
+  let closing = false;
   const app = fastify({
     logger: false,
     bodyLimit: BODY_LIMIT,
     requestTimeout: 30_000,
     keepAliveTimeout: 5_000,
-    return503OnClosing: true,
+    return503OnClosing: false, // answered by our own hook (uniform body + headers — H4)
     trustProxy: false,
+    clientErrorHandler: clientError,
+    // errors Fastify raises before routing (bad URL encoding …) skip the hooks: same rules here (H3)
+    frameworkErrors: (_err, req, reply) => {
+      if (
+        hostHeaderCount(req.raw.rawHeaders) !== 1 ||
+        classifyHost(req.headers.host, ctx.hosts) === undefined
+      ) {
+        return deny(reply, 421, "MISDIRECTED", "unknown host");
+      }
+      return deny(reply, 400, "BAD_REQUEST", "bad request");
+    },
   });
-  // JSON only: a browser can send text/plain or form bodies cross-site without a preflight
-  app.removeContentTypeParser(["text/plain"]);
+  // slowloris / socket exhaustion from local processes (K4)
+  app.server.headersTimeout = HEADERS_TIMEOUT_MS;
+  app.server.maxConnections = MAX_CONNECTIONS;
+  // JSON only: a browser can send text/plain or form bodies cross-site without a preflight.
+  // An empty JSON body is "no body" (fetch with a JSON content type and no payload — H15).
+  app.removeContentTypeParser(["text/plain", "application/json"]);
+  const jsonParser = app.getDefaultJsonParser("error", "error");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    if (body === "") return done(null, undefined);
+    return jsonParser(req, typeof body === "string" ? body : body.toString("utf8"), done);
+  });
   app.decorateRequest("webhub", null as never);
+  app.addHook("preClose", async () => {
+    closing = true;
+  });
 
   app.addHook("onRequest", async (req, reply) => {
     const started = performance.now();
@@ -123,14 +170,20 @@ export async function createApi(
     if (h === undefined) return deny(reply, 421, "MISDIRECTED", "unknown host");
     req.webhub.host = h.host;
     req.webhub.hostKind = h.kind;
-    // 2. no CORS at all
-    if (req.method === "OPTIONS") return deny(reply, 405, "METHOD_NOT_ALLOWED", "not allowed");
+    if (closing) return deny(reply, 503, "SHUTTING_DOWN", "webhub is stopping");
+    // 2. origin-form targets only (`/path`), no absolute-form `http://other/…` (K5)
+    if (!(req.raw.url ?? "").startsWith("/")) return deny(reply, 400, "BAD_REQUEST", "bad request");
+    // 3. no CORS at all
+    if (req.method === "OPTIONS") {
+      reply.header("allow", "GET, HEAD, POST");
+      return deny(reply, 405, "METHOD_NOT_ALLOWED", "not allowed");
+    }
     if (req.is404) return; // not-found handler answers (no data)
-    // 3. scope
+    // 4. scope
     const cfg = req.routeOptions.config;
     const scope: Scope = cfg.scope ?? "api";
     if (scope !== "both" && scope !== h.kind) return deny(reply, 404, "NOT_FOUND", "not found");
-    // 4. authentication
+    // 5. authentication — sessions only on named hosts (K1)
     const access: Access = cfg.access ?? "user";
     let auth: AuthKind = "none";
     const authz = req.headers.authorization;
@@ -142,7 +195,7 @@ export async function createApi(
       }
       auth = "bearer";
     } else if (
-      h.kind === "api" &&
+      sessionHosts(ctx.hosts).includes(h.host) &&
       ctx.sessions.checkSession(readCookie(req.headers.cookie, SESSION_COOKIE), h.host)
     ) {
       auth = "session";
@@ -155,7 +208,7 @@ export async function createApi(
       (access === "session" && auth === "session") ||
       (access === "user" && auth !== "none");
     if (!ok) return deny(reply, 401, "UNAUTHORIZED", "not authorized");
-    // 5. CSRF
+    // 6. CSRF
     const site = req.headers["sec-fetch-site"];
     const problem = csrfProblem(
       req.method,
@@ -170,14 +223,16 @@ export async function createApi(
   });
 
   app.addHook("onSend", async (_req, reply, payload) => {
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) reply.header(k, v);
+    reply.headers(SECURITY_HEADERS);
     return payload;
   });
 
   app.addHook("onResponse", async (req, reply) => {
+    const raw = req.raw.url ?? "";
     ctx.log({
       method: req.method,
-      path: req.url.split("?")[0], // never the query (login codes, nonces)
+      // never the query (login codes, nonces) nor a foreign authority
+      path: raw.startsWith("/") ? raw.split("?")[0] : "(invalid target)",
       status: reply.statusCode,
       ms: Math.round(performance.now() - (req.webhub?.started ?? performance.now())),
     });
@@ -185,26 +240,26 @@ export async function createApi(
 
   app.setNotFoundHandler((_req, reply) => deny(reply, 404, "NOT_FOUND", "not found"));
 
-  app.setErrorHandler(
-    (err: { statusCode?: number; apiCode?: string; message?: string }, _req, reply) => {
-      const status =
-        typeof err.statusCode === "number" && err.statusCode >= 400 && err.statusCode < 600
-          ? err.statusCode
-          : 500;
-      if (err instanceof HttpError) return deny(reply, status, err.apiCode, err.message);
-      const known: Record<number, [string, string]> = {
-        400: ["BAD_REQUEST", "bad request"],
-        413: ["BODY_TOO_LARGE", "request body too large"],
-        415: ["UNSUPPORTED_MEDIA_TYPE", "send JSON (Content-Type: application/json)"],
-      };
-      const [code, message] =
-        known[status] ??
-        (status < 500 ? ["BAD_REQUEST", "bad request"] : ["INTERNAL", "internal error"]);
-      if (status >= 500)
-        ctx.log({ level: "error", msg: "request failed", error: err.message ?? "" });
-      return deny(reply, status, code, message);
-    },
-  );
+  app.setErrorHandler((err: { statusCode?: number; code?: string; name?: string }, _req, reply) => {
+    const status =
+      typeof err.statusCode === "number" && err.statusCode >= 400 && err.statusCode < 600
+        ? err.statusCode
+        : 500;
+    if (err instanceof HttpError) return deny(reply, status, err.apiCode, err.message);
+    const known: Record<number, [string, string]> = {
+      400: ["BAD_REQUEST", "bad request"],
+      413: ["BODY_TOO_LARGE", "request body too large"],
+      415: ["UNSUPPORTED_MEDIA_TYPE", "send JSON (Content-Type: application/json)"],
+    };
+    const [code, message] =
+      known[status] ??
+      (status < 500 ? ["BAD_REQUEST", "bad request"] : ["INTERNAL", "internal error"]);
+    // the message may hold paths / secrets of later features → class / code only (H2)
+    if (status >= 500) {
+      ctx.log({ level: "error", msg: "request failed", error: err.code ?? err.name ?? "Error" });
+    }
+    return deny(reply, status, code, message);
+  });
 
   // ---------- routes ----------
 
@@ -213,19 +268,21 @@ export async function createApi(
   app.get("/api/v1/hello", { config: { access: "public" } }, async (req) => {
     const n = (req.query as Record<string, unknown>).n;
     if (!isId(n)) throw new HttpError(400, "BAD_REQUEST", "n must be 32 random bytes (base64url)");
-    return { proof: helloProof(ctx.token, n), pid: process.pid };
+    return { proof: helloProof(ctx.token, n) };
   });
 
   app.get("/api/v1/status", async () => ctx.status());
 
   app.post("/api/v1/shutdown", { config: { access: "bearer" } }, async (_req, reply) => {
     let called = false;
-    reply.raw.once("finish", () => {
-      if (!called) {
-        called = true;
-        ctx.onShutdown();
-      }
-    });
+    const once = () => {
+      if (called) return;
+      called = true;
+      ctx.onShutdown();
+    };
+    // `close` too: a client that disconnects early still stops the daemon (H10)
+    reply.raw.once("finish", once);
+    reply.raw.once("close", once);
     return reply.code(202).send({ ok: true });
   });
 
@@ -234,9 +291,11 @@ export async function createApi(
     const body = LoginLinkBody.safeParse(req.body ?? undefined);
     if (!body.success) throw new HttpError(400, "BAD_REQUEST", 'body must be {"host"?: string}');
     const wanted = body.data?.host;
-    const host = wanted === undefined ? req.webhub.host : normaliseHost(wanted);
-    if (host === undefined || !apiHosts(ctx.hosts).includes(host)) {
-      throw new HttpError(400, "BAD_REQUEST", "host is not a webhub host");
+    const allowed = sessionHosts(ctx.hosts);
+    // default: the dashboard host (never the IP host the CLI talks to — K1)
+    const host = wanted === undefined ? allowed[0] : normaliseHost(wanted);
+    if (host === undefined || !allowed.includes(host)) {
+      throw new HttpError(400, "BAD_REQUEST", `host must be one of: ${allowed.join(", ")}`);
     }
     const { code, expiresAt } = ctx.sessions.createCode(host);
     return {
@@ -257,7 +316,9 @@ export async function createApi(
       const target =
         req.webhub.hostKind === "internal"
           ? forwardedHost(req.headers["x-forwarded-host"], ctx.hosts)
-          : req.webhub.host;
+          : sessionHosts(ctx.hosts).includes(req.webhub.host)
+            ? req.webhub.host
+            : undefined;
       const t = (req.query as Record<string, unknown>).t;
       if (target === undefined || typeof t !== "string" || !ctx.sessions.consumeCode(t, target)) {
         return reply

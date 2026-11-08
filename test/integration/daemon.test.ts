@@ -1,11 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { createServer as createNetServer } from "node:net";
+import { connect, createServer as createNetServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Paths } from "../../src/config/home.js";
+import { startDaemon } from "../../src/daemon.js";
 import { execFile, systemExe } from "../../src/proc/exec.js";
 import { connectDaemon, DaemonClient, sendRaw } from "../../src/server/client.js";
 import { isServerError } from "../../src/server/errors.js";
@@ -176,6 +177,67 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
     await expect(stale.verify()).rejects.toSatisfy((e) => isServerError(e, "DAEMON_IMPOSTOR"));
     await (await connectDaemon(h.paths)).request("POST", "/api/v1/shutdown");
     expect(await d2.exit).toBe(0);
+  });
+
+  it("raw requests: missing Host → 421, absolute-form target → 400 (not logged with its host)", async () => {
+    const port = await freePort();
+    const d = runDaemon(h.paths.home, port);
+    await ready(d);
+    const raw = (text: string) =>
+      new Promise<string>((resolve, reject) => {
+        const s = connect({ host: "127.0.0.1", port }, () => s.write(text));
+        let out = "";
+        s.on("data", (b) => {
+          out += b.toString();
+        });
+        s.on("end", () => resolve(out));
+        s.on("error", reject);
+      });
+    expect(await raw("GET /api/v1/health HTTP/1.0\r\n\r\n")).toMatch(/^HTTP\/1\.1 421 /);
+    const abs = await raw(
+      `GET http://evil.example/api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`,
+    );
+    expect(abs).toMatch(/^HTTP\/1\.1 400 /);
+    await (await connectDaemon(h.paths)).request("POST", "/api/v1/shutdown");
+    await d.exit;
+    expect(d.out.join("")).not.toContain("evil.example");
+  });
+
+  it("invalid config → exit 2, problems listed once, nothing left behind", async () => {
+    const ok = runDaemon(h.paths.home, await freePort()); // creates the home
+    await ready(ok);
+    await (await connectDaemon(h.paths)).request("POST", "/api/v1/shutdown");
+    await ok.exit;
+    await writeFile(h.paths.config, JSON.stringify({ schemaVersion: 1, mode: "nope" }));
+    const bad = runDaemon(h.paths.home, await freePort());
+    expect(await bad.exit).toBe(2);
+    const text = bad.err.join("");
+    expect(text.match(/mode/g)?.length).toBe(1);
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
+  });
+
+  it("in-process: abort signal and API shutdown both stop cleanly (stopped resolves)", async () => {
+    const env = { ...process.env, WEBHUB_HOME: h.paths.home };
+    const ac = new AbortController();
+    const a = await startDaemon({ env, port: await freePort(), signal: ac.signal, log: () => {} });
+    expect(existsSync(h.paths.auth)).toBe(true);
+    ac.abort();
+    await a.stopped;
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
+
+    const pre = new AbortController();
+    pre.abort(); // signal before ready → stops right after start
+    const b = await startDaemon({ env, port: await freePort(), signal: pre.signal, log: () => {} });
+    await b.stopped;
+    expect(existsSync(h.paths.auth)).toBe(false);
+
+    const c = await startDaemon({ env, port: await freePort(), log: () => {} });
+    await (await connectDaemon(h.paths)).request("POST", "/api/v1/shutdown");
+    await c.stopped;
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
   });
 
   it("an impostor on the port never receives the token", async () => {

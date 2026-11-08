@@ -7,7 +7,7 @@
  * 4 API port busy.
  */
 import { randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -36,16 +36,23 @@ export interface DaemonOptions {
   httpPort?: number;
   log?: (entry: Record<string, unknown>) => void;
   registrars?: readonly RouteRegistrar[];
-  /** Called when the API asked for shutdown (POST /api/v1/shutdown). */
-  onShutdownRequest?: () => void;
+  /** Aborted (e.g. by a signal) → the daemon stops as soon as it is ready. */
+  signal?: AbortSignal;
 }
 
 export interface RunningDaemon {
   readonly paths: Paths;
   readonly port: number;
   readonly app: FastifyInstance;
-  /** Idempotent clean stop: close server, remove auth.json (if ours), release lock. */
+  /**
+   * Idempotent clean stop: close server, remove auth.json (if ours), release lock. Also
+   * triggered by POST /api/v1/shutdown and by `signal`.
+   */
   stop(): Promise<void>;
+  /** Resolves once the daemon has stopped (any trigger). */
+  readonly stopped: Promise<void>;
+  /** Synchronous last-resort removal of our auth.json (process `exit` hook). */
+  removeAuthFileSync(): void;
 }
 
 const jsonLog = (entry: Record<string, unknown>) =>
@@ -92,6 +99,15 @@ async function removeAuthFile(file: string, token: string): Promise<void> {
   }
 }
 
+function removeAuthFileSync(file: string, token: string): void {
+  try {
+    const doc = JSON.parse(readFileSync(file, "utf8")) as { token?: unknown };
+    if (doc.token === token) rmSync(file, { force: true });
+  } catch {
+    // nothing of ours
+  }
+}
+
 export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaemon> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? jsonLog;
@@ -112,6 +128,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
   }
   let app: FastifyInstance | undefined;
   const token = randomBytes(32).toString("base64url");
+  // a shutdown request may arrive between listen and the return below → queued (H5)
+  let stopFn: (() => Promise<void>) | undefined;
+  let stopQueued = false;
+  const requestStop = () => {
+    if (stopFn === undefined) stopQueued = true;
+    else void stopFn();
+  };
+  let resolveStopped: () => void = () => {};
+  const stopped = new Promise<void>((r) => {
+    resolveStopped = r;
+  });
   try {
     const { config } = await loadConfig(paths, lock);
     const startedAt = new Date().toISOString();
@@ -129,22 +156,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
           home: paths.home,
           mode: config.mode,
         }),
-        onShutdown: () => opts.onShutdownRequest?.(),
+        onShutdown: requestStop,
         log,
       },
       opts.registrars ?? [],
     );
-    try {
-      await app.listen({ host: "127.0.0.1", port });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
-        throw new ServerError("DAEMON_PORT_BUSY", `port ${port} (webhub API) is already in use`, {
-          details: await portOwner(port),
-          hint: "Stop the program that uses this port, then start webhub again.",
-        });
-      }
-      throw err;
-    }
+    // auth.json BEFORE listen: an old file of a crashed daemon is never next to a live
+    // port (client would report an impostor — H16); a failed listen removes it again
     const doc: AuthFile = {
       schemaVersion: AUTH_FILE_VERSION,
       token,
@@ -153,31 +171,59 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       startedAt,
     };
     await writeDoc(lock, paths.auth, doc, { keepBackup: false });
+    try {
+      await app.listen({ host: "127.0.0.1", port });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EADDRINUSE" || code === "EACCES") {
+        throw new ServerError(
+          "DAEMON_PORT_BUSY",
+          code === "EADDRINUSE"
+            ? `port ${port} (webhub API) is already in use`
+            : `port ${port} (webhub API) cannot be used (access denied)`,
+          {
+            details: await portOwner(port),
+            hint:
+              code === "EADDRINUSE"
+                ? "Stop the program that uses this port, then start webhub again."
+                : "Windows may reserve this port (Hyper-V / WinNAT excluded range: `netsh int ipv4 show excludedportrange protocol=tcp`).",
+          },
+        );
+      }
+      throw err;
+    }
     const running = app;
+    stopFn = () => {
+      stopping ??= (async () => {
+        const timer = setTimeout(() => running.server.closeAllConnections(), STOP_GRACE_MS);
+        try {
+          await running.close();
+        } finally {
+          clearTimeout(timer);
+          await removeAuthFile(paths.auth, token).catch(() => {});
+          await lock.release().catch(() => {});
+          log({ msg: "stopped" });
+          resolveStopped();
+        }
+      })();
+      return stopping;
+    };
     log({ msg: "ready", port, home: paths.home });
+    if (stopQueued || opts.signal?.aborted === true) void stopFn();
+    else opts.signal?.addEventListener("abort", () => void stopFn?.(), { once: true });
     return {
       paths,
       port,
       app: running,
-      stop: () => {
-        stopping ??= (async () => {
-          const timer = setTimeout(() => running.server.closeAllConnections(), STOP_GRACE_MS);
-          try {
-            await running.close();
-          } finally {
-            clearTimeout(timer);
-            await removeAuthFile(paths.auth, token);
-            await lock.release();
-            log({ msg: "stopped" });
-          }
-        })();
-        return stopping;
-      },
+      stop: stopFn,
+      stopped,
+      removeAuthFileSync: () => removeAuthFileSync(paths.auth, token),
     };
   } catch (err) {
+    // cleanup must never hide the original error (exit code — H14)
     await app?.close().catch(() => {});
-    await removeAuthFile(paths.auth, token);
-    await lock.release();
+    await removeAuthFile(paths.auth, token).catch(() => {});
+    await lock.release().catch(() => {});
     throw err;
   }
 }
@@ -201,8 +247,10 @@ export function exitCodeFor(err: unknown): number {
 
 function describe(err: unknown): string[] {
   if (err instanceof ServerError || err instanceof WebhubError) {
+    // with details, the message's first line is enough (CONFIG_INVALID repeats them — H11)
+    const message = err.details.length > 0 ? (err.message.split("\n")[0] ?? "") : err.message;
     return [
-      `webhub daemon: ${err.message}`,
+      `webhub daemon: ${message}`,
       ...err.details.map((d) => `  - ${d}`),
       ...(err.hint === undefined ? [] : [`  hint: ${err.hint}`]),
     ];
@@ -210,27 +258,41 @@ function describe(err: unknown): string[] {
   return [`webhub daemon: ${err instanceof Error ? err.message : String(err)}`];
 }
 
+/** SIGHUP = console window closed (Windows) / terminal gone; SIGBREAK = Ctrl+Break. */
+const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
+
 export async function main(): Promise<number> {
+  // a closed stdout (parent gone) must not crash the daemon via EPIPE (K2)
+  process.stdout.on("error", () => {});
+  process.stderr.on("error", () => {});
+  // handlers BEFORE start: a signal during the slow start-up stops cleanly once ready (H8)
+  const abort = new AbortController();
   let daemon: RunningDaemon | undefined;
-  let resolveDone: (code: number) => void = () => {};
-  const done = new Promise<number>((r) => {
-    resolveDone = r;
-  });
-  const stop = () => {
-    if (daemon === undefined) return;
-    void daemon.stop().then(
-      () => resolveDone(0),
-      () => resolveDone(1),
-    );
+  const onSignal = () => {
+    abort.abort();
+    void daemon?.stop();
   };
+  for (const sig of STOP_SIGNALS) process.on(sig, onSignal);
   try {
-    daemon = await startDaemon({ onShutdownRequest: stop });
+    daemon = await startDaemon({ signal: abort.signal });
   } catch (err) {
     for (const line of describe(err)) process.stderr.write(`${line}\n`);
     return exitCodeFor(err);
   }
-  for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) process.once(sig, stop);
-  return done;
+  const running = daemon;
+  // last resort: never leave our token file behind (K2); the lock is taken over by the next
+  // daemon anyway (F-001: dead PID / start time)
+  process.once("exit", () => running.removeAuthFileSync());
+  process.once("uncaughtException", (err) => {
+    process.stderr.write(`webhub daemon: internal error (${err.name})\n`);
+    const force = setTimeout(() => process.exit(1), STOP_GRACE_MS + 1_000);
+    void running.stop().finally(() => {
+      clearTimeout(force);
+      process.exit(1);
+    });
+  });
+  await running.stopped;
+  return 0;
 }
 
 function isMain(): boolean {
