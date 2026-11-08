@@ -11,10 +11,12 @@
 | 1 | F-000 Repo scaffolding | `done` | [spec](features/F-000-scaffolding.md) |
 | 2 | F-001 Config + `$WEBHUB_HOME` + migration | `done` | [spec](features/F-001-config.md) |
 | 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
-| 4 | F-003 Daemon + API server + auth | `planned` | [spec](features/F-003-daemon-api-auth.md) |
+| 4 | F-003 Daemon + API server + auth | `done` | [spec](features/F-003-daemon-api-auth.md) |
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
+
+**ติดตามต่อ:** F-001 lock race test (พบระหว่าง W3 ของ F-003) → ปิดแล้วด้วย [CR-002](changes/CR-002-lock-race-test.md): โค้ด lock ถูก, test ตั้งสมมติฐานผิด (ผู้ชนะต่อกัน = ถูกต้อง)
 
 ---
 
@@ -47,7 +49,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-001 | Config + `$WEBHUB_HOME` + schemaVersion + migration | §11.3, §21.4, §21.6 | สิทธิ์ไฟล์ `data/`, secrets แยกไฟล์ | migration ทำข้อมูลเสีย → backup ก่อน migrate |
 | F-002 | Platform layer (Windows): ports, process, elevate, notify | §21.1 | `elevate()` แสดงสิ่งที่จะทำ, ไม่ต่อ string เข้า shell | PowerShell ช้า / เปลี่ยนตาม version Windows |
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
-| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv | — |
+| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; login URL ไม่ผ่าน argv (F-003 K3); รอ `auth.pid` = PID ที่ spawn (H16); ตรวจว่า**ทุก listener** บน http port (v4/v6) เป็น nginx ของ webhub ก่อนเปิด link (N1, Q1); log ของ daemon ต้อง rotate / จำกัดขนาด**เป็น byte** หรือรวมบรรทัด 4xx ซ้ำ (F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (Windows เขียน pipe แบบ sync: reader หยุดอ่าน → daemon ค้างถาวร — security-8 Y2); route แบบ stream (`logs -f`) ต้องส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — U1/U2) | — |
 | F-005 | Profile loader + JSON Schema + built-in (static, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
 | F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
@@ -56,7 +58,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 ### MVP-2 — Routing
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro` | **spike**: Next ≥15 `allowedDevOrigins` |
+| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4); ใส่ `X-Webhub-Proxy` (ลบค่าจาก client, config ACL เฉพาะ user, เขียนใหม่ทุก daemon start) แล้วเปิด `browserLogin` (F-003 N1); bind `127.0.0.1` **และ** `[::1]` (ห้าม wildcard อย่างเดียว) + ตรวจทุก listener บน port ก่อนเปิด login / ทุก link (F-003 Q1); ห้าม log request header (Q5); `/` ของ hub. ห้าม redirect (N5); upstream keepalive pool ของ nginx ต่อ daemon ≪ 64 (`MAX_CONNECTIONS` เป็นโควตารวมของ CLI + browser + nginx + WS — F-003 security-7 W2, review-8 X2) | **spike**: Next ≥15 `allowedDevOrigins` |
 | F-010 | Static serving + publicDir + deny-list | §10.4 | `.git`/`.env`/source ไม่หลุด | deny-list ไม่ครบ |
 | F-011 | Hosts sync (UAC, block webhub) | §10.1 | แก้เฉพาะ block ของตัวเอง, backup hosts | AV/EDR บล็อกการเขียน hosts |
 | F-012 | Lite mode proxy (Node) | §21.2 | logic เดียวกับ nginx, bind 127.0.0.1 | พฤติกรรมต่างจาก nginx |
@@ -85,12 +87,12 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-023 | Provision + env injection + disable DB services | §5.3–5.5 | role ต่อ site (least privilege) | dependents ของ DB |
 | F-024 | Backup / restore | §5.6 | ไฟล์ backup สิทธิ์ user เท่านั้น | restore ไม่ครบ |
 | F-025 | Import จาก volume เดิม + pre-upgrade check | §5.5, §19.2 | DB ชั่วคราวไม่ publish port | ข้อมูลเสีย → ไม่ลบ volume เดิม |
-| F-026 | เครื่องมือเสริม (CloudBeaver, RedisInsight, Hoppscotch) + session ต่อ tool host | §5.7, §10.3, §22.6 | ไม่ส่ง master token เข้า tool | tool image มีช่องโหว่ → pin digest |
+| F-026 | เครื่องมือเสริม (CloudBeaver, RedisInsight, Hoppscotch) + session ต่อ tool host | §5.7, §10.3, §22.6 | ไม่ส่ง master token เข้า tool; ออกแบบ `/_auth` เอง — cookie อย่างเดียวรั่วข้าม port ได้ (F-003 L1/L4) | tool image มีช่องโหว่ → pin digest |
 
 ### MVP-6 — Dashboard + Ops
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check | — |
+| F-027 | Dashboard (Sites, Port Map, Data Hub, Runtimes) | §14 | CSP, ไม่มี inline script, Origin check; key จาก `#k=` → sessionStorage + `replaceState` ทันที, ส่ง `X-Webhub-Session` ทุก call (F-003 L1); WS: ใช้ `delay` ของ `checkUpgrade`, ปฏิเสธ absolute-form target, echo เฉพาะ `protocol` ที่คืนมา (F-003 Q6); WS: handler ของ `upgrade` ต้องผ่าน busy check ของ `refusePipelining` + `checkUpgrade`, มี idle/ping timeout, จำกัด WS ต่อ host < `MAX_CONNECTIONS` — WS ตัวเดียวต่อ tab (multiplex) เพราะ 64 connection เป็นโควตารวม (F-003 security-8 Y5, review-8 X2); SPA fallback ต้องเป็น wildcard route ชัดเจน (scope + access) — not-found handler ไม่ถูกเรียก เพราะ 404 ตอบใน `onRequest` (review-8 X5) | — |
 | F-028 | Autostart + tray | §20 | Task Scheduler ระดับ user (ไม่ admin) | — |
 | F-029 | Metrics + notify | §20 | — | — |
 
@@ -119,4 +121,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-F-003 W3 (planned) → แล้ว W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)
+F-003 `done` (+ CR-002) → W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)
