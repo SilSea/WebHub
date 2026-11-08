@@ -1,8 +1,13 @@
 /**
- * API server (F-003 §3.2–3.8, DESIGN §10.3). Every request passes, in order:
- * exactly one allowed Host (else 421) → origin-form target only → no OPTIONS / CORS (405) →
- * route scope (api host vs `webhub.internal`) → authentication per route `access` (default:
- * bearer or session) → CSRF rules for unsafe methods. Routes of later features go through
+ * API server (F-003 §3.2–3.8, DESIGN §10.3). Every request Fastify sees passes, in order:
+ * exactly one allowed Host (else 421) → 503 while closing → origin-form target only → no
+ * OPTIONS / CORS (405) → unknown route 404 (before any body is read) → route scope (api host vs
+ * `webhub.internal`) → authentication per route `access` (default: bearer or session) → CSRF
+ * rules for unsafe methods. Answered before Fastify, without the Host check and without a log
+ * line (static bodies + security headers, browsers cannot trigger them): Node parser errors
+ * (400/408/431) and an `Expect` other than `100-continue` (417). Every way Node hands out a
+ * request must go through `refusePipelining`'s check — new server listeners (e.g. `upgrade` in
+ * F-027) included, and the daemon listens on ONE address only (security-8 Y4). Routes of later features go through
  * `RouteRegistrar` and get all of this by default; a public route must say
  * `access: "public"` explicitly. Browser sessions exist only on named hosts (`hub.`/`db.`),
  * never on `127.0.0.1:<port>` (security-1 K1), and need the cookie plus the port-scoped key
@@ -210,6 +215,18 @@ function writeClientError(err: Error & { code?: string }, socket: Socket): void 
   );
 }
 
+export const LOG_PATH_MAX = 200;
+
+/** Path as logged: no query, at most LOG_PATH_MAX chars, nothing for a foreign Host (Y1). */
+export function logPath(raw: string, status: number): string {
+  if (status === 421) return "(foreign host)";
+  if (!raw.startsWith("/")) return "(invalid target)";
+  const path = raw.split("?")[0] ?? "";
+  return path.length > LOG_PATH_MAX
+    ? `${path.slice(0, LOG_PATH_MAX)}…(+${path.length - LOG_PATH_MAX})`
+    : path;
+}
+
 /** Sockets with a request whose response has not finished yet. */
 const busy = new WeakSet<Socket>();
 
@@ -398,8 +415,9 @@ export async function createApi(
     const raw = req.raw.url ?? "";
     ctx.log({
       method: req.method,
-      // never the query (login codes, nonces) nor a foreign authority
-      path: raw.startsWith("/") ? raw.split("?")[0] : "(invalid target)",
+      // never the query (login codes, nonces) nor a foreign authority; bounded length, and
+      // nothing from a foreign Host — no log flood with attacker data (security-8 Y1)
+      path: logPath(raw, reply.statusCode),
       status: reply.statusCode,
       ms: Math.round(performance.now() - (req.webhub?.started ?? performance.now())),
     });

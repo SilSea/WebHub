@@ -8,7 +8,7 @@ import { Agent, createServer, request as httpRequest, type Server } from "node:h
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createApi } from "../../src/server/api.js";
+import { createApi, LOG_PATH_MAX, MAX_CONNECTIONS } from "../../src/server/api.js";
 import { helloProof, SessionStore } from "../../src/server/auth.js";
 import { DaemonClient, sendRaw } from "../../src/server/client.js";
 import { isServerError } from "../../src/server/errors.js";
@@ -285,11 +285,48 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     c.s.write(
       `POST /api/v1/x/echo HTTP/1.1\r\nHost: ${HOST}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 7\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n`,
     );
-    await wait(200);
+    const deadline = Date.now() + 3_000;
+    while (!c.text().includes("\r\n\r\n") && Date.now() < deadline) await wait(10);
     expect(c.text()).toMatch(/^HTTP\/1\.1 100 /);
     c.s.write('{"a":1}');
     await c.ended;
     expect(c.text()).toMatch(/HTTP\/1\.1 200 [\s\S]*"len":7/);
+  });
+
+  it("pipelined Expect: 100-continue requests are refused like any other (X1)", async () => {
+    for (const n of [3, 2_000]) {
+      counted = 0;
+      const c = await open();
+      c.s.write(
+        `GET /api/v1/x/count HTTP/1.1\r\nHost: ${HOST}\r\nExpect: 100-continue\r\n\r\n`.repeat(n),
+      );
+      await c.ended;
+      await wait(100);
+      expect(counted).toBeLessThanOrEqual(1);
+      expect(await connectionsDrop(1_000)).toBe(0);
+    }
+  });
+
+  it("logged paths are bounded; a foreign Host logs no attacker data (Y1)", async () => {
+    const long = `/${"a".repeat(15_000)}`;
+    for (const host of ["evil.example", HOST]) {
+      const c = await open();
+      c.s.write(`GET ${long} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+      await c.ended;
+    }
+    const lines = logs.map((l) => JSON.stringify(l));
+    expect(logs).toContainEqual(expect.objectContaining({ path: "(foreign host)", status: 421 }));
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        path: `/${"a".repeat(LOG_PATH_MAX - 1)}…(+${15_001 - LOG_PATH_MAX})`,
+      }),
+    );
+    for (const l of lines) expect(l.length).toBeLessThan(512);
+  });
+
+  it("the API listens on exactly one address, so every guard covers every socket (Y4)", () => {
+    expect(app.addresses()).toHaveLength(1);
+    expect(app.addresses()[0]?.address).toBe("127.0.0.1");
   });
 
   it("a body sent to an unknown path is not parsed: 404, not 400 (W3)", async () => {
@@ -303,10 +340,17 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
 
   it("MAX_CONNECTIONS sockets each sending one chunk of tiny requests: all cut, API answers (W2)", async () => {
     const chunk = "GET / HTTP/1.1\r\n\r\n".repeat(3_600);
-    const clients = await Promise.all(Array.from({ length: 60 }, () => open()));
+    let accepted = 0;
+    let dropped = 0;
+    app.server.on("connection", () => accepted++);
+    app.server.on("drop", () => dropped++);
+    const clients = await Promise.all(Array.from({ length: MAX_CONNECTIONS - 4 }, () => open()));
     for (const c of clients) c.s.write(chunk);
     await Promise.all(clients.map((c) => c.ended));
     expect(await connectionsDrop(2_000)).toBe(0);
+    // every socket really reached the parser, none was dropped by the cap
+    expect(accepted).toBe(MAX_CONNECTIONS - 4);
+    expect(dropped).toBe(0);
     const ok = await open();
     ok.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`);
     await ok.ended;
