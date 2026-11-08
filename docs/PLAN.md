@@ -46,7 +46,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-001 | Config + `$WEBHUB_HOME` + schemaVersion + migration | §11.3, §21.4, §21.6 | สิทธิ์ไฟล์ `data/`, secrets แยกไฟล์ | migration ทำข้อมูลเสีย → backup ก่อน migrate |
 | F-002 | Platform layer (Windows): ports, process, elevate, notify | §21.1 | `elevate()` แสดงสิ่งที่จะทำ, ไม่ต่อ string เข้า shell | PowerShell ช้า / เปลี่ยนตาม version Windows |
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
-| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv | — |
+| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; login URL ไม่ผ่าน argv (F-003 K3); รอ `auth.pid` = PID ที่ spawn (H16); ตรวจว่า http port เป็น nginx ของ webhub ก่อนเปิด link (N1) | — |
 | F-005 | Profile loader + JSON Schema + built-in (static, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
 | F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
@@ -55,7 +55,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 ### MVP-2 — Routing
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4) | **spike**: Next ≥15 `allowedDevOrigins` |
+| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4); ใส่ `X-Webhub-Proxy` (ลบค่าจาก client, config ACL เฉพาะ user, เขียนใหม่ทุก daemon start) แล้วเปิด `browserLogin` (F-003 N1); `/` ของ hub. ห้าม redirect (N5) | **spike**: Next ≥15 `allowedDevOrigins` |
 | F-010 | Static serving + publicDir + deny-list | §10.4 | `.git`/`.env`/source ไม่หลุด | deny-list ไม่ครบ |
 | F-011 | Hosts sync (UAC, block webhub) | §10.1 | แก้เฉพาะ block ของตัวเอง, backup hosts | AV/EDR บล็อกการเขียน hosts |
 | F-012 | Lite mode proxy (Node) | §21.2 | logic เดียวกับ nginx, bind 127.0.0.1 | พฤติกรรมต่างจาก nginx |

@@ -2,31 +2,75 @@
  * Client of the daemon API, used by the CLI (F-004). Before the token is ever sent, the
  * server must prove it knows it (F-003 §3.5): any other program listening on the API port
  * while the daemon is down gets a nonce, never the token.
+ *
+ * The proof is bound to ONE TCP connection (security-3 N2): every `request()` opens a fresh
+ * keep-alive connection, proves the daemon on it, then sends the bearer on that same
+ * connection. If that connection is gone, the request fails — the token never travels on a
+ * connection that has not proven itself (a program that grabs the port after the daemon
+ * stopped gets only nonces).
  */
 import { randomBytes } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { Agent, type ClientRequestArgs, request as httpRequest } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Paths } from "../config/home.js";
 import { readDoc } from "../store/json-store.js";
 import { helloProof, safeEqual } from "./auth.js";
 import { type AuthFile, authFileSpec } from "./auth-file.js";
-import { ServerError } from "./errors.js";
+import { isServerError, ServerError } from "./errors.js";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 
-interface RawResponse {
+export interface RawResponse {
   status: number;
   body: unknown;
 }
 
-function send(
+export interface SendOptions {
+  /** Overall deadline (default 10 s — not only idle time, H13). */
+  timeoutMs?: number;
+  /** Connection to use (default: a new one, closed after the response). */
+  agent?: Agent;
+}
+
+export type SendFn = (
   port: number,
   method: string,
   path: string,
   headers: Record<string, string>,
   body: string | undefined,
-  timeoutMs = TIMEOUT_MS,
-): Promise<RawResponse> {
+  opts?: SendOptions,
+) => Promise<RawResponse>;
+
+/**
+ * Keep-alive agent that opens at most ONE connection. A second attempt (the proven connection
+ * was closed) fails before a single byte is written.
+ */
+export class OneConnectionAgent extends Agent {
+  #opened = false;
+  constructor() {
+    super({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+  }
+
+  override createConnection(
+    options: ClientRequestArgs,
+    callback?: (err: Error | null, stream: Duplex) => void,
+  ): Duplex | null | undefined {
+    if (this.#opened) {
+      const err = Object.assign(new Error("connection lost after the daemon proof"), {
+        code: "EPROOFLOST",
+      });
+      process.nextTick(() => callback?.(err, undefined as never));
+      return undefined;
+    }
+    this.#opened = true;
+    // biome-ignore lint/suspicious/noExplicitAny: Agent#createConnection is untyped on the base
+    return (Agent.prototype as any).createConnection.call(this, options, callback);
+  }
+}
+
+const send: SendFn = (port, method, path, headers, body, opts = {}) => {
+  const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const req = httpRequest(
       {
@@ -45,7 +89,7 @@ function send(
               }),
         },
         timeout: timeoutMs,
-        agent: false,
+        agent: opts.agent ?? false,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -83,35 +127,27 @@ function send(
     req.on("error", reject);
     req.end(body);
   });
-}
-
-function unreachable(err: unknown): ServerError {
-  const code = (err as NodeJS.ErrnoException).code;
-  if (code === "ECONNREFUSED") return notRunning();
-  return new ServerError("DAEMON_UNREACHABLE", "could not talk to the webhub daemon", {
-    details: [code ?? (err instanceof Error ? err.message : "error")],
-  });
-}
+};
 
 const notRunning = () =>
   new ServerError("DAEMON_NOT_RUNNING", "the webhub daemon is not running", {
     hint: "Start it (webhub daemon start).",
   });
 
-export type SendFn = (
-  port: number,
-  method: string,
-  path: string,
-  headers: Record<string, string>,
-  body: string | undefined,
-) => Promise<RawResponse>;
+function unreachable(err: unknown): ServerError {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "ECONNREFUSED") return notRunning();
+  return new ServerError("DAEMON_UNREACHABLE", "could not talk to the webhub daemon", {
+    details: [code ?? (err instanceof Error ? err.name : "error")],
+  });
+}
 
 export class DaemonClient {
-  #verified = false;
   #auth: AuthFile;
   /**
-   * @param reload re-reads auth.json (undefined = gone). When a proof fails, the daemon may
-   *   have restarted with a new token: the client reloads once before reporting an impostor (J7).
+   * @param reload re-reads auth.json (undefined = gone). When the proof fails (wrong proof or
+   *   refused), the daemon may have restarted with a new token / port: the client reloads once
+   *   and proves again before giving up (J7, M6). The token is never sent before a proof.
    */
   constructor(
     auth: AuthFile,
@@ -127,26 +163,71 @@ export class DaemonClient {
 
   /** Proves the server on the port is the daemon that wrote auth.json (no token sent). */
   async verify(): Promise<void> {
-    if (this.#verified) return;
-    try {
-      await this.#prove();
-    } catch (err) {
-      if (this.reload === undefined) throw err;
-      const fresh = await this.reload().catch(() => undefined);
-      if (fresh === undefined) throw notRunning();
-      if (fresh.token === this.#auth.token && fresh.port === this.#auth.port) throw err;
-      this.#auth = fresh;
-      await this.#prove();
-    }
-    this.#verified = true;
+    await this.#withProof(async () => undefined);
   }
 
-  async #prove(): Promise<void> {
+  /** Authenticated JSON request, on the connection that was just proven. Non-2xx → API_ERROR. */
+  async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await this.#withProof(async (agent) => {
+      try {
+        return await this.sendFn(
+          this.#auth.port,
+          method,
+          path,
+          { authorization: `Bearer ${this.#auth.token}` },
+          body === undefined ? undefined : JSON.stringify(body),
+          { agent },
+        );
+      } catch (err) {
+        throw unreachable(err);
+      }
+    });
+    if (res.status >= 200 && res.status < 300) return res.body as T;
+    const e = (res.body as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
+    throw new ServerError(
+      "API_ERROR",
+      typeof e?.message === "string" ? e.message : `daemon answered HTTP ${res.status}`,
+      {
+        status: res.status,
+        ...(typeof e?.code === "string" ? { apiCode: e.code } : {}),
+      },
+    );
+  }
+
+  /** New connection → proof (reload auth.json once if it fails) → `fn` on that connection. */
+  async #withProof<T>(fn: (agent: OneConnectionAgent) => Promise<T>): Promise<T> {
+    let agent = new OneConnectionAgent();
+    try {
+      try {
+        await this.#prove(agent);
+      } catch (err) {
+        if (
+          this.reload === undefined ||
+          !(isServerError(err, "DAEMON_IMPOSTOR") || isServerError(err, "DAEMON_NOT_RUNNING"))
+        ) {
+          throw err;
+        }
+        // only "file gone" means not running; an unsafe / corrupt file surfaces as is (M7)
+        const fresh = await this.reload();
+        if (fresh === undefined) throw notRunning();
+        if (fresh.token === this.#auth.token && fresh.port === this.#auth.port) throw err;
+        this.#auth = fresh;
+        agent.destroy();
+        agent = new OneConnectionAgent();
+        await this.#prove(agent);
+      }
+      return await fn(agent);
+    } finally {
+      agent.destroy();
+    }
+  }
+
+  async #prove(agent: OneConnectionAgent): Promise<void> {
     const { port, token } = this.#auth;
     const nonce = randomBytes(32).toString("base64url");
     let res: RawResponse;
     try {
-      res = await this.sendFn(port, "GET", `/api/v1/hello?n=${nonce}`, {}, undefined);
+      res = await this.sendFn(port, "GET", `/api/v1/hello?n=${nonce}`, {}, undefined, { agent });
     } catch (err) {
       throw unreachable(err);
     }
@@ -165,43 +246,14 @@ export class DaemonClient {
       );
     }
   }
-
-  /** Authenticated JSON request. Non-2xx → API_ERROR with the API's error code. */
-  async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-    await this.verify();
-    let res: RawResponse;
-    try {
-      res = await this.sendFn(
-        this.#auth.port,
-        method,
-        path,
-        { authorization: `Bearer ${this.#auth.token}` },
-        body === undefined ? undefined : JSON.stringify(body),
-      );
-    } catch (err) {
-      // the daemon may have restarted (new token) or another program took the port: prove again
-      this.#verified = false;
-      throw unreachable(err);
-    }
-    if (res.status === 401) this.#verified = false;
-    if (res.status >= 200 && res.status < 300) return res.body as T;
-    const e = (res.body as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
-    throw new ServerError(
-      "API_ERROR",
-      typeof e?.message === "string" ? e.message : `daemon answered HTTP ${res.status}`,
-      {
-        status: res.status,
-        ...(typeof e?.code === "string" ? { apiCode: e.code } : {}),
-      },
-    );
-  }
 }
 
 /**
- * Reads `data/auth.json` (missing → DAEMON_NOT_RUNNING) and returns a client.
- * The daemon writes auth.json just before it listens, so right after a start the port may
- * refuse for a moment (DAEMON_NOT_RUNNING) — F-004 retries until `auth.pid` is the process it
- * spawned (review-1 H16). A file left by a crash + refused port = not running (K2).
+ * Reads `data/auth.json` (missing → DAEMON_NOT_RUNNING) and returns a client that re-reads it
+ * when the daemon restarted. The daemon writes auth.json just before it listens, so right
+ * after a start the port may refuse for a moment (DAEMON_NOT_RUNNING) — F-004 retries until
+ * `auth.pid` is the process it spawned (review-1 H16). A file left by a crash + refused port =
+ * not running (K2).
  */
 export async function connectDaemon(paths: Paths): Promise<DaemonClient> {
   const read = async () => (await readDoc(paths.auth, authFileSpec, { home: paths.home }))?.value;

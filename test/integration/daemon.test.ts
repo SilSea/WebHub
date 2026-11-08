@@ -4,6 +4,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect, createServer as createNetServer } from "node:net";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Paths } from "../../src/config/home.js";
 import { startDaemon } from "../../src/daemon.js";
@@ -271,6 +272,53 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
       process.off("unhandledRejection", onUnhandled);
     }
   });
+
+  it("a close that never finishes is bounded: stopped, files gone (M3)", async () => {
+    const env = { ...process.env, WEBHUB_HOME: h.paths.home };
+    const d = await startDaemon({
+      env,
+      port: await freePort(),
+      log: () => {},
+      registrars: [(app) => app.addHook("onClose", () => new Promise<void>(() => {}))],
+    });
+    const t0 = performance.now();
+    await d.stop();
+    expect(await d.stopped).toEqual({ clean: false });
+    expect(performance.now() - t0).toBeLessThan(9_000);
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
+  });
+
+  for (const mode of ["twice", "null"] as const) {
+    it(`crash after ready (${mode}) → exit 1, class name only, nothing left (M4 / J6)`, async () => {
+      const port = await freePort();
+      const child = spawn(
+        process.execPath,
+        ["--import", pathToFileURL(join(ROOT, "test/fixtures/crash-daemon.mjs")).href, DAEMON],
+        {
+          env: {
+            ...process.env,
+            WEBHUB_HOME: h.paths.home,
+            WEBHUB_API_PORT: String(port),
+            WEBHUB_TEST_CRASH: mode,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      children.push(child);
+      let err = "";
+      child.stderr?.on("data", (b: Buffer) => {
+        err += b.toString();
+      });
+      const code = await new Promise<number | null>((r) => child.once("close", r));
+      expect(code).toBe(1);
+      expect(err).toMatch(/internal error \((Error|null)\)/);
+      expect(err).not.toContain("SECRET-MESSAGE");
+      expect(err).not.toMatch(/\n\s+at /); // no stack
+      expect(existsSync(h.paths.auth)).toBe(false);
+      expect(existsSync(h.paths.lock)).toBe(false);
+    });
+  }
 
   it("onAuthFile hands out a remover that only deletes our own file (J6)", async () => {
     const env = { ...process.env, WEBHUB_HOME: h.paths.home };

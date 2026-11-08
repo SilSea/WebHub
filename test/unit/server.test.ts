@@ -12,6 +12,7 @@ import {
   LOGIN_CODE_TTL_MS,
   normaliseHost,
   parseBearer,
+  proxySecretFor,
   readCookies,
   SESSION_IDLE_MS,
   SESSION_MAX_MS,
@@ -25,6 +26,8 @@ const TOKEN = randomBytes(32).toString("base64url");
 const HOSTS = { apiPort: 7400, httpPort: 80, domainSuffix: "localhost" };
 const API = "127.0.0.1:7400";
 const bearer = { authorization: `Bearer ${TOKEN}` };
+/** What webhub's nginx adds to every forwarded request (security-3 N1). */
+const via = { "x-webhub-proxy": proxySecretFor(TOKEN) };
 
 describe("Host allowlist (DNS rebinding)", () => {
   it("accepts exactly the API hosts and webhub.internal", () => {
@@ -77,7 +80,10 @@ describe("pure auth helpers", () => {
     expect(readCookies("a=1; webhub_session=x; b=2", "webhub_session")).toEqual(["x"]);
     expect(readCookies("webhub_session=x; webhub_session=y", "webhub_session")).toEqual(["x", "y"]);
     expect(readCookies(undefined, "webhub_session")).toEqual([]);
-    expect(readCookies(Array(9).fill("webhub_session=x").join("; "), "webhub_session")).toEqual([]);
+    const nine = Array.from({ length: 9 }, (_, i) => `webhub_session=v${i}`).join("; ");
+    expect(readCookies(nine, "webhub_session")).toEqual(
+      Array.from({ length: 8 }, (_, i) => `v${i}`),
+    );
     const c = sessionCookie("id");
     expect(c).toContain("HttpOnly");
     expect(c).toContain("SameSite=Strict");
@@ -86,11 +92,12 @@ describe("pure auth helpers", () => {
     expect(c).not.toContain("Max-Age"); // gone with the browser (L1)
   });
 
-  it("keyFromSubprotocols takes exactly one webhub-key.<key>", () => {
+  it("keyFromSubprotocols takes exactly one webhub-key.<key> next to webhub.v1", () => {
     const k = "K".repeat(43);
     expect(keyFromSubprotocols(`webhub.v1, webhub-key.${k}`)).toBe(k);
+    expect(keyFromSubprotocols(`webhub-key.${k}`)).toBeUndefined(); // nothing safe to echo (M8)
     expect(keyFromSubprotocols("webhub.v1")).toBeUndefined();
-    expect(keyFromSubprotocols(`webhub-key.${k}, webhub-key.x`)).toBeUndefined();
+    expect(keyFromSubprotocols(`webhub.v1, webhub-key.${k}, webhub-key.x`)).toBeUndefined();
     expect(keyFromSubprotocols(undefined)).toBeUndefined();
   });
 
@@ -186,6 +193,7 @@ describe("API server", () => {
         },
         log: (e) => logs.push(e),
         failDelayMs: 0,
+        browserLogin: true,
         ...extra,
       },
       registrars,
@@ -220,7 +228,7 @@ describe("API server", () => {
     );
     expect(link.statusCode).toBe(200);
     const url = new URL(link.json().url as string);
-    const res = await req("GET", `${url.pathname}${url.search}`, { host });
+    const res = await req("GET", `${url.pathname}${url.search}`, { host, ...via });
     expect(res.statusCode).toBe(303);
     const cookie = String(res.headers["set-cookie"]).split(";")[0] ?? "";
     const key = /^\/#k=([A-Za-z0-9_-]{43})$/.exec(String(res.headers.location))?.[1] ?? "";
@@ -292,8 +300,8 @@ describe("API server", () => {
     );
     const url = new URL(link.json().url as string);
     const path = `${url.pathname}${url.search}`;
-    expect((await req("GET", path, { host: "hub.localhost" })).statusCode).toBe(401); // other host burns it
-    expect((await req("GET", path, { host: "db.localhost" })).statusCode).toBe(401);
+    expect((await req("GET", path, { host: "hub.localhost", ...via })).statusCode).toBe(401); // other host burns it
+    expect((await req("GET", path, { host: "db.localhost", ...via })).statusCode).toBe(401);
     const bad = await req(
       "POST",
       "/api/v1/login-links",
@@ -324,21 +332,57 @@ describe("API server", () => {
     expect(
       (await req("GET", "/api/v1/status", { ...a.as, "x-webhub-session": "x" })).statusCode,
     ).toBe(401);
-    // a tossed cookie next to the real one does not log the user out (no DoS)
-    const tossed = { ...a.as, cookie: `webhub_session=${"A".repeat(43)}; ${a.cookie}` };
+    // tossed values never become a session (no fixation): a few next to the real one are skipped
+    const junk = (n: number) =>
+      Array.from({ length: n }, () => `webhub_session=${randomBytes(32).toString("base64url")}`);
+    const tossed = { ...a.as, cookie: [...junk(7), a.cookie].join("; ") };
     expect((await req("GET", "/api/v1/status", tossed)).statusCode).toBe(200);
-    // ... nor does another valid session's cookie get used with this key
+    // ... nor is another valid session's cookie usable with this key
     const mixed = { ...a.as, cookie: `${b.cookie}; ${a.cookie}` };
     expect((await req("GET", "/api/v1/status", mixed)).statusCode).toBe(200);
+    // accepted residual (N3 / M2): pushing the real value past 8 (or overwriting it) = logout
+    const flood = { ...a.as, cookie: [...junk(8), a.cookie].join("; ") };
+    expect((await req("GET", "/api/v1/status", flood)).statusCode).toBe(401);
+  });
+
+  it("login only through webhub's nginx; no links before nginx exists (N1)", async () => {
+    const link = await req("POST", "/api/v1/login-links", bearer);
+    const url = new URL(link.json().url as string);
+    const path = `${url.pathname}${url.search}`;
+    // a squatter on the http port got the link and redeems it directly: refused, code kept
+    for (const h of [
+      {},
+      { "x-webhub-proxy": "x" },
+      { "x-webhub-proxy": proxySecretFor("other") },
+    ]) {
+      const r = await req("GET", path, { host: "hub.localhost", ...h });
+      expect(r.statusCode).toBe(401);
+      expect(r.headers["set-cookie"]).toBeUndefined();
+    }
+    const internal = await req("GET", path, {
+      host: "webhub.internal",
+      "x-forwarded-host": "hub.localhost",
+    });
+    expect(internal.statusCode).toBe(401);
+    expect((await req("GET", path, { host: "hub.localhost", ...via })).statusCode).toBe(303);
+    // browser login off (default until F-009) → no links at all
+    await app.close();
+    await make({ browserLogin: false });
+    const off = await req("POST", "/api/v1/login-links", bearer);
+    expect(off.statusCode).toBe(503);
+    expect(off.json().error.code).toBe("LOGIN_UNAVAILABLE");
   });
 
   it("HEAD on a login link is not a login and does not burn the code (J4)", async () => {
     const link = await req("POST", "/api/v1/login-links", bearer);
     const url = new URL(link.json().url as string);
-    const head = await req("HEAD", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    const head = await req("HEAD", `${url.pathname}${url.search}`, {
+      host: "hub.localhost",
+      ...via,
+    });
     expect([404, 405]).toContain(head.statusCode);
     expect(head.headers["set-cookie"]).toBeUndefined();
-    const get = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    const get = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost", ...via });
     expect(get.statusCode).toBe(303);
   });
 
@@ -364,7 +408,7 @@ describe("API server", () => {
     expect(link.statusCode).toBe(200);
     const url = new URL(link.json().url as string);
     expect(url.host).toBe("hub.localhost"); // default = dashboard host, never the IP host (K1)
-    const res = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost" });
+    const res = await req("GET", `${url.pathname}${url.search}`, { host: "hub.localhost", ...via });
     expect(res.statusCode).toBe(303);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["referrer-policy"]).toBe("no-referrer");
@@ -391,7 +435,7 @@ describe("API server", () => {
     // a valid code for hub cannot be redeemed on the IP host
     const link = await req("POST", "/api/v1/login-links", bearer);
     const url = new URL(link.json().url as string);
-    const onIp = await req("GET", `${url.pathname}${url.search}`, { host: API });
+    const onIp = await req("GET", `${url.pathname}${url.search}`, { host: API, ...via });
     expect(onIp.statusCode).toBe(401);
     expect(onIp.headers["set-cookie"]).toBeUndefined();
     // a hub session replayed with the IP Host is useless, even with its key
@@ -410,7 +454,10 @@ describe("API server", () => {
     expect(badEvil.statusCode).toBe(421);
     expect(badEvil.body).not.toContain("E0");
     // logged, without the target (J5)
-    expect(logs.filter((l) => l.path === "(invalid target)" && l.status === 400)).toHaveLength(2);
+    expect(logs.filter((l) => l.path === "(invalid target)")).toEqual([
+      { method: "GET", path: "(invalid target)", status: 400 },
+      { method: "GET", path: "(invalid target)", status: 421 },
+    ]);
     expect(JSON.stringify(logs)).not.toContain("E0");
     expect((await req("OPTIONS", "/api/v1/status")).headers.allow).toBe("GET, HEAD, POST");
   });
@@ -511,14 +558,16 @@ describe("API server", () => {
       const u = await link();
       const bad = await req("GET", `${u.pathname}${u.search}`, {
         ...internal,
+        ...via,
         "x-forwarded-host": xfh,
       });
       expect(bad.statusCode, xfh).toBe(401);
     }
-    // login through nginx (internal Host + forwarded host)
+    // login through nginx (internal Host + forwarded host + proxy secret)
     const url = await link();
     const res = await req("GET", `${url.pathname}${url.search}`, {
       ...internal,
+      ...via,
       "x-forwarded-host": "hub.localhost",
     });
     expect(res.statusCode).toBe(303);
@@ -594,18 +643,30 @@ describe("API server", () => {
       ok: true,
       host: API,
       auth: "bearer",
+      protocol: undefined,
     });
     const origin = "http://hub.localhost";
     expect(up({ ...as, origin })).toMatchObject({ ok: true, auth: "session" });
-    // browsers' WebSocket: the key as a subprotocol
-    expect(
+    // browsers' WebSocket: the key as a subprotocol; the server echoes webhub.v1, never the key
+    const ws = (k: string, c = cookie) =>
       up({
         host: "hub.localhost",
-        cookie,
+        cookie: c,
         origin,
-        "sec-websocket-protocol": `webhub.v1, webhub-key.${key}`,
-      }),
-    ).toMatchObject({ ok: true, auth: "session" });
+        "sec-websocket-protocol": `webhub.v1, webhub-key.${k}`,
+      });
+    expect(ws(key)).toEqual({
+      ok: true,
+      host: "hub.localhost",
+      auth: "session",
+      protocol: "webhub.v1",
+    });
+    expect(
+      up({ host: "hub.localhost", cookie, origin, "sec-websocket-protocol": `webhub-key.${key}` }),
+    ).toMatchObject({ ok: false, status: 401 }); // key only: nothing safe to echo (M8)
+    const other = await login("hub.localhost");
+    expect(ws(other.key)).toMatchObject({ ok: false, status: 401 }); // another session's key
+    expect(ws(key, `webhub_session=${"A".repeat(43)}; ${cookie}`)).toMatchObject({ ok: true }); // tossed
     expect(up({ host: "hub.localhost", cookie, origin })).toMatchObject({ ok: false, status: 401 }); // no key (L1)
     expect(up(as)).toMatchObject({ ok: false, status: 403 });
     expect(up({ ...as, origin: "http://evil.com" })).toMatchObject({ ok: false, status: 403 });
@@ -624,6 +685,7 @@ describe("API server", () => {
     expect(up({ host: API, authorization: "Bearer nope" })).toMatchObject({
       ok: false,
       status: 401,
+      delay: true, // caller waits like HTTP does
     });
     expect(
       checkUpgrade({ rawHeaders: ["Host", API, "host", API], headers: { host: API } }, opts),
@@ -690,7 +752,40 @@ describe("client handshake", () => {
     await expect(refused.verify()).rejects.toSatisfy((e) => isServerError(e, "DAEMON_NOT_RUNNING"));
   });
 
-  it("after a daemon restart (401, new token) the client reloads auth.json — not an impostor (J7)", async () => {
+  it("the proof is fresh for every request (N2) and runs on the request's own connection", async () => {
+    const order: string[] = [];
+    const agents = new Set<unknown>();
+    const daemon: SendFn = async (_p, _m, path, headers, _b, opts) => {
+      agents.add(opts?.agent);
+      order.push(
+        path.startsWith("/api/v1/hello") ? "hello" : `req:${headers.authorization !== undefined}`,
+      );
+      if (path.startsWith("/api/v1/hello")) {
+        const n = new URL(path, "http://x").searchParams.get("n") ?? "";
+        return { status: 200, body: { proof: helloProof(TOKEN, n) } };
+      }
+      return { status: 200, body: { ok: true } };
+    };
+    const c = new DaemonClient(auth, daemon);
+    await c.request("GET", "/a");
+    await c.request("POST", "/b");
+    expect(order).toEqual(["hello", "req:true", "hello", "req:true"]);
+    expect(agents.size).toBe(2); // one connection (agent) per request, shared by its proof
+    expect(agents.has(undefined)).toBe(false);
+  });
+
+  it("a reload error is not reported as 'not running' (M7)", async () => {
+    const c = new DaemonClient(
+      auth,
+      async () => ({ status: 200, body: { proof: "forged" } }),
+      async () => {
+        throw new Error("unsafe path");
+      },
+    );
+    await expect(c.verify()).rejects.toThrow("unsafe path");
+  });
+
+  it("after a daemon restart (new token) the client reloads auth.json — not an impostor (J7/M6)", async () => {
     const NEW = randomBytes(32).toString("base64url");
     let serverToken = TOKEN;
     const sent: string[] = [];
@@ -709,17 +804,15 @@ describe("client handshake", () => {
     expect(await c.request("GET", "/api/v1/status")).toEqual({ ok: true });
     serverToken = NEW; // restart
     file = { ...auth, token: NEW };
-    await expect(c.request("GET", "/api/v1/status")).rejects.toSatisfy(
-      (e) => isServerError(e, "API_ERROR") && e.status === 401,
-    );
-    expect(await c.request("GET", "/api/v1/status")).toEqual({ ok: true }); // re-verified with NEW
-    expect(sent.at(-1)).toBe(`Bearer ${NEW}`);
+    // first call after the restart already works: proof fails → reload → prove again (M6)
+    expect(await c.request("GET", "/api/v1/status")).toEqual({ ok: true });
+    expect(sent).toEqual([`Bearer ${TOKEN}`, `Bearer ${NEW}`]); // old token never sent again
     // daemon stopped and its file gone → not running (not "impostor")
     serverToken = "other";
     file = undefined;
-    await c.request("GET", "/api/v1/status").catch(() => {});
     await expect(c.request("GET", "/api/v1/status")).rejects.toSatisfy((e) =>
       isServerError(e, "DAEMON_NOT_RUNNING"),
     );
+    expect(sent).toHaveLength(2);
   });
 });

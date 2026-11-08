@@ -14,6 +14,10 @@ export const SESSION_COOKIE = "webhub_session";
 export const SESSION_HEADER = "x-webhub-session";
 /** WebSocket clients cannot set headers: the key travels as a subprotocol `webhub-key.<key>`. */
 export const SESSION_SUBPROTOCOL_PREFIX = "webhub-key.";
+/** The subprotocol a webhub WebSocket server echoes (never the key one). */
+export const WS_PROTOCOL = "webhub.v1";
+/** Header nginx adds with `proxySecretFor(token)` (security-3 N1). */
+export const PROXY_HEADER = "x-webhub-proxy";
 export const INTERNAL_HOST = "webhub.internal";
 export const SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
 export const SESSION_MAX_MS = 24 * 60 * 60 * 1000;
@@ -111,23 +115,36 @@ export function helloProof(token: string, nonce: string): string {
   return createHmac("sha256", token).update(`webhub-hello:${nonce}`).digest("base64url");
 }
 
+/**
+ * Secret webhub's nginx adds to every request it forwards (`X-Webhub-Proxy`, F-009 writes it
+ * into its user-only config and strips any client copy). A login code is redeemed only with
+ * it: a program squatting the http port receives the code but cannot turn it into a session
+ * (security-3 N1). Derived from the per-start token → changes with every daemon start.
+ */
+export function proxySecretFor(token: string): string {
+  return createHmac("sha256", token).update("webhub-proxy").digest("base64url");
+}
+
 // ---------- cookies ----------
 
 /**
- * All values of `name` in a Cookie header (more than 8 → none). Several values appear when
- * another port of the same host tosses its own cookie (security-2 L1): the session check tries
- * each and only the one bound to the key header can match, so tossing cannot log anyone out.
+ * The first 8 values of `name` in a Cookie header. Several values appear when another port of
+ * the same host tosses its own cookie (security-2 L1): the session check tries each and only
+ * the one bound to the key header matches, so a tossed value never becomes a session (no
+ * fixation). It CAN still log the user out (overwrite of the same name/path from another port,
+ * or pushing the real value past 8) — accepted residual risk until HTTPS + `__Host-` (N3/M2).
  */
 export function readCookies(header: string | undefined, name: string): string[] {
   if (header === undefined) return [];
   const out: string[] = [];
   for (const part of header.split(";")) {
+    if (out.length === MAX_COOKIE_VALUES) break;
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     if (part.slice(0, eq).trim() !== name) continue;
     out.push(part.slice(eq + 1).trim());
   }
-  return out.length <= MAX_COOKIE_VALUES ? out : [];
+  return out;
 }
 
 /**
@@ -183,14 +200,17 @@ export interface UpgradeRequest {
   };
 }
 
-/** Session key from a `Sec-WebSocket-Protocol` list (`webhub-key.<key>`). Never echo it back. */
+/**
+ * Session key from a `Sec-WebSocket-Protocol` list. Valid only as exactly one
+ * `webhub-key.<key>` next to `webhub.v1` (the protocol the server echoes — never the key one;
+ * a browser fails the handshake when no offered protocol is echoed — review-3 M8).
+ */
 export function keyFromSubprotocols(value: string | string[] | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
-  const found = value
-    .split(",")
-    .map((p) => p.trim())
-    .filter((p) => p.startsWith(SESSION_SUBPROTOCOL_PREFIX));
-  return found.length === 1 ? found[0]?.slice(SESSION_SUBPROTOCOL_PREFIX.length) : undefined;
+  const list = value.split(",").map((p) => p.trim());
+  const keys = list.filter((p) => p.startsWith(SESSION_SUBPROTOCOL_PREFIX));
+  if (keys.length !== 1 || !list.includes(WS_PROTOCOL)) return undefined;
+  return keys[0]?.slice(SESSION_SUBPROTOCOL_PREFIX.length);
 }
 
 /**
@@ -216,29 +236,40 @@ function headerKey(headers: {
 }
 
 export type UpgradeResult =
-  | { ok: true; host: string; auth: Exclude<AuthKind, "none"> }
-  | { ok: false; status: 401 | 403 | 421; reason: string };
+  | {
+      ok: true;
+      host: string;
+      auth: Exclude<AuthKind, "none">;
+      /** Subprotocol to answer with (`webhub.v1` when offered), never the key one. */
+      protocol: string | undefined;
+    }
+  | {
+      ok: false;
+      status: 401 | 403 | 421;
+      reason: string;
+      /** Wrong bearer token: the caller waits 50 ms before answering (as HTTP — §3.3). */
+      delay: boolean;
+    };
 
 /**
  * Same rules as an unsafe HTTP request (an upgrade is never "safe"): one allowed API Host,
  * valid bearer or a session for that host (cookie + key from the `x-webhub-session` header or
- * the `webhub-key.<key>` subprotocol), and same-origin (Origin required with a session). The
- * caller must answer with its own subprotocol, never the key one.
+ * the `webhub-key.<key>` + `webhub.v1` subprotocols), and same-origin (Origin required with a
+ * session). The caller answers with `protocol`, never the key subprotocol.
  */
 export function checkUpgrade(
   req: UpgradeRequest,
   o: HostOptions & { token: string; sessions: SessionStore },
 ): UpgradeResult {
-  if (hostHeaderCount(req.rawHeaders) !== 1)
-    return { ok: false, status: 421, reason: "unknown host" };
+  const no = (status: 401 | 403 | 421, reason: string, delay = false) =>
+    ({ ok: false, status, reason, delay }) as const;
+  if (hostHeaderCount(req.rawHeaders) !== 1) return no(421, "unknown host");
   const h = classifyHost(req.headers.host, o);
-  if (h === undefined || h.kind !== "api")
-    return { ok: false, status: 421, reason: "unknown host" };
+  if (h === undefined || h.kind !== "api") return no(421, "unknown host");
   let auth: Exclude<AuthKind, "none">;
   if (req.headers.authorization !== undefined) {
     const t = parseBearer(req.headers.authorization);
-    if (t === undefined || !safeEqual(t, o.token))
-      return { ok: false, status: 401, reason: "not authorized" };
+    if (t === undefined || !safeEqual(t, o.token)) return no(401, "not authorized", true);
     auth = "bearer";
   } else if (
     sessionFor(
@@ -251,7 +282,7 @@ export function checkUpgrade(
   ) {
     auth = "session";
   } else {
-    return { ok: false, status: 401, reason: "not authorized" };
+    return no(401, "not authorized");
   }
   const site = req.headers["sec-fetch-site"];
   const problem = csrfProblem(
@@ -260,8 +291,13 @@ export function checkUpgrade(
     h.host,
     auth,
   );
-  if (problem !== undefined) return { ok: false, status: 403, reason: problem };
-  return { ok: true, host: h.host, auth };
+  if (problem !== undefined) return no(403, problem);
+  const offered = req.headers["sec-websocket-protocol"];
+  const protocol =
+    typeof offered === "string" && offered.split(",").some((p) => p.trim() === WS_PROTOCOL)
+      ? WS_PROTOCOL
+      : undefined;
+  return { ok: true, host: h.host, auth, protocol };
 }
 
 // ---------- sessions + login codes (in memory) ----------

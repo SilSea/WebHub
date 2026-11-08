@@ -61,6 +61,10 @@ export interface RunningDaemon {
   removeAuthFileSync(): void;
 }
 
+/** Class name of anything thrown (`throw null` included) — never its message (H2, M4). */
+export const errorClass = (err: unknown): string =>
+  err instanceof Error ? err.name : err === null ? "null" : typeof err;
+
 const jsonLog = (entry: Record<string, unknown>) =>
   process.stdout.write(`${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
 
@@ -204,13 +208,25 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
       stopping ??= (async () => {
         const timer = setTimeout(() => running.server.closeAllConnections(), STOP_GRACE_MS);
         let clean = true;
+        let bound: NodeJS.Timeout | undefined;
         try {
-          await running.close();
+          // bounded: a hook of a later feature that never resolves must not hang the daemon
+          // with auth.json + lock left behind (review-3 M3)
+          await Promise.race([
+            running.close(),
+            new Promise<never>((_, reject) => {
+              bound = setTimeout(
+                () => reject(Object.assign(new Error("close timed out"), { name: "StopTimeout" })),
+                STOP_GRACE_MS + 1_000,
+              );
+            }),
+          ]);
         } catch (err) {
           // e.g. an onClose hook of a later feature throws: still clean up, never reject (J2)
           clean = false;
-          log({ level: "error", msg: "stop failed", error: (err as Error).name ?? "Error" });
+          log({ level: "error", msg: "stop failed", error: errorClass(err) });
         } finally {
+          clearTimeout(bound);
           clearTimeout(timer);
           await removeAuthFile(paths.auth, token).catch(() => {});
           await lock.release().catch(() => {});
@@ -280,19 +296,27 @@ export async function main(): Promise<number> {
   // handlers BEFORE start: a signal during the slow start-up stops cleanly once ready (H8)
   const abort = new AbortController();
   let daemon: RunningDaemon | undefined;
-  const onSignal = () => {
-    abort.abort();
-    void daemon?.stop();
-  };
-  for (const sig of STOP_SIGNALS) process.on(sig, onSignal);
   // last resort, installed BEFORE start (J6): never leave our token file behind (K2); the lock
   // is taken over by the next daemon anyway (F-001: dead PID / start time)
   let removeAuthSync: (() => void) | undefined;
   process.once("exit", () => removeAuthSync?.());
-  process.once("uncaughtException", (err) => {
-    process.stderr.write(`webhub daemon: internal error (${err.name})\n`);
+  let signals = 0;
+  const onSignal = () => {
+    // second signal while stopping = "stop now" (review-3 M3): sync cleanup + exit
+    if (++signals > 1) process.exit(1);
+    abort.abort();
+    void daemon?.stop();
+  };
+  for (const sig of STOP_SIGNALS) process.on(sig, onSignal);
+  // `on` + guard, not `once`: a second exception while stopping must not reach Node's default
+  // handler (prints message + stack — H2); class name only (M4)
+  let crashed = false;
+  process.on("uncaughtException", (err: unknown) => {
+    process.stderr.write(`webhub daemon: internal error (${errorClass(err)})\n`);
+    if (crashed) return;
+    crashed = true;
     if (daemon === undefined) process.exit(1); // during start-up: the `exit` hook cleans up
-    const force = setTimeout(() => process.exit(1), STOP_GRACE_MS + 1_000);
+    const force = setTimeout(() => process.exit(1), STOP_GRACE_MS + 2_000);
     void daemon.stop().finally(() => {
       clearTimeout(force);
       process.exit(1);

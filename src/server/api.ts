@@ -23,7 +23,9 @@ import {
   hostHeaderCount,
   isId,
   normaliseHost,
+  PROXY_HEADER,
   parseBearer,
+  proxySecretFor,
   type SessionStore,
   safeEqual,
   sessionCookie,
@@ -65,6 +67,11 @@ export interface ApiContext {
   log: (entry: Record<string, unknown>) => void;
   /** Delay after a wrong bearer token (ms). */
   failDelayMs?: number;
+  /**
+   * Browser login (login links) on. Off until webhub's own nginx serves the http port (F-009
+   * turns it on once it has written the proxy secret into nginx) — security-3 N1.
+   */
+  browserLogin?: boolean;
 }
 
 export type RouteRegistrar = (app: FastifyInstance, ctx: ApiContext) => void;
@@ -114,10 +121,28 @@ function forwardedHost(
 /** Raw reply for errors Node's HTTP parser raises before Fastify sees a request (H3/K8). */
 function clientError(err: Error & { code?: string }, socket: Socket): void {
   if (!socket.writable) return;
-  // a response of an earlier pipelined request is still pending: writing ours now would put
-  // it out of order on the wire → just drop the connection (security-2 L5)
-  if ((socket as Socket & { _httpMessage?: unknown })._httpMessage) {
-    socket.destroy();
+  // The response of an EARLIER pipelined request is still pending: writing ours now would put
+  // it out of order on the wire (security-2 L5) → write it after that response finished. An
+  // error in the request being parsed itself (bad body, timeout) gets its 400 / 408 right away
+  // (review-3 M1). The error belongs to a later message when the pending response's request
+  // was already fully parsed.
+  const s = socket as Socket & {
+    _httpMessage?:
+      | (NodeJS.EventEmitter & { _headerSent?: boolean; writableFinished?: boolean; req?: unknown })
+      | null;
+    parser?: { incoming?: { complete?: boolean } | null } | null;
+  };
+  const pending = s._httpMessage;
+  const incoming = s.parser?.incoming;
+  if (
+    pending &&
+    pending.writableFinished !== true &&
+    (pending._headerSent === true || pending.req !== incoming || incoming?.complete === true)
+  ) {
+    pending.once("finish", () => clientError(err, socket));
+    pending.once("close", () => {
+      if (pending.writableFinished !== true) socket.destroy();
+    });
     return;
   }
   const [status, text] =
@@ -140,6 +165,7 @@ export async function createApi(
   registrars: readonly RouteRegistrar[] = [],
 ): Promise<FastifyInstance> {
   let closing = false;
+  const proxySecret = proxySecretFor(ctx.token);
   const app = fastify({
     logger: false,
     bodyLimit: BODY_LIMIT,
@@ -158,17 +184,16 @@ export async function createApi(
     clientErrorHandler: clientError,
     // errors Fastify raises before routing (bad URL encoding …) skip the hooks: same rules here (H3)
     frameworkErrors: (_err, req, reply) => {
-      ctx.log({ method: req.method, path: "(invalid target)", status: 400 }); // J5
-      if (
+      const badHost =
         hostHeaderCount(req.raw.rawHeaders) !== 1 ||
-        classifyHost(req.headers.host, ctx.hosts) === undefined
-      ) {
-        return deny(reply, 421, "MISDIRECTED", "unknown host");
-      }
-      return deny(reply, 400, "BAD_REQUEST", "bad request");
+        classifyHost(req.headers.host, ctx.hosts) === undefined;
+      // logged with the real status, never with the target (J5 / M5)
+      ctx.log({ method: req.method, path: "(invalid target)", status: badHost ? 421 : 400 });
+      return badHost
+        ? deny(reply, 421, "MISDIRECTED", "unknown host")
+        : deny(reply, 400, "BAD_REQUEST", "bad request");
     },
   });
-  app.server.headersTimeout = HEADERS_TIMEOUT_MS;
   app.server.maxConnections = MAX_CONNECTIONS;
   // JSON only: a browser can send text/plain or form bodies cross-site without a preflight.
   // An empty JSON body is "no body" (fetch with a JSON content type and no payload — H15).
@@ -313,6 +338,14 @@ export async function createApi(
 
   const LoginLinkBody = z.strictObject({ host: z.string().max(300).optional() }).optional();
   app.post("/api/v1/login-links", { config: { access: "bearer" } }, async (req) => {
+    // until webhub's nginx owns the http port, a link would go to whatever listens there (N1)
+    if (ctx.browserLogin !== true) {
+      throw new HttpError(
+        503,
+        "LOGIN_UNAVAILABLE",
+        "browser login needs webhub's nginx (not set up yet)",
+      );
+    }
     const body = LoginLinkBody.safeParse(req.body ?? undefined);
     if (!body.success) throw new HttpError(400, "BAD_REQUEST", 'body must be {"host"?: string}');
     const wanted = body.data?.host;
@@ -346,7 +379,16 @@ export async function createApi(
             ? req.webhub.host
             : undefined;
       const t = (req.query as Record<string, unknown>).t;
-      if (target === undefined || typeof t !== "string" || !ctx.sessions.consumeCode(t, target)) {
+      // only through webhub's nginx: a squatter on the http port that received the link cannot
+      // redeem it here directly (security-3 N1); checked before the code is touched
+      const proxy = req.headers[PROXY_HEADER];
+      const viaNginx = typeof proxy === "string" && safeEqual(proxy, proxySecret);
+      if (
+        !viaNginx ||
+        target === undefined ||
+        typeof t !== "string" ||
+        !ctx.sessions.consumeCode(t, target)
+      ) {
         return reply
           .code(401)
           .type("text/plain; charset=utf-8")

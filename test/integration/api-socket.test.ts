@@ -9,8 +9,9 @@ import { connect, type Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApi } from "../../src/server/api.js";
-import { SessionStore } from "../../src/server/auth.js";
-import { sendRaw } from "../../src/server/client.js";
+import { helloProof, SessionStore } from "../../src/server/auth.js";
+import { DaemonClient, sendRaw } from "../../src/server/client.js";
+import { isServerError } from "../../src/server/errors.js";
 
 const TOKEN = randomBytes(32).toString("base64url");
 const HOST = "hub.localhost"; // an allowed API host whatever the listen port
@@ -23,9 +24,10 @@ let logs: Record<string, unknown>[];
 beforeEach(async () => {
   shutdowns = 0;
   logs = [];
+  const hosts = { apiPort: 0, httpPort: 80, domainSuffix: "localhost" };
   app = await createApi({
     token: TOKEN,
-    hosts: { apiPort: 7400, httpPort: 80, domainSuffix: "localhost" },
+    hosts,
     sessions: new SessionStore(),
     status: () => ({}),
     onShutdown: () => {
@@ -37,6 +39,7 @@ beforeEach(async () => {
   await app.listen({ host: "127.0.0.1", port: 0 });
   const a = app.server.address();
   port = typeof a === "object" && a !== null ? a.port : 0;
+  hosts.apiPort = port; // the allowlist reads ctx.hosts live: accept 127.0.0.1:<port>
 });
 afterEach(async () => {
   app.server.closeAllConnections();
@@ -108,8 +111,83 @@ describe("API on real sockets", { timeout: 30_000 }, () => {
     c.s.write(`GET /api/v1/health HTTP/1.1\r\nHost: ${HOST}\r\n\r\n\x00garbage\r\n\r\n`);
     await c.ended;
     const statuses = [...c.text().matchAll(/HTTP\/1\.1 (\d{3}) /g)].map((m) => m[1]);
-    // either the 200 alone, or the 200 first — never a 400 before it
-    expect(statuses[0] ?? "200").toBe("200");
+    expect(statuses[0]).toBe("200"); // the valid request is answered first, always
+    expect(statuses.slice(1).every((s) => s === "400")).toBe(true);
+  });
+
+  it("a bad body of the request itself still gets a uniform 400 (M1)", async () => {
+    const c = await open();
+    c.s.write(
+      `POST /api/v1/login-links HTTP/1.1\r\nHost: ${HOST}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n`,
+    );
+    await c.ended;
+    expect(c.text()).toMatch(/^HTTP\/1\.1 400 /);
+    expect(c.text()).toContain("x-content-type-options: nosniff");
+  });
+
+  it("a body that never completes gets 408 by the request timeout (M1)", {
+    timeout: 45_000,
+  }, async () => {
+    const c = await open();
+    c.s.write(
+      `POST /api/v1/login-links HTTP/1.1\r\nHost: ${HOST}\r\nAuthorization: Bearer ${TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{"a`,
+    );
+    const ms = await c.ended;
+    expect(c.text()).toMatch(/^HTTP\/1\.1 408 /);
+    expect(ms).toBeLessThan(33_000);
+  });
+});
+
+describe("client: the token only travels on a proven connection (N2)", () => {
+  let fake: Server;
+  afterEach(async () => {
+    fake.closeAllConnections();
+    await new Promise((r) => fake.close(r));
+  });
+
+  it("proof answered, then the connection is closed → request fails, token never sent", async () => {
+    const seen: string[] = [];
+    fake = createServer((req, res) => {
+      seen.push(`${req.url} ${req.headers.authorization ?? "-"}`);
+      const n = new URL(req.url ?? "/", "http://x").searchParams.get("n") ?? "";
+      // a real proof (e.g. the daemon answering just before it exits), then the socket closes —
+      // whatever answers the next connection must not get the token
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(JSON.stringify({ proof: helloProof(TOKEN, n) }));
+    });
+    await new Promise<void>((r) => fake.listen({ host: "127.0.0.1", port: 0 }, () => r()));
+    const a = fake.address();
+    const p = typeof a === "object" && a !== null ? a.port : 0;
+    const client = new DaemonClient({
+      schemaVersion: 1,
+      token: TOKEN,
+      pid: 1,
+      port: p,
+      startedAt: "x",
+    });
+    await expect(client.request("GET", "/api/v1/status")).rejects.toSatisfy((e) =>
+      isServerError(e, "DAEMON_UNREACHABLE"),
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen.join("")).not.toContain(TOKEN);
+  });
+
+  it("against the real API: proof + request share one connection", async () => {
+    fake = createServer(); // nothing to fake here (afterEach closes it)
+    await new Promise<void>((r) => fake.listen({ host: "127.0.0.1", port: 0 }, () => r()));
+    const sockets = new Set<unknown>();
+    app.server.on("connection", (s) => sockets.add(s));
+    const client = new DaemonClient({
+      schemaVersion: 1,
+      token: TOKEN,
+      pid: 1,
+      port,
+      startedAt: "x",
+    });
+    expect(await client.request("GET", "/api/v1/status")).toEqual({});
+    expect(sockets.size).toBe(1);
+    await client.request("GET", "/api/v1/status");
+    expect(sockets.size).toBe(2); // next request: new connection, new proof
   });
 });
 
@@ -130,7 +208,7 @@ describe("client deadline", () => {
     const a = drip.address();
     const p = typeof a === "object" && a !== null ? a.port : 0;
     const t0 = performance.now();
-    await expect(sendRaw(p, "GET", "/", {}, undefined, 400)).rejects.toMatchObject({
+    await expect(sendRaw(p, "GET", "/", {}, undefined, { timeoutMs: 400 })).rejects.toMatchObject({
       code: "ETIMEDOUT",
     });
     expect(performance.now() - t0).toBeLessThan(2_000);
