@@ -11,6 +11,7 @@
 | 1 | F-000 Repo scaffolding | `done` | [spec](features/F-000-scaffolding.md) |
 | 2 | F-001 Config + `$WEBHUB_HOME` + migration | `done` | [spec](features/F-001-config.md) |
 | 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
+| 4 | F-003 Daemon + API server + auth | `planned` | [spec](features/F-003-daemon-api-auth.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -117,4 +118,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-F-000 W1: ออกแบบ scaffolding → ถามความเห็น → เข้า queue → W3
+F-003 W3 (planned) → แล้ว W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)

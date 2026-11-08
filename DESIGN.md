@@ -590,7 +590,8 @@ proxy_set_header X-Forwarded-Proto $scheme;
 - `Host` allowlist: `hub.localhost`, `db.localhost`, `127.0.0.1:7400` (+ `:<port>` เมื่อ HTTP port ≠ 80) → กัน DNS rebinding; `webhub.internal` = Host ที่ nginx ตั้งเองตอนเรียก `/_wake`, `/_auth`, `/_webhub/login` → รับเฉพาะ endpoint เหล่านี้
 - เครื่องมือเสริม (`sql.` / `redis.` / `mongo.` / `mail.` / `s3.` / `http.localhost`) → nginx `auth_request` ไปที่ API ตรวจ **session cookie ของ host นั้น** (ไม่เปิดโล่ง); nginx ลบ cookie `webhub_*` ออก (`proxy_set_header Cookie` ที่กรองแล้ว) ก่อนส่งต่อเข้า container ของเครื่องมือ → master token ไม่หลุดไปถึง tool
 - `Origin` check ทุก request ที่แก้ข้อมูล → กัน CSRF
-- Token สุ่มใน `data/auth.json`; `webhub ui` เปิด one-time link → set cookie `HttpOnly; SameSite=Strict`; CLI อ่าน token จากไฟล์
+- Token สุ่มใน `data/auth.json` (ACL เฉพาะ user) — **สุ่มใหม่ทุกครั้งที่ daemon เริ่ม, ลบตอนปิด**; `webhub ui` เปิด one-time link (ใช้ครั้งเดียว, 60 วิ, ผูก host) → set cookie `HttpOnly; SameSite=Strict`; session อยู่ในหน่วยความจำ (idle 12 ชม. / สูงสุด 7 วัน); CLI อ่าน token จากไฟล์ และ**พิสูจน์ว่าเป็น daemon จริงก่อนส่ง token** (`GET /api/v1/hello?n=<nonce>` → HMAC(token, nonce)) กันโปรแกรมอื่นฟัง 7400 ตอน daemon ไม่รัน
+- ไม่ส่ง CORS header เลย; request ที่แก้ข้อมูลต้อง JSON + Origin ตรง + `Sec-Fetch-Site: same-origin` (ถ้ามี); Host ไม่อยู่ใน allowlist → 421; รายละเอียด F-003
 - cookie เป็น **host-only** ต่อ host (ห้าม `Domain=localhost` → จะรั่วไปทุก `<site>.localhost`): เปิดเครื่องมือเสริม/`db.localhost` จาก dashboard → ลิงก์ `http://<tool>.localhost/_webhub/login?t=<one-time>` → nginx ส่ง path นี้ไป API (Host `webhub.internal` + `X-Forwarded-Host`) → set session cookie (id สุ่มต่อ host, หมดอายุได้, ไม่ใช่ master token) ของ host นั้น → redirect; `auth_request` ตรวจ cookie ของ host นั้น
 - เปิด `lan` / tunnel → บังคับ password + เตือน; DB ที่ `expose: lan` ต้อง password แรง
 
@@ -749,7 +750,7 @@ _WebHub/                      # repo (npm package source)
 │   ├── proxy/lite.ts         # Lite mode reverse proxy (§21.2)
 │   ├── setup/wizard.ts       # first-run (§21.4)
 │   ├── migrate/              # data/ schema migrations (§21.6)
-│   └── server/{api.ts, auth.ts}               # REST + WS + /_wake + Host/Origin/token
+│   └── server/{api.ts, auth.ts, client.ts, errors.ts}   # REST + WS + /_wake + Host/Origin/token; client = ที่ CLI ใช้ (handshake)
 ├── dashboard/                # Vite + React
 ├── templates/
 │   ├── docker/{nginx,infra,tools}.compose.yml   # template → gen ลง $WEBHUB_HOME/docker/
