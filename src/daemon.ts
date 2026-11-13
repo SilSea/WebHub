@@ -3,14 +3,18 @@
  * webhub daemon (F-003 §3.1): the single writer of `$WEBHUB_HOME/data` and the API server on
  * 127.0.0.1:7400. Foreground process; `webhub daemon start` (F-004) runs it detached.
  *
- * Exit codes: 0 stopped normally, 1 other error, 2 config invalid, 3 another daemon runs,
- * 4 API port busy.
+ * Exit codes: 0 stopped normally, 1 other error, 2 config invalid / bad argument, 3 another
+ * daemon runs, 4 API port busy.
+ *
+ * Arguments (CR-003): `--log-file <path>` writes the JSON log lines to a file inside
+ * `$WEBHUB_HOME/logs` (byte-capped, rotated to `<path>.1`) instead of stdout.
  */
 import { randomBytes } from "node:crypto";
 import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import type { FastifyInstance } from "fastify";
 import { loadConfig } from "./config/config.js";
 import { ensureHome, type Paths, pathsFor, resolveHome } from "./config/home.js";
@@ -20,6 +24,7 @@ import { createApi, type RouteRegistrar } from "./server/api.js";
 import { SessionStore } from "./server/auth.js";
 import { AUTH_FILE_VERSION, type AuthFile } from "./server/auth-file.js";
 import { ServerError } from "./server/errors.js";
+import { openLogFile, resolveLogFile } from "./server/log-file.js";
 import { writeDoc } from "./store/json-store.js";
 import { acquireLock, type Lock } from "./store/lock.js";
 import { readVersion } from "./version.js";
@@ -303,10 +308,63 @@ function describe(err: unknown): string[] {
 /** SIGHUP = console window closed (Windows) / terminal gone; SIGBREAK = Ctrl+Break. */
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] as const;
 
-export async function main(): Promise<number> {
+/** Parses the daemon's arguments (CR-003). Throws a message for stderr on anything unknown. */
+export function parseDaemonArgs(argv: readonly string[]): { logFile: string | undefined } {
+  let parsed: ReturnType<typeof parseDaemonArgsRaw>;
+  try {
+    parsed = parseDaemonArgsRaw(argv);
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : "invalid arguments");
+  }
+  const logFile = parsed.values["log-file"];
+  if (logFile === "") throw new Error("--log-file needs a path");
+  const given = parsed.tokens.filter((t) => t.kind === "option" && t.name === "log-file");
+  if (given.length > 1) throw new Error("--log-file given more than once");
+  return { logFile };
+}
+
+function parseDaemonArgsRaw(argv: readonly string[]) {
+  return parseArgs({
+    args: [...argv],
+    options: { "log-file": { type: "string" } },
+    strict: true,
+    allowPositionals: false,
+    tokens: true,
+  });
+}
+
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   // a closed stdout (parent gone) must not crash the daemon via EPIPE (K2)
   process.stdout.on("error", () => {});
   process.stderr.on("error", () => {});
+  // arguments first: a bad one exits 2 before any lock / auth.json is touched (CR-003)
+  let log: ((entry: Record<string, unknown>) => void) | undefined;
+  const usage = (err: unknown): number => {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`webhub daemon: ${msg}\n`);
+    return 2;
+  };
+  let logFile: string | undefined;
+  try {
+    ({ logFile } = parseDaemonArgs(argv));
+  } catch (err) {
+    return usage(err);
+  }
+  if (logFile !== undefined) {
+    let paths: Paths;
+    try {
+      // not an argument problem: same exit code + hint as without the flag (CR-003 review Z2)
+      paths = pathsFor(resolveHome(process.env, process.platform, homedir()));
+    } catch (err) {
+      for (const line of describe(err)) process.stderr.write(`${line}\n`);
+      return exitCodeFor(err);
+    }
+    try {
+      log = openLogFile(await resolveLogFile(paths, logFile)).write;
+    } catch (err) {
+      return usage(err);
+    }
+  }
   // handlers BEFORE start: a signal during the slow start-up stops cleanly once ready (H8)
   const abort = new AbortController();
   let daemon: RunningDaemon | undefined;
@@ -339,6 +397,7 @@ export async function main(): Promise<number> {
   try {
     daemon = await startDaemon({
       signal: abort.signal,
+      ...(log === undefined ? {} : { log }),
       onAuthFile: (remove) => {
         removeAuthSync = remove;
       },

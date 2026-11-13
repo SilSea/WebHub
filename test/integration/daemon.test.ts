@@ -22,6 +22,7 @@ beforeAll(async () => {
     ["src/daemon.ts", "dist/daemon.js"],
     ["src/server/api.ts", "dist/server/api.js"],
     ["src/server/auth.ts", "dist/server/auth.js"],
+    ["src/server/log-file.ts", "dist/server/log-file.js"],
   ] as const) {
     const b = await stat(join(ROOT, built)).catch(() => null);
     if (b === null || b.mtimeMs < (await stat(join(ROOT, src))).mtimeMs) {
@@ -51,8 +52,8 @@ interface Proc {
 
 const children: ChildProcess[] = [];
 
-function runDaemon(home: string, port: number): Proc {
-  const child = spawn(process.execPath, [DAEMON], {
+function runDaemon(home: string, port: number, args: readonly string[] = []): Proc {
+  const child = spawn(process.execPath, [DAEMON, ...args], {
     env: { ...process.env, WEBHUB_HOME: home, WEBHUB_API_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -401,5 +402,51 @@ describe("daemon lifecycle", { timeout: 120_000 }, () => {
     } finally {
       await new Promise((r) => impostor.close(r));
     }
+  });
+});
+
+describe("--log-file (CR-003)", { timeout: 120_000 }, () => {
+  it("log lines go to the file, not stdout; stop is logged too", async () => {
+    const file = join(h.paths.logs, "daemon.log");
+    const d = runDaemon(h.paths.home, await freePort(), ["--log-file", file]);
+    const deadline = Date.now() + 30_000;
+    while (!(existsSync(file) && (await readFile(file, "utf8")).includes('"msg":"ready"'))) {
+      if (d.child.exitCode !== null) throw new Error(`daemon exited: ${d.err.join("")}`);
+      if (Date.now() > deadline) throw new Error("no ready line in the log file");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const client = await connectDaemon(h.paths);
+    await client.request("GET", "/api/v1/status");
+    await client.request("POST", "/api/v1/shutdown");
+    expect(await d.exit).toBe(0);
+    expect(d.out.join("")).toBe("");
+    const text = await readFile(file, "utf8");
+    expect(text).toContain('"msg":"stopped"');
+    expect(text).toContain("/api/v1/status");
+    expect(d.err.join("")).toBe("");
+  });
+
+  it("invalid WEBHUB_HOME: same exit code and hint with or without the flag (review Z2)", async () => {
+    const without = runDaemon("relative-home", await freePort());
+    const withFlag = runDaemon("relative-home", await freePort(), ["--log-file", "x.log"]);
+    const [a, b] = [await without.exit, await withFlag.exit];
+    expect(a).not.toBe(0);
+    expect(b).toBe(a);
+    expect(withFlag.err.join("")).toBe(without.err.join(""));
+  });
+
+  it.each([
+    ["unknown flag", ["--verbose"]],
+    ["missing value", ["--log-file"]],
+    ["given twice", ["--log-file=a.log", "--log-file=b.log"]],
+    ["outside logs/", ["--log-file", "OUTSIDE"]],
+  ])("%s → exit 2 before the lock / auth.json are touched", async (_name, args) => {
+    const fixed = args.map((a) => (a === "OUTSIDE" ? join(h.root, "x.log") : a));
+    const d = runDaemon(h.paths.home, await freePort(), fixed);
+    expect(await d.exit).toBe(2);
+    expect(d.err.join("")).toMatch(/^webhub daemon: /);
+    expect(existsSync(h.paths.auth)).toBe(false);
+    expect(existsSync(h.paths.lock)).toBe(false);
+    expect(existsSync(join(h.root, "x.log"))).toBe(false);
   });
 });

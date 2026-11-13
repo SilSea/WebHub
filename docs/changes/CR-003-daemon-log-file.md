@@ -12,9 +12,10 @@
 | ของเดิม | ของใหม่ | ทำไม |
 |---|---|---|
 | `node dist/daemon.js` ไม่รับ argument; log = JSON lines ลง stdout | รับ `--log-file <path>` (ตัวเดียว, ไม่บังคับ). ส่ง → log บรรทัดเดิมเขียนลงไฟล์นั้น (append, sync) แทน stdout; ก่อนเขียนบรรทัดที่ทำให้ไฟล์เกิน **5 MB** → rename เป็น `<path>.1` (ทับของเก่า) แล้วเริ่มไฟล์ใหม่ → รวม ≤ ~10 MB. ไม่ส่ง → stdout เหมือนเดิม | CLI spawn แบบ detached ด้วย stdio `ignore` / file fd ได้ (ไม่มี pipe — Y2) และ flood ที่ยอมรับเป็น residual (security-7/8) ไม่กิน disk (U4/Y1) |
-| — | path ต้องอยู่**ใน `logs/` ของ `$WEBHUB_HOME`** (`isInside` + `assertSafePath` ของ F-001: ไม่ตาม symlink/junction), ไฟล์ต้องเป็น regular file หรือยังไม่มี | กันเขียนทับไฟล์นอก home ผ่าน argument / symlink |
-| argument แปลก / ผิด | → stderr `webhub daemon: …` + exit **2** (ก่อน start, ไม่แตะ lock) | เหมือน config ผิด (exit code ตาราง F-003) |
-| เขียนไฟล์ไม่ได้ (disk เต็ม, ไฟล์ถูกล็อก) | ทิ้งบรรทัดนั้น, ไม่ล้ม, ลองเปิดใหม่ตอน rotate ครั้งถัดไป | log ห้ามทำให้ daemon ตาย (เหมือน EPIPE ของ stdout — K2) |
+| — | ไฟล์ต้องอยู่ใน `logs/` ของ `$WEBHUB_HOME` **โดยตรง** (ไม่มี sub-directory — review-1 Z3/Z5); ชื่อ `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, ไม่ลงท้าย `.`, ไม่ใช่ชื่ออุปกรณ์ Windows (`CON`, `NUL`, `COMn`, `LPTn`, …) และไม่มี `:` (security-1 AA3); `logs/` และไฟล์ห้ามเป็น symlink/junction (`assertSafePath` ของ F-001); ไฟล์ที่มีอยู่ต้องเป็น regular file ที่มี link เดียว (ไม่ใช่ hardlink ไปไฟล์อื่น — AA1). ตรวจก่อน start **และก่อนเปิดทุกครั้ง**; หลังเปิดตรวจ handle อีกชั้น (`fstat`: regular + `nlink` 1); POSIX เปิดด้วย `O_NOFOLLOW \| O_NONBLOCK` (AA2) | กันเขียนทับไฟล์นอก home / ไฟล์อื่นของผู้ใช้ ผ่าน argument, symlink, junction, hardlink |
+| argument แปลก / ผิด | → stderr `webhub daemon: …` + exit **2** (ก่อน start, ไม่แตะ lock). `WEBHUB_HOME` ผิด = exit code + hint เดียวกับไม่ส่ง flag (Z2) | เหมือน config ผิด (exit code ตาราง F-003) |
+| เขียนไฟล์ไม่ได้ (disk เต็ม, ไฟล์ถูกล็อก) หรือเขียนได้ไม่ครบ | ทิ้งบรรทัดนั้น, ไม่ล้ม, ลองเปิดใหม่หลัง **1 วิ** (นาฬิกา monotonic — Z6); เขียนไม่ครบ → บรรทัดถัดไปขึ้นบรรทัดใหม่ก่อน (ไม่ต่อกับบรรทัดที่ขาด — Z7) | log ห้ามทำให้ daemon ตาย (เหมือน EPIPE ของ stdout — K2) |
+| — | rename ไม่ได้ (Windows: reader ไม่แชร์ delete, antivirus, `.1` เป็น directory) → truncate ไฟล์แทน: cap ยังอยู่ แต่ log ล่าสุดหาย (Z13, AA7). ไฟล์ที่ใหญ่เกิน cap อยู่ก่อน start ย้ายไป `.1` ทั้งก้อน; ตอน restart daemon เก่าเขียน "stopped" หลังปล่อย lock → 2 process เขียนไฟล์เดียวชั่วครู่ (ยังจำกัดขนาด — AA5) | ข้อจำกัดที่บันทึกไว้ |
 
 `stderr` (error ตอน start + ชื่อ class ตอน crash) ไม่เปลี่ยน — CLI ส่งไปไฟล์ `logs/daemon-start.err` ผ่าน fd (F-004)
 
@@ -53,8 +54,8 @@
 | 3 | เขียนเกิน 5 MB → `daemon.log` ≤ 5 MB + `.1` มี, บรรทัดไม่ขาดกลาง | — | |
 | 4 | path นอก `logs/`, `..`, symlink/junction, เป็น directory → exit 2, ไม่มี auth.json, ไม่ถือ lock | — | |
 | 5 | argument แปลก / `--log-file` ไม่มีค่า / ซ้ำ → exit 2 | — | |
-| 6 | ไฟล์เขียนไม่ได้ระหว่างรัน (mock `writeSync` throw) → daemon ยังตอบ API | — | |
-| 7 | flood 4xx (เหมือน security-8 Y1) กับ cap เล็ก (test option) → ขนาดรวมไม่เกิน cap × 2 | — | |
+| 6 | ไฟล์เขียนไม่ได้ระหว่างรัน (`writeSync` hook throw / เขียนไม่ครบ) → `write` ไม่ throw, บรรทัดหาย, เปิดใหม่ที่ 1 วิพอดี, บรรทัดถัดไป parse ได้. ระดับ unit พอ: `write` ไม่ throw = daemon ไม่ได้รับ exception (log hook ของ Fastify เรียก `write` ตรง) | — | |
+| 7 | rotate + cap ระดับ unit (cap เล็ก); flood จริง 40 000 request กับ daemon จริง ทำใน security-1 (รวมสูงสุด 6.1 MB) | — | |
 | 8 | suite F-003 บน Node 22.12 | ใช่ | |
 
 ## 7. Security impact (R6)
