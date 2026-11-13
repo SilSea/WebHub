@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` |
+| Status | `done` (2026-11-13) |
 | Feature ที่แก้ | F-003 (locked) |
 | ประเภท | change (เพิ่ม option ใหม่; ไม่ส่ง option = พฤติกรรมเดิมทุกอย่าง) |
 | **อนุญาตโดย (R1)** | ผู้ใช้ / 2026-11-13 ("อนุญาต + อนุมัติ", "ทำเลย"; แนวทางเลือกใน F-004 Q1 = A) |
@@ -13,7 +13,8 @@
 |---|---|---|
 | `node dist/daemon.js` ไม่รับ argument; log = JSON lines ลง stdout | รับ `--log-file <path>` (ตัวเดียว, ไม่บังคับ). ส่ง → log บรรทัดเดิมเขียนลงไฟล์นั้น (append, sync) แทน stdout; ก่อนเขียนบรรทัดที่ทำให้ไฟล์เกิน **5 MB** → rename เป็น `<path>.1` (ทับของเก่า) แล้วเริ่มไฟล์ใหม่ → รวม ≤ ~10 MB. ไม่ส่ง → stdout เหมือนเดิม | CLI spawn แบบ detached ด้วย stdio `ignore` / file fd ได้ (ไม่มี pipe — Y2) และ flood ที่ยอมรับเป็น residual (security-7/8) ไม่กิน disk (U4/Y1) |
 | — | ไฟล์ต้องอยู่ใน `logs/` ของ `$WEBHUB_HOME` **โดยตรง** (ไม่มี sub-directory — review-1 Z3/Z5); ชื่อ `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, ไม่ลงท้าย `.`, ไม่ใช่ชื่ออุปกรณ์ Windows (`CON`, `NUL`, `COMn`, `LPTn`, …) และไม่มี `:` (security-1 AA3); `logs/` และไฟล์ห้ามเป็น symlink/junction (`assertSafePath` ของ F-001); ไฟล์ที่มีอยู่ต้องเป็น regular file ที่มี link เดียว (ไม่ใช่ hardlink ไปไฟล์อื่น — AA1). ตรวจก่อน start **และก่อนเปิดทุกครั้ง**; หลังเปิดตรวจ handle อีกชั้น (`fstat`: regular + `nlink` 1); POSIX เปิดด้วย `O_NOFOLLOW \| O_NONBLOCK` (AA2) | กันเขียนทับไฟล์นอก home / ไฟล์อื่นของผู้ใช้ ผ่าน argument, symlink, junction, hardlink |
-| argument แปลก / ผิด | → stderr `webhub daemon: …` + exit **2** (ก่อน start, ไม่แตะ lock). `WEBHUB_HOME` ผิด = exit code + hint เดียวกับไม่ส่ง flag (Z2) | เหมือน config ผิด (exit code ตาราง F-003) |
+| argument แปลก / ผิด | → stderr `webhub daemon: …` + exit **2** (ก่อน start, ไม่แตะ lock). `WEBHUB_HOME` ผิด = exit code + hint เดียวกับไม่ส่ง flag (Z2). error ใดๆ ตอนตรวจ `--log-file` (รวม I/O เช่น EACCES, ชื่อไฟล์ผิด `HOME_INVALID`) = exit 2 — ต่างจาก home ผิดที่ exit 1 (review-2 B7). การเทียบ directory เป็นแบบ exact หลัง `resolve`: ตัวพิมพ์ / `\\?\` / ชื่อ 8.3 ต่างจาก `paths.logs` → ปฏิเสธ (fail safe; F-004 สร้าง path จาก `paths.logs` — B5) | เหมือน config ผิด (exit code ตาราง F-003) |
+| — | หลังเปิดไฟล์: `logs/` ต้องเป็น directory เดิม (dev + ino) และ path ต้องชี้ไฟล์เดียวกับ handle (ไม่ใช่ link ที่สลับเข้ามาระหว่างตรวจกับเปิด) ไม่งั้นปิดทิ้ง ไม่เขียน (review-2 B4); ช่องที่เหลือ: สลับกลับภายในเสี้ยววินาทีระหว่าง open กับการตรวจซ้ำ — ต้องเป็น user เดียวกัน + เขียน `logs/` ได้ (residual, info) | กัน race ตรวจ → เปิด |
 | เขียนไฟล์ไม่ได้ (disk เต็ม, ไฟล์ถูกล็อก) หรือเขียนได้ไม่ครบ | ทิ้งบรรทัดนั้น, ไม่ล้ม, ลองเปิดใหม่หลัง **1 วิ** (นาฬิกา monotonic — Z6); เขียนไม่ครบ → บรรทัดถัดไปขึ้นบรรทัดใหม่ก่อน (ไม่ต่อกับบรรทัดที่ขาด — Z7) | log ห้ามทำให้ daemon ตาย (เหมือน EPIPE ของ stdout — K2) |
 | — | rename ไม่ได้ (Windows: reader ไม่แชร์ delete, antivirus, `.1` เป็น directory) → truncate ไฟล์แทน: cap ยังอยู่ แต่ log ล่าสุดหาย (Z13, AA7). ไฟล์ที่ใหญ่เกิน cap อยู่ก่อน start ย้ายไป `.1` ทั้งก้อน; ตอน restart daemon เก่าเขียน "stopped" หลังปล่อย lock → 2 process เขียนไฟล์เดียวชั่วครู่ (ยังจำกัดขนาด — AA5) | ข้อจำกัดที่บันทึกไว้ |
 
@@ -66,6 +67,9 @@
 ## 8. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/CR-003/test-1.md) | [review-1](../reports/CR-003/review-1.md) — FAIL (Z1 major) | [security-1](../reports/CR-003/security-1.md) — PASS | ผู้ใช้: แก้ทั้งหมด |
+| 2 | [test-2](../reports/CR-003/test-2.md) | [review-2](../reports/CR-003/review-2.md) — PASS | (รวมใน review-2) — PASS | ผู้ใช้: แก้ทั้งหมดแล้ว merge (B1–B7) |
+| 3 | [test-3](../reports/CR-003/test-3.md) | — | — | แก้ B1–B7, check ครบ → `done` |
 
 ## 9. เอกสารที่อัปเดต (R4)
-- [ ] spec F-003  - [ ] DESIGN.md §12 (log)  - [ ] PLAN.md  - [ ] features/README.md  - [ ] reports/README.md
+- [x] spec F-003  - [x] DESIGN.md §12 (log)  - [x] PLAN.md  - [x] features/README.md  - [x] reports/README.md

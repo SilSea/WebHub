@@ -17,6 +17,7 @@
  *   file is re-opened at most once per second (monotonic clock), like EPIPE on stdout (K2).
  */
 import {
+  type BigIntStats,
   closeSync,
   constants,
   fstatSync,
@@ -83,15 +84,15 @@ export async function resolveLogFile(paths: Paths, file: string): Promise<string
 }
 
 /** `logs/` is a real directory; the file is missing or a regular file with a single link. */
-function assertUsable(abs: string): void {
-  const dir = lstatSync(dirname(abs), { throwIfNoEntry: false });
+function assertUsable(abs: string): BigIntStats | undefined {
+  const dir = lstatSync(dirname(abs), { throwIfNoEntry: false, bigint: true });
   if (dir !== undefined && (dir.isSymbolicLink() || !dir.isDirectory())) {
     throw new WebhubError("SYMLINK_REFUSED", `not a plain directory: ${dirname(abs)}`, {
       file: dirname(abs),
     });
   }
   const st = lstatSync(abs, { throwIfNoEntry: false });
-  if (st === undefined) return;
+  if (st === undefined) return dir;
   if (st.isSymbolicLink()) {
     throw new WebhubError("SYMLINK_REFUSED", `refusing symlink/junction: ${abs}`, { file: abs });
   }
@@ -102,6 +103,26 @@ function assertUsable(abs: string): void {
       { file: abs },
     );
   }
+  return dir;
+}
+
+// Node 22 on Windows reports `dev` = 0 from lstat (fstat is right): compare it only when both
+// sides know it; `ino` (NTFS file id) identifies the file within the volume of `logs/`
+const sameFile = (a: BigIntStats, b: BigIntStats) =>
+  a.ino === b.ino && (a.dev === b.dev || a.dev === 0n || b.dev === 0n);
+
+/**
+ * After the open (review-2 B4): `logs/` is still the directory checked before it, and the path
+ * now names exactly the file behind `fd` (not a link swapped in between check and open).
+ */
+function assertOpenedInPlace(abs: string, fd: number, dirBefore: BigIntStats | undefined): void {
+  const dir = lstatSync(dirname(abs), { bigint: true });
+  if (dir.isSymbolicLink() || (dirBefore !== undefined && !sameFile(dir, dirBefore))) {
+    throw new Error("logs/ changed during open");
+  }
+  const handle = fstatSync(fd, { bigint: true });
+  const path = lstatSync(abs, { bigint: true });
+  if (path.isSymbolicLink() || !sameFile(handle, path)) throw new Error("file changed during open");
 }
 
 const APPEND: string | number =
@@ -160,10 +181,12 @@ export function openLogFile(abs: string, opts: LogFileOptions = {}): LogFile {
   /** Opens for append (`truncate` → empties it after the checks). */
   const open = (truncate: boolean): boolean => {
     try {
-      assertUsable(abs); // re-checked before every open: a link planted later is refused
+      // re-checked before every open: a link planted later is refused
+      const dirBefore = assertUsable(abs);
       fd = openSync(abs, APPEND, 0o600);
-      const st = fstatSync(fd); // the handle itself: closes the check → open race
+      const st = fstatSync(fd); // the handle itself
       if (!st.isFile() || st.nlink !== 1) throw new Error("not a single-link regular file");
+      assertOpenedInPlace(abs, fd, dirBefore); // closes the check → open race (B4)
       // Windows: an append-only handle cannot truncate → a second, checked read-write handle
       if (truncate) truncateChecked(fd, abs);
       size = truncate ? 0 : st.size;
@@ -197,20 +220,19 @@ export function openLogFile(abs: string, opts: LogFileOptions = {}): LogFile {
         }
         if (!open(false)) return;
       }
-      if (size > 0 && size + Buffer.byteLength(line) > maxBytes && !rotate()) return;
-      // after a short write, end the cut line first so this one stays parseable
-      const buf = Buffer.from(cut && size > 0 ? `\n${line}` : line);
-      cut = false;
+      // after a short write, end the cut line first so this one stays parseable (Z7)
+      const withPrefix = () => Buffer.from(cut && size > 0 ? `\n${line}` : line);
+      // the cap counts the prefix too (review-2 B2); a rotate starts a new file (no prefix)
+      if (size > 0 && size + withPrefix().length > maxBytes && !rotate()) return;
+      const buf = withPrefix();
       try {
         const n = write(fd as number, buf);
         size += n;
-        // a short write leaves a cut line: start over from a fresh open (review Z7)
-        if (n !== buf.length) {
-          cut = true;
-          fail();
-        }
+        // `cut` changes only once a write was attempted and its result is known (review-2 B1)
+        cut = n !== buf.length;
+        if (cut) fail(); // a short write: start over from a fresh open
       } catch {
-        fail();
+        fail(); // nothing known to be written: `cut` keeps its value
       }
     },
     close: closeFd,

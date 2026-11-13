@@ -180,7 +180,60 @@ describe("openLogFile (CR-003)", () => {
     for (let i = 0; i < 200; i++) log.write({ msg: "y".repeat(100), i });
     log.close();
     expect(statSync(f).size).toBeLessThanOrEqual(max);
-    expect(JSON.parse(lines(f).at(-1) ?? "{}").i).toBe(199);
+    const kept = lines(f).map((l) => JSON.parse(l).i);
+    expect(kept.at(-1)).toBe(199);
+    // after a truncate the size starts again from 0 (review-2 B3): the file keeps filling, not
+    // one line per truncate
+    expect(kept.length).toBeGreaterThan(1);
+    expect(kept).toEqual(kept.map((_, k) => (kept[0] ?? 0) + k));
+  });
+
+  it("short write, then a failing write: the next line still starts on its own line (review-2 B1)", () => {
+    const f = join(h.paths.logs, "daemon.log");
+    let now = 0;
+    let mode: "ok" | "short" | "throw" = "ok";
+    const log = openLogFile(f, {
+      now: () => now,
+      writeSync: (fd, buf) => {
+        if (mode === "throw") throw new Error("EIO");
+        return writeSync(fd, mode === "short" ? buf.subarray(0, 5) : buf);
+      },
+    });
+    log.write({ msg: "one" });
+    mode = "short";
+    log.write({ msg: "cut" });
+    mode = "throw";
+    now = 1_000;
+    log.write({ msg: "lost" });
+    mode = "ok";
+    now = 2_000;
+    log.write({ msg: "two" });
+    log.close();
+    const all = readFileSync(f, "utf8").split("\n");
+    expect(JSON.parse(all[0] ?? "").msg).toBe("one");
+    expect(all[1]).toHaveLength(5);
+    expect(JSON.parse(all[2] ?? "").msg).toBe("two");
+  });
+
+  it("the newline after a cut line counts toward the cap (review-2 B2)", () => {
+    const f = join(h.paths.logs, "daemon.log");
+    let now = 0;
+    let short = false;
+    const max = 300;
+    const log = openLogFile(f, {
+      now: () => now,
+      maxBytes: max,
+      writeSync: (fd, buf) => writeSync(fd, short ? buf.subarray(0, 10) : buf),
+    });
+    for (let pad = 0; pad < 120; pad++) {
+      log.write({ msg: "a".repeat(pad) });
+      short = true;
+      log.write({ msg: "b" });
+      short = false;
+      now += 1_000;
+      expect(statSync(f).size).toBeLessThanOrEqual(max);
+    }
+    log.close();
   });
 
   it("appends to an existing file and counts its size", async () => {

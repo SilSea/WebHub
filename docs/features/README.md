@@ -23,4 +23,4 @@ Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-r
 |---|---|---|
 | [CR-001](../changes/CR-001-pack-mjs.md) | F-000 pack test ยอม `.mts` → `.mjs` | `done` |
 | [CR-002](../changes/CR-002-lock-race-test.md) | F-001 test lock race: ตรวจ "ไม่ถือซ้อน" + fail fast แทน "ชนะตัวเดียว" (test เท่านั้น) | `done` |
-| [CR-003](../changes/CR-003-daemon-log-file.md) | F-003 daemon รับ `--log-file` + จำกัดขนาด log 5 MB × 2 | `planned` |
+| [CR-003](../changes/CR-003-daemon-log-file.md) | F-003 daemon รับ `--log-file` + จำกัดขนาด log 5 MB × 2 | `done` |

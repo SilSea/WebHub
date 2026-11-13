@@ -13,12 +13,14 @@
 | 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
 | 4 | F-003 Daemon + API server + auth | `done` | [spec](features/F-003-daemon-api-auth.md) |
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
-| 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `planned` | [CR](changes/CR-003-daemon-log-file.md) |
+| 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `planned` | [spec](features/F-004-cli-client.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
 **ติดตามต่อ:** F-001 lock race test (พบระหว่าง W3 ของ F-003) → ปิดแล้วด้วย [CR-002](changes/CR-002-lock-race-test.md): โค้ด lock ถูก, test ตั้งสมมติฐานผิด (ผู้ชนะต่อกัน = ถูกต้อง)
+
+**ติดตามต่อ (CR-003 security-1 AA3):** audit ของ F-001 (`ensureHome` บน Windows) อาจข้าม entry ชื่อแปลก (`CON`, ชื่อลงท้าย `.`/ช่องว่าง, ADS) โดยไม่รายงาน → สืบแบบ read-only ก่อน แล้วเสนอ CR ถ้าจริง (F-001 `done`, R1)
 
 ---
 
