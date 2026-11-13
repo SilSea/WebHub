@@ -46,6 +46,7 @@ crash: uncaughtException (ติดตั้งก่อน start, `on` + กั
        lock ของ F-001 ตรวจ PID + start time → daemon ใหม่ยึดต่อได้; auth.json เก่าถูกเขียนทับ (token เก่าใช้ไม่ได้แล้ว)
 ```
 - entry: `node dist/daemon.js` (foreground, log ไป stdout/stderr) — CLI F-004 จะ spawn แบบ detached + เขียน log ลง `logs/`
+- `--log-file <path>` ([CR-003](../changes/CR-003-daemon-log-file.md)): log JSON lines ลงไฟล์ใน `logs/` โดยตรงแทน stdout, rotate ที่ 5 MB → `.1` (rename ไม่ได้ → truncate), เขียนพลาด = ทิ้งบรรทัด + เปิดใหม่หลัง 1 วิ; path/ชื่อผิด, symlink/junction/hardlink, argument แปลก → exit 2 ก่อนแตะ lock
 - exit code: 0 ปกติ, 2 config ผิด, 3 มี daemon อยู่แล้ว, 4 port ไม่ว่าง, 1 อื่นๆ
 - env `WEBHUB_API_PORT` = สำหรับ test/dev เท่านั้น (ตั้งได้แค่ user เดียวกัน — security-1 K11) (integration test รันหลาย daemon พร้อมกัน); client อ่าน port จาก `auth.json` จึงตามได้เสมอ
 
@@ -154,6 +155,8 @@ client: อ่าน auth.json (ไม่มี → DAEMON_NOT_RUNNING)
 ## 6. Threat model (R6)
 | Asset | ผู้โจมตี / ช่องทาง | ป้องกันด้วย | เทส |
 |---|---|---|---|
+| disk | flood request (residual) → log โตไม่จำกัด (CR-003, U4/Y1) | `--log-file` cap 5 MB × 2 | rotate / truncate ≤ cap; flood 40 000 request → ≤ 6.1 MB (CR-003 security-1) |
+| ไฟล์อื่นของผู้ใช้ | `--log-file` ชี้นอก `logs/`, symlink/junction/hardlink, ชื่ออุปกรณ์ (CR-003) | ไฟล์ใน `logs/` โดยตรง + ชื่อ whitelist + ตรวจ link ก่อน/หลังเปิดทุกครั้ง | exit 2; link ที่วางหลัง start → ไม่เขียน |
 | API ทั้งหมด | เว็บที่ผู้ใช้เปิด + DNS rebinding (`evil.com` → 127.0.0.1) | Host allowlist exact → 421 ก่อนทุกอย่าง | Host ไม่ตรง / ไม่มี / ซ้ำ / `localhost:7400` / `127.0.0.1:7400.evil.com` → 421 |
 | การแก้ข้อมูล | CSRF จากเว็บอื่น (form POST, fetch no-cors) | SameSite=Strict + Origin ตรง + Sec-Fetch-Site + JSON only (415) + ไม่มี CORS | POST ไม่มี/ผิด Origin, `text/plain`, `cross-site` → 403/415 |
 | master token | โปรแกรมอื่นแอบฟัง 7400 ตอน daemon ไม่รัน | handshake proof ก่อนส่ง (§3.5) | server ปลอมไม่รู้ token → client ไม่ส่ง |
@@ -232,6 +235,7 @@ Security checklist (WORKFLOW §6): Input, Auth, Network, Secrets, Logging, Depen
 | 25 | U1: pipelined ×3 → socket ถูก destroy, handler รัน ≤ 1; flood 20 socket × 2 000 ไม่อ่าน → connection = 0, API ยังตอบ; client ไม่อ่านคำตอบ 4 MB → ตัดใน ≤ 22 วิ; S1: request + ขยะ → `[200,400]`, connection = 0; U2: route 12 วิ + ขยะ + FIN → connection = 0 ใน 7 วิ; T2: header 2 MB → ได้ 431 ทุกครั้ง; ชุด F-003 ผ่านบน Node 22.12 ด้วย (T1) | integration |
 | 26 | W1: `Expect: x` → 417 + nosniff, ×2 000 pipelined → 417 ≤ 1 + connection = 0, `100-continue` → 100 แล้ว 200; W2: 60 socket × chunk 3 600 request → ตัดหมด, API ตอบ; W3: JSON เสียไป path ที่ไม่มี → 404; V1: handler เงียบ 18 วิ → ตัดที่ 14–17.5 วิ; V2: keep-alive Agent 150 request (0 B–2 MB, POST ≤ 200 KB) = 1 connection + raw socket ส่งต่อทันทีที่ได้ byte สุดท้าย 150 ครั้ง ไม่ถูกตัด; `maxConnections` = 64 | integration + unit |
 | 27 | X1: pipelined `Expect: 100-continue` ×3 / ×2 000 → handler ≤ 1, connection = 0; Y1: path 15 KB → log `…(+N)`, Host แปลก → `(foreign host)`, ทุกบรรทัด < 512 byte; Y4: `app.addresses()` = 1 (`127.0.0.1`); X4: W2 ใช้ `MAX_CONNECTIONS - 4` socket + ไม่มี `drop`, 100-continue รอ byte แทนเวลาตายตัว | integration |
+| 28 | CR-003: `--log-file` → log ในไฟล์ / stdout ว่าง; argument + path + ชื่อผิด → exit 2 ไม่แตะ lock; rotate / truncate / เขียนพลาด / เขียนไม่ครบ / link ที่วางทีหลัง; `WEBHUB_HOME` ผิด → exit code เดียวกับไม่ส่ง flag (ดู [CR-003 §6](../changes/CR-003-daemon-log-file.md)) | unit + integration |
 
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |

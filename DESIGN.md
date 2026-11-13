@@ -767,7 +767,7 @@ _WebHub/                      # repo (npm package source)
 ├── data/                     # gitignored
 │   ├── sites/  compose/  profiles/  backups/  venvs/
 │   ├── ports.json  infra.json  secrets.json  auth.json  state.json
-└── logs/
+└── logs/                       # daemon.log + daemon.log.1 (≤ 5 MB ต่อไฟล์ — CR-003), daemon-start.err
 ```
 
 ---
@@ -816,6 +816,7 @@ webhub roots add|remove|list <path>
 webhub doctor                        # ตรวจ Docker/runtime/ports/hosts/สิทธิ์ + บอกวิธีแก้
 webhub profiles import|export <file>
 webhub reload | ui
+webhub daemon start | stop [--force] | status | logs [-n N] [-f]   # คำสั่งอื่นที่ต้องใช้ daemon start ให้เอง (--no-start ปิด)
 ```
 
 ---
@@ -936,6 +937,7 @@ webhub reload | ui
 | 16 | ยิง API | **API Studio ในตัว** + **Hoppscotch** เสริม (ไม่ทำ Data API / PostgREST) | §22 |
 | 17 | review v7 (goal เดิม) | nginx: `@wake` แบบ rewrite + proxy.conf header ชุดเต็มทุก location; Host `webhub.internal` สำหรับ `/_wake`/`/_auth`; cookie host-only + login handoff ต่อ tool host; nginx/infra bind 127.0.0.1; install frozen lockfile + `COREPACK_ENABLE_AUTO_PIN=0`; sandbox isolated-vm; generated config ใน `$WEBHUB_HOME` (absolute mount); compose group ต่อ dir + project name จาก `compose config`; disable dependents; vite `via: arg`; roadmap (container runner → MVP-3, start modes → MVP-4, backup → MVP-5); HTTP port ≠ 80 ต่อ `:port`; mariadb 3307 + pinned major `15000–15999`; redis ACL แทน rename-command; `<site>.localhost` ใน container = nginx alias; reserved/CLI/ignore/deny-list | §3, §4, §5, §7, §10, §11, §13, §15, §19, §22 |
 | 18 | review v8 (goal เดิม) | session cookie ต่อ tool host + ลบ cookie ก่อนส่งเข้า tool; daemon resolver `*.localhost`; เลิก `proxy_intercept_errors`; redis shared เฉพาะ app ที่มี URL/username; mongo-express → phase 8; native `target` = `port`; override path absolute; `next dev` เป็นข้อจำกัดที่แจ้งใน run approval; git status `--no-optional-locks` | §3, §4, §5, §7, §10, §20, §22 |
+| 19 | F-004 CLI (2026-11-13) | `webhub daemon start/stop/status/logs`; auto-start daemon เมื่อคำสั่งต้องใช้; log daemon 5 MB × 2 (CR-003); `webhub ui` ทำใน F-009 | §12, §13 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
 ### Backlog

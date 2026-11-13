@@ -7,8 +7,8 @@
 | F-000 | Repo scaffolding | MVP-0 | `done` | [spec](F-000-scaffolding.md) | — | — |
 | F-001 | Config + `$WEBHUB_HOME` + migration | MVP-1 | `done` | [spec](F-001-config.md) | CR-002 | [CR-002 test-2](../reports/CR-002/test-2.md) |
 | F-002 | Platform layer (Windows) | MVP-1 | `done` | [spec](F-002-platform.md) | CR-001 | [test-5](../reports/F-002/test-5.md) |
-| F-003 | Daemon + API + auth | MVP-1 | `done` | [spec](F-003-daemon-api-auth.md) | — | [test-9](../reports/F-003/test-9.md) |
-| F-004 | CLI client | MVP-1 | `todo` | — | — | — |
+| F-003 | Daemon + API + auth | MVP-1 | `done` | [spec](F-003-daemon-api-auth.md) | CR-003 | [test-9](../reports/F-003/test-9.md) |
+| F-004 | CLI client | MVP-1 | `planned` | [spec](F-004-cli-client.md) | CR-003 | — |
 | F-005 | Profile loader + built-in profiles | MVP-1 | `todo` | — | — | — |
 | F-006 | Scanner + detector | MVP-1 | `todo` | — | — | — |
 | F-007 | Site registry + approve/add | MVP-1 | `todo` | — | — | — |
@@ -23,3 +23,4 @@ Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-r
 |---|---|---|
 | [CR-001](../changes/CR-001-pack-mjs.md) | F-000 pack test ยอม `.mts` → `.mjs` | `done` |
 | [CR-002](../changes/CR-002-lock-race-test.md) | F-001 test lock race: ตรวจ "ไม่ถือซ้อน" + fail fast แทน "ชนะตัวเดียว" (test เท่านั้น) | `done` |
+| [CR-003](../changes/CR-003-daemon-log-file.md) | F-003 daemon รับ `--log-file` + จำกัดขนาด log 5 MB × 2 | `done` |
