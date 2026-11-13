@@ -1,6 +1,18 @@
 #!/usr/bin/env node
+/**
+ * webhub CLI (F-004): a thin client of the daemon (DESIGN §13). Commands live in
+ * `src/cli/`; this file parses the global options and dispatches.
+ *
+ * Exit codes: 0 ok, 1 error / unknown command, 2 bad usage or config, 3 daemon not running,
+ * 4 API port busy.
+ */
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { daemonCommand } from "./cli/daemon-command.js";
+import { errorCode, errorLines, exitCodeOf, sanitize } from "./cli/output.js";
+import { type Paths, pathsFor, resolveHome } from "./config/home.js";
 import { readVersion } from "./version.js";
 
 export interface Io {
@@ -8,28 +20,118 @@ export interface Io {
   err: (line: string) => void;
 }
 
+export interface RunOptions {
+  env?: NodeJS.ProcessEnv;
+  /** Aborted by Ctrl+C: ends `logs -f`. */
+  signal?: AbortSignal;
+  /** Called by a command that ends cleanly on `signal` (Ctrl+C must not just exit). */
+  onFollow?: () => void;
+}
+
+export interface CommandContext {
+  io: Io;
+  env: NodeJS.ProcessEnv;
+  json: boolean;
+  noStart: boolean;
+  signal: AbortSignal;
+  /** The command handles Ctrl+C through `signal` (long-running: `logs -f`). */
+  following(): void;
+  /** Resolved lazily: `--help` works without a valid WEBHUB_HOME. */
+  paths(): Paths;
+}
+
+interface Command {
+  summary: string;
+  usage: string;
+  run(args: string[], ctx: CommandContext): Promise<number>;
+}
+
+const COMMANDS: Record<string, Command> = {
+  daemon: daemonCommand,
+};
+
 const HELP = `webhub — local hub for web projects
 
 Usage:
-  webhub --version   Print version
-  webhub --help      Print this help
+  webhub [--json] [--no-start] <command> [options]
+  webhub --version | --help
+  webhub <command> --help
 
-Commands are not implemented yet (see docs/PLAN.md).`;
+Commands:
+${Object.entries(COMMANDS)
+  .map(([name, c]) => `  ${name.padEnd(10)} ${c.summary}`)
+  .join("\n")}
 
-/** Runs the CLI and returns the process exit code. */
-export function run(argv: readonly string[], io: Io): number {
-  const [first] = argv;
-  if (first === undefined || first === "--help" || first === "-h") {
-    io.out(HELP);
-    return 0;
+Global options:
+  --json       machine-readable output (one JSON line)
+  --no-start   do not start the daemon automatically (also WEBHUB_NO_AUTOSTART=1)
+
+Exit codes: 0 ok, 1 error, 2 bad usage / config, 3 daemon not running, 4 API port busy.`;
+
+/** Runs the CLI and resolves to the process exit code. */
+export async function run(argv: readonly string[], io: Io, opts: RunOptions = {}): Promise<number> {
+  const env = opts.env ?? process.env;
+  // global options come before the command; everything after it belongs to the command
+  const firstCmd = argv.findIndex((a) => !a.startsWith("-"));
+  const globalArgs = firstCmd === -1 ? [...argv] : argv.slice(0, firstCmd);
+  const rest = firstCmd === -1 ? [] : argv.slice(firstCmd);
+  let values: { help?: boolean; version?: boolean; json?: boolean; "no-start"?: boolean };
+  try {
+    ({ values } = parseArgs({
+      args: globalArgs,
+      options: {
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "v" },
+        json: { type: "boolean" },
+        "no-start": { type: "boolean" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch {
+    io.err(`webhub: unknown command or option: ${sanitize(globalArgs.join(" "))}`);
+    io.err("Run 'webhub --help' for usage.");
+    return 1;
   }
-  if (first === "--version" || first === "-v") {
+  if (values.version === true) {
     io.out(readVersion());
     return 0;
   }
-  io.err(`webhub: unknown command or option: ${first}`);
-  io.err("Run 'webhub --help' for usage.");
-  return 1;
+  const [name, ...args] = rest;
+  if (values.help === true || name === undefined) {
+    io.out(HELP);
+    return 0;
+  }
+  const cmd = COMMANDS[name];
+  if (cmd === undefined) {
+    io.err(`webhub: unknown command or option: ${sanitize(name)}`);
+    io.err("Run 'webhub --help' for usage.");
+    return 1;
+  }
+  const json = values.json === true;
+  let paths: Paths | undefined;
+  const ctx: CommandContext = {
+    io,
+    env,
+    json,
+    noStart: values["no-start"] === true || env.WEBHUB_NO_AUTOSTART === "1",
+    signal: opts.signal ?? new AbortController().signal,
+    following: () => opts.onFollow?.(),
+    paths: () => {
+      paths ??= pathsFor(resolveHome(env, process.platform, homedir()));
+      return paths;
+    },
+  };
+  try {
+    return await cmd.run(args, ctx);
+  } catch (err) {
+    if (json) {
+      io.err(JSON.stringify({ error: { code: errorCode(err), message: errorLines(err)[0] } }));
+    } else {
+      for (const line of errorLines(err)) io.err(line);
+    }
+    return exitCodeOf(err);
+  }
 }
 
 function isMain(): boolean {
@@ -51,8 +153,26 @@ function isMain(): boolean {
 }
 
 if (isMain()) {
-  process.exitCode = run(process.argv.slice(2), {
-    out: (line) => process.stdout.write(`${line}\n`),
-    err: (line) => process.stderr.write(`${line}\n`),
+  const abort = new AbortController();
+  // Ctrl+C: exits, except while `logs -f` runs — there the first one ends it cleanly
+  let following = false;
+  process.on("SIGINT", () => {
+    if (!following || abort.signal.aborted) process.exit(130);
+    abort.abort();
+  });
+  void run(
+    process.argv.slice(2),
+    {
+      out: (line) => process.stdout.write(`${line}\n`),
+      err: (line) => process.stderr.write(`${line}\n`),
+    },
+    {
+      signal: abort.signal,
+      onFollow: () => {
+        following = true;
+      },
+    },
+  ).then((code) => {
+    process.exitCode = code;
   });
 }

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` |
+| Status | `review` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §13 CLI, §10.3 (auth), §12 (daemon) |
 | Depends on | F-001 (home, lock, json-store), F-002 (process info / killTree), F-003 (daemon, `DaemonClient`) |
@@ -48,23 +48,31 @@ webhub --help | --version | <cmd> --help
 | code | ความหมาย |
 |---|---|
 | 0 | สำเร็จ |
-| 1 | error อื่น (รวม `DAEMON_IMPOSTOR`, `DAEMON_UNREACHABLE`, timeout) |
-| 2 | ใช้คำสั่งผิด / config ผิด (`CONFIG_INVALID`, `JSON_PARSE`, …) |
+| 1 | error อื่น (รวม `DAEMON_IMPOSTOR`, `DAEMON_UNREACHABLE`, timeout) และ**คำสั่ง / option ระดับบนที่ไม่รู้จัก** (คงพฤติกรรม F-000) |
+| 2 | ใช้คำสั่งย่อย / option ของคำสั่งผิด, config / home ผิด (`CONFIG_INVALID`, `JSON_PARSE`, `HOME_INVALID`, …); `webhub daemon` เฉยๆ = แสดง usage + 2 |
 | 3 | daemon ไม่ได้รัน (`status`, และคำสั่งที่ต้องใช้ daemon เมื่อ auto-start ปิด) |
 | 4 | port ของ API ไม่ว่าง (`DAEMON_PORT_BUSY`) |
 
 ### 3.2 Interface (TypeScript, `src/cli/`)
 ```ts
+// src/cli.ts — parse global options (--json, --no-start, --help, --version) + dispatch
 interface Io { out(line: string): void; err(line: string): void }   // เดิม
-interface CommandContext { io: Io; env: NodeJS.ProcessEnv; json: boolean; paths: Paths }
-interface Command { name: string; summary: string; usage: string; run(args: string[], ctx: CommandContext): Promise<number> }
+interface RunOptions { env?: NodeJS.ProcessEnv; signal?: AbortSignal; onFollow?: () => void }
+interface CommandContext { io; env; json; noStart; signal; following(): void; paths(): Paths }  // paths lazy: --help ไม่ต้องมี home
+export function run(argv: readonly string[], io: Io, opts?: RunOptions): Promise<number>;  // เดิม sync → async
 
-export function run(argv: readonly string[], io: Io, env?: NodeJS.ProcessEnv): Promise<number>;  // เดิม sync → async
-export async function startDaemonProcess(paths: Paths, opts?: { timeoutMs?: number }): Promise<{ pid: number; alreadyRunning: boolean }>;
-export async function stopDaemon(paths: Paths, opts?: { force?: boolean; timeoutMs?: number }): Promise<{ wasRunning: boolean; forced: boolean }>;
-export async function ensureDaemon(paths: Paths, io: Io): Promise<DaemonClient>;   // ใช้โดย feature ถัดไป
-export function sanitize(text: string): string;   // ตัด control char ก่อนพิมพ์ข้อความจาก daemon / log
+// src/cli/daemon-control.ts
+interface ControlOptions { env?; platform?; daemonJs?: string; timeoutMs?: number }
+export function daemonStatus(paths: Paths): Promise<DaemonStatus | undefined>;   // proven (handshake); undefined = ไม่รัน
+export function startDaemonProcess(paths, opts?): Promise<{ pid; port; alreadyRunning }>;
+export function stopDaemon(paths, opts?: ControlOptions & { force?: boolean }): Promise<{ wasRunning; forced }>;
+export function ensureDaemon(paths, opts?: ControlOptions & { noStart?: boolean; onStart?: () => void }): Promise<DaemonClient>;
+export function spawnPlan(...) / daemonEnv(env)   // ตัวเลือก spawn (export ให้ test)
+
+// src/cli/daemon-logs.ts — tailLogs(paths, n), followLogs(paths, out, signal)
+// src/cli/output.ts — EXIT, CliError, exitCodeOf, errorLines, sanitize
 ```
+Ctrl+C: ออกทันที (exit 130) ยกเว้นระหว่าง `logs -f` — ครั้งแรกจบ follow แบบปกติ, ครั้งที่สองออกทันที
 `run()` เปลี่ยนเป็น async — test เดิม (`cli.test.ts`) ปรับเป็น `await` (behavior เท่าเดิม)
 
 ### 3.3 `daemon start` flow
@@ -73,7 +81,7 @@ export function sanitize(text: string): string;   // ตัด control char ก�
 3. หา `dist/daemon.js` จาก `import.meta.url` ของ CLI เอง (ไม่ใช้ PATH / cwd)
 4. `spawn(process.execPath, [daemonJs, ...logArgs], { detached: true, windowsHide: true, cwd: paths.home, stdio: ["ignore", "ignore", errFd], env })`
    - `env` = env ของผู้ใช้ **ตัด `NODE_OPTIONS`** และไม่ส่ง `execArgv` ของ CLI (กัน `--inspect` / `--require` ติดไปที่ process ที่ถือ token)
-   - `errFd` = `logs/daemon-start.err` เปิดแบบ truncate (stderr ของ daemon มีแค่ error ตอน start / ชื่อ class ตอน crash → เล็ก) — **ไม่มี pipe** (Y2)
+   - `errFd` = ไฟล์ใหม่ `logs/daemon-start-<สุ่ม>.err` เปิดแบบ `wx` (สร้างใหม่เท่านั้น: ไม่ตาม/ทับ link ที่วางไว้; start พร้อมกันไม่ชนไฟล์กัน) — stderr ของ daemon มีแค่ error ตอน start / ชื่อ class ตอน crash → เล็ก — **ไม่มี pipe** (Y2). start สำเร็จ → rename เป็น `logs/daemon.err` (เก็บ crash line ของรอบนี้); ไม่สำเร็จ → อ่านแล้วลบ; ไฟล์ค้างจาก CLI ที่ตายกลางทาง (> 1 ชม.) ลบตอน start ครั้งถัดไป
    - `cwd` = home → daemon ไม่ถือ folder ที่ผู้ใช้อยู่ (Windows ลบ folder ไม่ได้)
    - `child.unref()`; จด `startedAt` ของ child จาก `process.info(pid)` ทันที (ใช้ kill ตอน timeout)
 5. poll ทุก 100 ms สูงสุด 20 วิ:
@@ -82,11 +90,11 @@ export function sanitize(text: string): string;   // ตัด control char ก�
 6. timeout → `killTree(child.pid, startedAt)` → exit 1 "daemon did not become ready in 20 s; see `webhub daemon logs`"
 
 ### 3.4 `daemon stop` flow
-1. `connectDaemon` → ไม่มี auth.json / port ปฏิเสธ → "not running" → exit 0
-2. `POST /api/v1/shutdown` (bearer หลัง proof) → 202
-3. รอจน PID ใน auth.json ไม่ alive (`process.info`) **และ** auth.json หายไป, poll 100 ms สูงสุด 10 วิ (daemon เอง force exit ที่ ~7 วิ)
-4. ไม่ออกใน 10 วิ: ไม่มี `--force` → exit 1 + hint `webhub daemon stop --force`; มี `--force` → อ่าน lock file (pid + startedAt) → ต้องเป็น PID เดียวกับ auth.json และ `process.info(pid).startedAt` ตรง → `killTree(pid, startedAt)`; ไม่ตรง → ไม่ kill, exit 1
-5. `DAEMON_IMPOSTOR` (โปรแกรมอื่นอยู่บน port) → ไม่ส่ง token, ไม่ kill อะไร, exit 1 + แสดง PID/ชื่อ process ที่ listen (F-002 `ports.listening`)
+1. `connectDaemon` + `status` → ไม่มี auth.json / port ปฏิเสธ → "not running" → exit 0
+2. proof ไม่ผ่าน (`DAEMON_IMPOSTOR`) หรือไม่ตอบ (`DAEMON_UNREACHABLE`): ถ้า auth.json กับ lock file ชี้ PID เดียวกัน และ PID นั้นยังมี start time ตรงกับ lock → เป็น daemon ของเราที่ค้าง / กำลังปิด (ระหว่างปิดตอบ 503 → proof ไม่ผ่าน) → ข้ามไปรอข้อ 4; ไม่งั้น = โปรแกรมอื่นบน port → ไม่ส่ง token, ไม่ kill อะไร, exit 1 + แสดง PID/ชื่อ process ที่ listen (F-002 `ports.listening`)
+3. ตอบปกติ → `POST /api/v1/shutdown` (bearer หลัง proof) → 202
+4. รอจน auth.json หาย **และ** PID ไม่ alive (`process.info`; start time ไม่ตรง lock = PID ถูกใช้ซ้ำ = daemon ออกแล้ว), poll 100 ms สูงสุด 10 วิ (daemon เอง force exit ที่ ~7 วิ)
+5. ไม่ออกใน 10 วิ: ไม่มี `--force` → exit 1 + hint `webhub daemon stop --force`; มี `--force` → PID ใน auth.json ต้องตรงกับ lock file → `killTree(pid, lock.startedAt)` (F-002 ตรวจ start time ซ้ำก่อน kill) → ลบ auth.json; ไม่ตรง → ไม่ kill, exit 1 (`DAEMON_FORCE_REFUSED`)
 
 ### 3.5 `daemon status`
 - `connectDaemon` + `status()` → `running` + pid/port/version/startedAt/uptime → exit 0
@@ -97,7 +105,8 @@ export function sanitize(text: string): string;   // ตัด control char ก�
 - ไฟล์ `logs/daemon.log` (JSON lines เดิมของ F-003) + `logs/daemon.log.1`
 - daemon เขียนเอง ผ่าน `--log-file <path>` ของ `dist/daemon.js` (**ต้องเปิด CR-003 กับ F-003** — เพิ่ม option, ไม่เปลี่ยนพฤติกรรมเดิมเมื่อไม่ส่ง): ก่อนเขียนบรรทัดที่ทำให้ไฟล์เกิน 5 MB → rename เป็น `.1` (ทับของเก่า) แล้วเปิดไฟล์ใหม่ → รวมไม่เกิน ~10 MB; เขียนแบบ append fd; เขียนพลาด (disk เต็ม) → ทิ้งบรรทัด ไม่ล้ม
 - path ต้องอยู่ใน `logs/` ของ home (`assertSafePath`), ไม่ตาม symlink (F-001)
-- `daemon logs`: อ่านท้าย `.1` + ไฟล์ปัจจุบัน, ส่วนท้ายสุด N บรรทัด; `-f` = poll ไฟล์ทุก 500 ms (ตรวจ rotate จาก size ลด / inode) — ไม่ผ่าน daemon → ไม่มี route stream ใน F-004; ทุกบรรทัดผ่าน `sanitize` (path ใน log มาจาก client ภายนอก → กัน terminal escape injection)
+- `daemon logs`: อ่านท้าย `.1` + ไฟล์ปัจจุบัน, ส่วนท้ายสุด N บรรทัด; `-f` = poll ไฟล์ทุก 500 ms: file id (ino) เปลี่ยน = rotate → อ่านส่วนที่เหลือของ `.1` ก่อนแล้วเริ่มไฟล์ใหม่; size ลด = truncate → เริ่มที่ 0; ตัวอักษรหลาย byte ที่ถูกตัดระหว่างสองรอบอ่านไม่เพี้ยน (`StringDecoder`) — ข้อจำกัด: truncate แล้วเขียนกลับจนขนาด ≥ ตำแหน่งเดิมภายใน 500 ms ตรวจไม่เจอ (บรรทัดช่วงนั้นหาย — เกิดเฉพาะตอน rename ไม่ได้); ไม่ผ่าน daemon → ไม่มี route stream ใน F-004; ทุกบรรทัดผ่าน `sanitize` (path ใน log มาจาก client ภายนอก → กัน terminal escape injection)
+- `sanitize`: แทนด้วย `?` — C0 (ยกเว้น tab), DEL, C1 (รวม CSI 8-bit 0x9b), U+2028/2029, bidi U+202A–202E / U+2066–2069; ใช้กับทุกข้อความจาก daemon, log, error และ argument ที่ echo กลับ
 
 ### 3.7 `ensureDaemon()` (ตาม Q3, แนะนำ auto-start)
 - daemon ไม่รัน → พิมพ์ "starting daemon…" ลง stderr → `startDaemonProcess` → คืน client
