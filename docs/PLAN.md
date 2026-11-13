@@ -13,6 +13,8 @@
 | 3 | F-002 Platform layer (Windows): ports, process, elevate, notify | `done` | [spec](features/F-002-platform.md) |
 | 4 | F-003 Daemon + API server + auth | `done` | [spec](features/F-003-daemon-api-auth.md) |
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
+| 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `planned` | [CR](changes/CR-003-daemon-log-file.md) |
+| 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `planned` | [spec](features/F-004-cli-client.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -49,7 +51,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-001 | Config + `$WEBHUB_HOME` + schemaVersion + migration | §11.3, §21.4, §21.6 | สิทธิ์ไฟล์ `data/`, secrets แยกไฟล์ | migration ทำข้อมูลเสีย → backup ก่อน migrate |
 | F-002 | Platform layer (Windows): ports, process, elevate, notify | §21.1 | `elevate()` แสดงสิ่งที่จะทำ, ไม่ต่อ string เข้า shell | PowerShell ช้า / เปลี่ยนตาม version Windows |
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
-| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; login URL ไม่ผ่าน argv (F-003 K3); รอ `auth.pid` = PID ที่ spawn (H16); ตรวจว่า**ทุก listener** บน http port (v4/v6) เป็น nginx ของ webhub ก่อนเปิด link (N1, Q1); log ของ daemon ต้อง rotate / จำกัดขนาด**เป็น byte** หรือรวมบรรทัด 4xx ซ้ำ (F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (Windows เขียน pipe แบบ sync: reader หยุดอ่าน → daemon ค้างถาวร — security-8 Y2); route แบบ stream (`logs -f`) ต้องส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — U1/U2) | — |
+| F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; รอ `auth.pid` = PID ที่ spawn (H16); log ของ daemon จำกัดขนาด**เป็น byte** (CR-003 — F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (security-8 Y2); `webhub ui` ย้ายไป F-009 (F-004 Q2) | — |
 | F-005 | Profile loader + JSON Schema + built-in (static, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
 | F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
@@ -58,7 +60,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 ### MVP-2 — Routing
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
-| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4); ใส่ `X-Webhub-Proxy` (ลบค่าจาก client, config ACL เฉพาะ user, เขียนใหม่ทุก daemon start) แล้วเปิด `browserLogin` (F-003 N1); bind `127.0.0.1` **และ** `[::1]` (ห้าม wildcard อย่างเดียว) + ตรวจทุก listener บน port ก่อนเปิด login / ทุก link (F-003 Q1); ห้าม log request header (Q5); `/` ของ hub. ห้าม redirect (N5); upstream keepalive pool ของ nginx ต่อ daemon ≪ 64 (`MAX_CONNECTIONS` เป็นโควตารวมของ CLI + browser + nginx + WS — F-003 security-7 W2, review-8 X2) | **spike**: Next ≥15 `allowedDevOrigins` |
+| F-009 | nginx container + generator (resolver, proxy.conf, validate/swap, aliases) | §3, §10.2 | bind 127.0.0.1, mount `:ro`; fail closed เมื่อ daemon ไม่รัน + ยืนยันตัว daemon (F-003 L4); ใส่ `X-Webhub-Proxy` (ลบค่าจาก client, config ACL เฉพาะ user, เขียนใหม่ทุก daemon start) แล้วเปิด `browserLogin` (F-003 N1); bind `127.0.0.1` **และ** `[::1]` (ห้าม wildcard อย่างเดียว) + ตรวจทุก listener บน port ก่อนเปิด login / ทุก link (F-003 Q1); คำสั่ง `webhub ui` (ย้ายจาก F-004 Q2): ก่อนเปิด link ตรวจว่าทุก listener บน http port (v4/v6) เป็น nginx ของ webhub (N1, Q1) และ login URL ไม่ผ่าน argv ของ process อื่น (F-003 K3); ห้าม log request header (Q5); `/` ของ hub. ห้าม redirect (N5); upstream keepalive pool ของ nginx ต่อ daemon ≪ 64 (`MAX_CONNECTIONS` เป็นโควตารวมของ CLI + browser + nginx + WS — F-003 security-7 W2, review-8 X2) | **spike**: Next ≥15 `allowedDevOrigins` |
 | F-010 | Static serving + publicDir + deny-list | §10.4 | `.git`/`.env`/source ไม่หลุด | deny-list ไม่ครบ |
 | F-011 | Hosts sync (UAC, block webhub) | §10.1 | แก้เฉพาะ block ของตัวเอง, backup hosts | AV/EDR บล็อกการเขียน hosts |
 | F-012 | Lite mode proxy (Node) | §21.2 | logic เดียวกับ nginx, bind 127.0.0.1 | พฤติกรรมต่างจาก nginx |
@@ -70,7 +72,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-014 | Port Manager (ports.json, probe 3 ชั้น, apply/rollback) | §4.1–4.3 | expose default host | Windows excluded range |
 | F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น | ต้องมี internet |
 | F-016 | Env resolver + env sets + URL rewrite | §11.1–11.2 | secret ไม่ลง log | precedence ผิด |
-| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
+| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
 | F-018 | Container runner พื้นฐาน | §7 | ไม่ privileged, mount ตามจำเป็น | — |
 
 ### MVP-4 — Compose
@@ -121,4 +123,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-F-003 `done` (+ CR-002) → W1 ของ F-004 CLI client (รวมคำสั่ง `webhub daemon start|stop|status` ตาม F-003 Q4)
+W3 ของ CR-003 แล้ว F-004 (ผู้ใช้อนุมัติ + "ทำเลย" 2026-11-13) → จากนั้น W1 ของ F-005
