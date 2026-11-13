@@ -11,7 +11,8 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { daemonCommand } from "./cli/daemon-command.js";
-import { errorCode, errorLines, exitCodeOf, sanitize } from "./cli/output.js";
+import { abandonStart } from "./cli/daemon-control.js";
+import { errorJson, errorLines, exitCodeOf, sanitize } from "./cli/output.js";
 import { type Paths, pathsFor, resolveHome } from "./config/home.js";
 import { readVersion } from "./version.js";
 
@@ -126,7 +127,7 @@ export async function run(argv: readonly string[], io: Io, opts: RunOptions = {}
     return await cmd.run(args, ctx);
   } catch (err) {
     if (json) {
-      io.err(JSON.stringify({ error: { code: errorCode(err), message: errorLines(err)[0] } }));
+      io.err(errorJson(err));
     } else {
       for (const line of errorLines(err)) io.err(line);
     }
@@ -157,10 +158,19 @@ if (isMain()) {
   // Ctrl+C: exits, except while `logs -f` runs — there the first one ends it cleanly
   let following = false;
   process.on("SIGINT", () => {
-    if (!following || abort.signal.aborted) process.exit(130);
+    if (!following || abort.signal.aborted) {
+      abandonStart(); // keep a start's stderr as daemon.err, no temp file left (review C11)
+      process.exit(130);
+    }
     abort.abort();
   });
-  void run(
+  // `webhub daemon logs -f | head`: the reader went away — end quietly, not with a stack
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPIPE") process.exit(process.exitCode ?? 0);
+    });
+  }
+  run(
     process.argv.slice(2),
     {
       out: (line) => process.stdout.write(`${line}\n`),
@@ -172,7 +182,14 @@ if (isMain()) {
         following = true;
       },
     },
-  ).then((code) => {
-    process.exitCode = code;
-  });
+  ).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
+      // run() reports its own errors; this is only a last resort (never a stack)
+      process.stderr.write(`${errorLines(err).join("\n")}\n`);
+      process.exitCode = 1;
+    },
+  );
 }

@@ -73,6 +73,8 @@ export const daemonCommand = {
   usage: USAGE,
   async run(argv: string[], ctx: CommandContext): Promise<number> {
     const [sub, ...args] = argv;
+    // `webhub --json daemon`: a JSON error, not text usage (review C12)
+    if (sub === undefined && ctx.json) throw usageError("missing daemon command");
     if (sub === undefined || sub === "--help" || sub === "-h") {
       ctx.io.out(USAGE);
       return sub === undefined ? EXIT.usage : EXIT.ok;
@@ -126,7 +128,10 @@ export const daemonCommand = {
         emit(ctx, json, { running: false }, "webhub daemon is not running");
         return EXIT.notRunning;
       }
-      const uptime = Math.max(0, Math.round((Date.now() - Date.parse(s.startedAt)) / 1000));
+      const started = Date.parse(s.startedAt);
+      const uptime = Number.isNaN(started)
+        ? "?"
+        : String(Math.max(0, Math.round((Date.now() - started) / 1000)));
       emit(
         ctx,
         json,

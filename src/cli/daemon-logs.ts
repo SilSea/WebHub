@@ -3,7 +3,7 @@
  * disk — no daemon route, so no stream over the API. Every line is sanitised: log lines hold
  * request paths sent by browsers / local programs (terminal escape injection).
  */
-import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Paths } from "../config/home.js";
@@ -15,21 +15,51 @@ const CHUNK = 64 * 1024;
 
 const clean = (line: string) => sanitize(line.endsWith("\r") ? line.slice(0, -1) : line);
 
-const readLines = (file: string): string[] => {
+/** Bytes read back from the end of one log file at most (a pre-existing `.1` may be huge). */
+export const TAIL_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The last `n` lines of `file`, read backwards in chunks — never the whole file (review C9).
+ * A line cut by the byte limit is dropped, not printed half.
+ */
+export function readLastLines(file: string, n: number, maxBytes = TAIL_MAX_BYTES): string[] {
+  let fd: number;
   try {
-    return readFileSync(file, "utf8")
-      .split("\n")
-      .filter((l) => l !== "");
+    fd = openSync(file, "r");
   } catch {
     return [];
   }
-};
+  try {
+    const size = fstatSync(fd).size;
+    const chunks: Buffer[] = [];
+    let start = size;
+    let newlines = 0;
+    while (start > 0 && newlines <= n && size - start < maxBytes) {
+      const len = Math.min(CHUNK, start, maxBytes - (size - start));
+      start -= len;
+      const buf = Buffer.alloc(len);
+      const got = readSync(fd, buf, 0, len, start);
+      const part = buf.subarray(0, got);
+      for (const b of part) if (b === 0x0a) newlines++;
+      chunks.unshift(part);
+    }
+    const lines = Buffer.concat(chunks).toString("utf8").split("\n");
+    if (start > 0) lines.shift(); // partial first line
+    const full = lines.filter((l) => l !== "");
+    return full.slice(Math.max(0, full.length - n));
+  } catch {
+    return [];
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /** The last `n` lines over `daemon.log.1` + `daemon.log`, oldest first. */
 export function tailLogs(paths: Paths, n: number): string[] {
   const file = join(paths.logs, DAEMON_LOG);
-  const all = [...readLines(`${file}.1`), ...readLines(file)];
-  return all.slice(Math.max(0, all.length - n)).map(clean);
+  const current = readLastLines(file, n);
+  const older = current.length < n ? readLastLines(`${file}.1`, n - current.length) : [];
+  return [...older, ...current].map(clean);
 }
 
 interface Pos {
@@ -100,18 +130,22 @@ export async function followLogs(
       );
     });
     if (signal.aborted) break;
-    const st = stat(file);
-    if (st === undefined) continue;
-    if (pos !== undefined && st.ino !== pos.ino) {
-      // rotated: finish the old file (now `.1`) before starting on the new one
-      const old = stat(`${file}.1`);
-      if (old !== undefined && old.ino === pos.ino) emit(`${file}.1`, pos, Number(old.size));
+    try {
+      const st = stat(file);
+      if (st === undefined) continue;
+      if (pos !== undefined && st.ino !== pos.ino) {
+        // rotated: finish the old file (now `.1`) before starting on the new one
+        const old = stat(`${file}.1`);
+        if (old !== undefined && old.ino === pos.ino) emit(`${file}.1`, pos, Number(old.size));
+      }
+      if (pos === undefined || st.ino !== pos.ino || Number(st.size) < pos.offset) {
+        pos = { ino: st.ino, offset: 0 };
+        partial = "";
+        decoder = new StringDecoder("utf8");
+      }
+      emit(file, pos, Number(st.size));
+    } catch {
+      // a read refused for a moment (antivirus / backup holds the file): next poll (review C9)
     }
-    if (pos === undefined || st.ino !== pos.ino || Number(st.size) < pos.offset) {
-      pos = { ino: st.ino, offset: 0 };
-      partial = "";
-      decoder = new StringDecoder("utf8");
-    }
-    emit(file, pos, Number(st.size));
   }
 }

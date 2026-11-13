@@ -18,15 +18,18 @@ if (mode === "hang-close") {
   process.exitCode = await main(process.argv.slice(2));
 } else if (mode === "never-ready") {
   writeFileSync(join(home, "logs", "never-ready.pid"), String(process.pid));
+  process.stderr.write("webhub daemon: still loading\n");
   setInterval(() => {}, 1_000);
 } else if (mode === "fail-2") {
-  process.stderr.write("webhub daemon: config is broken\nwebhub daemon:   - detail one\n");
+  // exactly what daemon.ts describe() prints
+  process.stderr.write("webhub daemon: config is broken\n  - detail one\n  hint: fix the config\n");
   process.exit(2);
 } else if (mode === "report") {
   writeFileSync(
     join(home, "logs", "report.json"),
     JSON.stringify({
       nodeOptions: process.env.NODE_OPTIONS ?? null,
+      nodeDebug: process.env.NODE_DEBUG ?? null,
       argv: process.argv.slice(2),
       cwd: process.cwd(),
       execArgv: process.execArgv,

@@ -88,6 +88,25 @@ export function errorLines(err: unknown): string[] {
   return [`webhub: internal error (${err instanceof Error ? err.name : typeof err})`];
 }
 
+/** `--json` error: one line, same content as `errorLines` without the text decoration (C12). */
+export function errorJson(err: unknown): string {
+  const [first = "", ...rest] = errorLines(err);
+  const details: string[] = [];
+  let hint: string | undefined;
+  for (const l of rest) {
+    if (l.startsWith("  hint: ")) hint = l.slice("  hint: ".length);
+    else details.push(l.replace(/^ {2}- /, ""));
+  }
+  return JSON.stringify({
+    error: {
+      code: errorCode(err),
+      message: first.replace(/^webhub: /, ""),
+      ...(details.length > 0 ? { details } : {}),
+      ...(hint === undefined ? {} : { hint }),
+    },
+  });
+}
+
 /**
  * Text from the daemon or its log is attacker-influenced (request paths from browsers):
  * removes C0 / C1 control characters (ESC sequences, CR, BEL, …; tab kept), DEL, line /
@@ -107,7 +126,11 @@ const UNSAFE: readonly (readonly [number, number])[] = [
   [0x00, 0x08], // C0
   [0x0a, 0x1f], // C0 incl. LF, CR, ESC
   [0x7f, 0x9f], // DEL + C1 (incl. 8-bit CSI 0x9b)
+  [0x061c, 0x061c], // Arabic letter mark (bidi)
+  [0x200b, 0x200b], // zero-width space
+  [0x200e, 0x200f], // LRM / RLM (bidi marks); ZWNJ / ZWJ kept (scripts, emoji)
   [0x2028, 0x2029], // line / paragraph separator
   [0x202a, 0x202e], // bidi embeddings / overrides
   [0x2066, 0x2069], // bidi isolates
+  [0xfeff, 0xfeff], // zero-width no-break space / BOM
 ];
