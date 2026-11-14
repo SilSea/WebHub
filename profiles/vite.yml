@@ -1,0 +1,23 @@
+# Vite dev server; the binary is called directly with webhub's port (package.json untouched).
+schemaVersion: 1
+id: vite
+language: node
+detect:
+  all:
+    - { file: "package.json" }
+  any:
+    - { dep: "vite" }
+    - { file: "vite.config.*" }
+  score: 80
+runtime: { lang: node }
+start:
+  cmd: "vite --port {PORT} --host {HOST} --strictPort"
+port: { default: 5173, via: arg }
+host: { bind: "127.0.0.1" }
+devServer: { hostRewrite: false }
+health: { path: "/", timeout: 60 }
+container: { image: "node:22-slim", workdir: /app }
+variants:
+  # Vite 6 refuses unknown Host headers: nginx sends Host localhost:<port> (DESIGN §19.5)
+  - when: { dep: "vite", range: ">=6" }
+    devServer: { hostRewrite: true }

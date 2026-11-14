@@ -1,0 +1,24 @@
+# Next.js dev server (DESIGN §6.2, §19.5).
+schemaVersion: 1
+id: next
+language: node
+detect:
+  all:
+    - { file: "package.json" }
+  any:
+    - { dep: "next" }
+  score: 85
+runtime: { lang: node }
+start:
+  cmd: "next dev --port {PORT} --hostname {HOST}"
+port: { default: 3000, via: arg }
+host: { bind: "127.0.0.1" }
+devServer: { hostRewrite: false }
+health: { path: "/", timeout: 120 }
+container: { image: "node:22-slim", workdir: /app }
+variants:
+  - when: { dep: "next", range: "<13" }
+    start: { cmd: "next dev -p {PORT} -H {HOST}" }
+  # allowedDevOrigins also checks Origin: spike before F-009 (DESIGN §16)
+  - when: { dep: "next", range: ">=15" }
+    devServer: { hostRewrite: true }

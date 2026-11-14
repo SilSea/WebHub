@@ -1,0 +1,21 @@
+# Elysia on Bun (DESIGN §6.2): port from env PORT; a hard-coded .listen(N) is found by the
+# scanner, which then sets via fixed for the site.
+schemaVersion: 1
+id: bun-elysia
+language: bun
+detect:
+  all:
+    - { file: "package.json" }
+  any:
+    - { dep: "elysia" }
+  score: 80
+runtime: { lang: bun }
+start:
+  cmd: "bun run --watch {entry}"
+  vars: { entry: "src/index.ts" }
+port: { default: 3000, via: env, env: PORT }
+host: { bind: "127.0.0.1" }
+health: { path: "/", timeout: 60 }
+container: { image: "oven/bun:1", workdir: /app }
+routes:
+  detectPrefix: ['.group("/', ".group('/", 'prefix: "/', "prefix: '/"]

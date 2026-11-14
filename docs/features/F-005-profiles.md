@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` |
+| Status | `review` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §6 Runtime Profiles, §19.5 variants, §21.5 profiles สำหรับทุกคน, §13 (`webhub profiles`), §12 (`profiles/`, `data/profiles/`, `src/profiles/`) |
 | Depends on | F-001 (home, `data/profiles/`, safe path, errors), F-003 (API route), F-004 (CLI command table) |
@@ -58,8 +58,10 @@ variants:
     devServer: { hostRewrite: true }          # merge ทับแบบ object ลึก; array แทนทั้งก้อน
 ```
 - ทุก object เป็น strict (key แปลก = error ชี้ชื่อ key) — พิมพ์ผิดไม่เงียบ
+- มี `start` (process) หรือ `static: { spa }` (ไม่มี process — `static`, `static-spa`) อย่างใดอย่างหนึ่ง; `start` ต้องมี `port`; `via: arg` ต้องมี `{PORT}` ใน `start.cmd`; `via: env` ต้องมี `port.env`
+- `id` ต้องตรงชื่อไฟล์ (`<id>.yml`); ไฟล์ `.yaml` = problem (ใช้ `.yml`) → id ซ้ำระหว่างไฟล์ผู้ใช้เกิดไม่ได้
 - กติกา detect (ไม่มี regex จาก profile — กัน ReDoS):
-  - `file: "a|b"`: path relative ใช้ `/`, ห้าม `..` / absolute / drive / `\`; `*` ได้ภายใน segment เดียว (เช่น `*.uproject`); ลงท้าย `/` = folder
+  - `file: "a|b"`: path relative ใช้ `/`, ห้าม `..` / absolute / drive / `\`; `*` ได้เฉพาะ segment สุดท้าย ≤ 4 ตัว (เช่น `*.uproject`, `src/*.config.*`); ลงท้าย `/` = folder
   - `fileContains: [files, "x|y"]`: substring (case-sensitive) ในไฟล์ที่อ่านได้ ≤ 256 KB ต่อไฟล์
   - `dep: "name"` (+ `range` ได้): อยู่ใน deps ที่ผู้เรียกส่งมา (package.json / requirements / pyproject — F-006 รวบรวม)
 - variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง) (Q6); ตรงหลายข้อ → apply ตามลำดับในไฟล์
@@ -71,6 +73,10 @@ variants:
 export const PROFILE_SCHEMA_VERSION = 1;
 export const ProfileSchema: z.ZodType<Profile>;          // strict
 export function parseProfile(text: string, file: string): Profile;   // throws WebhubError CONFIG_INVALID (file, line, field path)
+
+// range.ts — parseRange / satisfies / lowestVersion (spec ของ dep → version ต่ำสุด; `latest`, `workspace:*`, `||` → ไม่ apply variant)
+// command.ts — splitCommand / renderCommand / placeholdersOf
+// routes.ts — profileRoutes(paths): RouteRegistrar (โหลดซ้อนกัน = ใช้ผลเดียวกัน)
 
 // loader.ts
 export interface LoadedProfile { profile: Profile; source: "builtin" | "user"; file: string; overrides?: string /* built-in file ที่ถูกทับ */ }
@@ -94,8 +100,8 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 
 ### 3.3 Flow
 1. daemon start → `loadProfiles` ครั้งเดียว + โหลดใหม่เมื่อเรียก route (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี file watcher)
-2. อ่านไฟล์: `lstat` → ต้องเป็น regular file, ไม่ใช่ link, ≤ 256 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
-3. parse YAML แบบ safe (core schema, ไม่มี custom tag, `maxAliasCount` ต่ำ, ปฏิเสธ key `__proto__` / `constructor` / `prototype`) → zod → ตรวจ placeholder / path pattern / range
+2. อ่านไฟล์: `lstat` (bigint) → ต้องเป็น regular file, ไม่ใช่ link, ไม่ใช่ hard link (`nlink` 1), ≤ 256 KB → `open` → `fstat` ต้องเป็น `ino` เดียวกัน (ไม่เทียบ `dev`: Node 22 บน Windows ให้ 0 จาก lstat) → อ่าน ≤ 256 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
+3. parse YAML แบบ safe (YAML 1.2 core schema, ไม่มี custom tag, **ไม่รับ alias เลย** (ไม่มี alias bomb), key ซ้ำ / หลาย document / warning ของ YAML (เช่น tag ไม่รู้จัก) = error, ปฏิเสธ key `__proto__` / `constructor` / `prototype`, ข้อความ error ใช้แค่ code + บรรทัด ไม่ยกเนื้อไฟล์) → zod → ตรวจ placeholder / path pattern / range
 4. id ซ้ำ: ระหว่างไฟล์ผู้ใช้ = problem ทั้งคู่; ผู้ใช้ทับ built-in → ตาม Q3
 
 ### 3.4 Built-in ชุดแรก (Q2)
@@ -114,7 +120,7 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 ## 5. Impact ต่อของเดิม
 | เรื่อง | กระทบไหม | รายละเอียด |
 |---|---|---|
-| feature ที่ done แล้ว | น้อย | F-003: เพิ่ม route ใน API (เพิ่ม ไม่เปลี่ยนพฤติกรรมเดิม — ถ้า route table ของ F-003 ต้องแก้โครง → CR); F-004: เพิ่ม command ในตาราง (โครงรองรับไว้แล้ว) |
+| feature ที่ done แล้ว | น้อย | F-003: เพิ่ม route ใน API ผ่าน `registrars` ที่มีอยู่ — `daemon.ts` ส่ง `profileRoutes(paths)` นำหน้า registrars จาก test (wiring 1 บรรทัด, route เดิม / auth / โครงไม่เปลี่ยน); F-004: เพิ่ม command ในตาราง (โครงรองรับไว้แล้ว) + export `explainImpostor` เพื่อใช้ซ้ำ (พฤติกรรมไม่เปลี่ยน) |
 | Zero-touch | ไม่ | อ่าน `profiles/` + `data/profiles/` เท่านั้น; F-005 ไม่แตะ project |
 | Security | ใช่ | ดู §6 |
 | Performance / resource | น้อย | ไฟล์ ≤ 200 × 256 KB; parse ตอนเรียก |
@@ -170,6 +176,7 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-005/test-1.md) 436/6 | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
@@ -179,3 +186,4 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 |---|---|---|
 | 2026-11-14 | W1 ① | ร่าง spec |
 | 2026-11-14 | W1 ②–④ | ผู้ใช้ตอบ Q1–Q6 ตามแนะนำ (YAML + `yaml`, 7 built-in, ผู้ใช้ทับทั้งตัว, lib + API + CLI, cmd string → argv, range ทำเอง) → `planned` |
+| 2026-11-14 | W3 | ผู้ใช้สั่ง "เริ่มเลย" → implement `src/profiles/*`, `profiles/*.yml` ×7, fixtures ×6, `webhub profiles`, `GET /api/v1/profiles`; `yaml@2.9.1` (ไม่มี dependency / install script); test-1 → `review` |

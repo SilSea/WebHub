@@ -15,7 +15,7 @@
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 | 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
-| 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `planned` | [spec](features/F-005-profiles.md) |
+| 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `review` | [spec](features/F-005-profiles.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 

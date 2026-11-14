@@ -1,0 +1,9 @@
+# Plain static site: nginx (or the Lite proxy) serves the files, no process (DESIGN §6.2, §7).
+schemaVersion: 1
+id: static
+language: static
+detect:
+  all:
+    - { file: "index.html|public/index.html|docs/index.html" }
+  score: 50
+static: { spa: false }
