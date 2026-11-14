@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §13 CLI, §10.3 (auth), §12 (daemon) |
 | Depends on | F-001 (home, lock, json-store), F-002 (process info / killTree), F-003 (daemon, `DaemonClient`) |
@@ -100,7 +100,7 @@ Ctrl+C: ออกทันที (exit 130) ยกเว้นระหว่า
    - ไม่มี auth.json หรือ PID ตาย / start time ไม่ตรง (daemon ออกไปแล้ว) → ถาม status อีกครั้ง: ไม่รัน / ไม่ตอบ → "stopped" exit 0 (ลบ auth.json ค้างถ้ายังชี้ PID นั้น); มี daemon ใหม่ตอบ → stop ตัวนั้น; ยังไม่ผ่าน proof → โปรแกรมอื่นบน port
    - อ่าน process table ไม่ได้ / lock กับ auth.json ไม่ตรงกัน → ไม่ถือว่าเป็นของเรา
    - โปรแกรมอื่นบน port → ไม่ส่ง token, ไม่ kill อะไร (แม้มี `--force`), exit 1 ทันที (ไม่รอ 10 วิ) + แสดง PID/ชื่อ process ที่ listen (F-002 `ports.listening`)
-   - ไม่มี auth.json ตั้งแต่ต้น แต่ lock file ชี้ PID ที่ยังมีชีวิตและ start time ตรง (daemon กำลังปิด — `stop` อีกตัวชนะไปแล้ว — หรือกำลัง start หลังได้ lock แล้ว) → รอจน PID ตาย → "stopped"; ระหว่างรอ ถ้า auth.json ชี้ PID นั้น → ถาม status ทุกรอบ poll จนตอบ (เขียน auth.json แล้วยังไม่ listen ได้ — review-3 G1) → stop ตัวนั้นตามปกติ; ไม่ตายใน 10 วิ → `--force`: `killTree(lock.pid, lock.startedAt)` (daemon ค้างตอน start — review-3 G2), ไม่มี `--force` → `DAEMON_STOP_TIMEOUT` + hint `--force` (review-2 E3)
+   - ไม่มี auth.json ตั้งแต่ต้น แต่ lock file ชี้ PID ที่ยังมีชีวิตและ start time ตรง (daemon กำลังปิด — `stop` อีกตัวชนะไปแล้ว — หรือกำลัง start หลังได้ lock แล้ว) → รอจน PID ตาย → "stopped"; ระหว่างรอ ถ้า auth.json ชี้ PID นั้น → ถาม status ทุกรอบ poll จนตอบ (เขียน auth.json แล้วยังไม่ listen ได้ — review-3 G1) → stop ตัวนั้นตามปกติ (ใช้ deadline 10 วิเดิมที่เหลือ ไม่เริ่มนับใหม่ — review-4 H4); ไม่ตายใน 10 วิ → `--force`: `killTree(lock.pid, lock.startedAt)` แล้วลบ auth.json ที่ตัวค้างอาจเขียนไว้ (เฉพาะเมื่อชี้ PID นั้น — review-4 H2) (daemon ค้างตอน start — review-3 G2), ไม่มี `--force` → `DAEMON_STOP_TIMEOUT` + hint `--force` (review-2 E3)
    - ขอบเขต (review-3 G4): `stop` ที่แพ้อาจตอบ "not running" ก่อน process ออกจริงไม่กี่ ms เมื่อ auth.json **และ** lock ถูกปล่อยแล้ว (port + lock ว่างแล้ว → `start` ต่อได้); `stop` ระหว่าง `start` ช่วงก่อน daemon ได้ lock (ช่วงโหลดตอนต้น) ตอบ "not running" และ daemon ตัวนั้นรันต่อ — CLI ไม่มีทางรู้ว่ากำลังจะมี daemon
 3. ตอบปกติ → `POST /api/v1/shutdown` (bearer หลัง proof) → 202; connection ปิดกลางทาง / proof ไม่ผ่าน (เริ่มปิดแล้ว → 503) / ผ่าน proof แล้วได้ 503 `SHUTTING_DOWN` / ไม่รันแล้ว / auth.json หายระหว่างอ่าน (`ENOENT` ระหว่าง `lstat` กับ read ของ F-001 = ไม่รัน, ไม่ใช่ internal error — review-2 E1) → ไปรอข้อ 4 เหมือนกัน (ทำให้ `stop` หลายตัวพร้อมกัน exit 0 ทุกตัว)
 4. รอจน PID ตาย (`process.info`; start time ไม่ตรง lock = PID ถูกใช้ซ้ำ = daemon ออกแล้ว; อ่าน process table ไม่ได้ = ไม่รู้ → รอต่อ ไม่ถือว่าตาย), poll 100 ms สูงสุด 10 วิ (daemon เอง force exit ที่ ~7 วิ) → ลบ auth.json ค้าง (daemon ที่ถูก kill แรงๆ ไม่ได้ลบ) **เฉพาะเมื่อยังเป็นไฟล์เดิม**: PID เดิม และ token เดิมที่อ่านไว้ตอนเริ่ม `stop` (review-2 E5; ไฟล์ที่ถูกเขียนระหว่างตรวจกับลบยังหายได้ — กระทบแค่ availability)
@@ -203,9 +203,10 @@ Security checklist (WORKFLOW §8): secrets ไม่อยู่ใน argv/log/
 | 1 | [test-1](../reports/F-004/test-1.md) 346/6 | [review-1](../reports/F-004/review-1.md) FAIL (C1, C2 major) | [security-1](../reports/F-004/security-1.md) FAIL (D1 critical) | แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") |
 | 2 | [test-2](../reports/F-004/test-2.md) 365/6 | [review-2](../reports/F-004/review-2.md) code + security FAIL (E1 major) | (รวมใน review-2) | แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") |
 | 3 | [test-3](../reports/F-004/test-3.md) 377/6 | [review-3](../reports/F-004/review-3.md) code + security **PASS** (G1–G3 minor, G4–G5 nit) | (รวมใน review-3) | แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") → review รอบ 4 เฉพาะส่วนที่แก้ |
+| 4 | [test-4](../reports/F-004/test-4.md) 392/6, [test-5](../reports/F-004/test-5.md) | [review-4](../reports/F-004/review-4.md) code + security **PASS** (H1–H2 minor, H3–H4 nit) | (รวมใน review-4) | แก้ H1–H4 แล้ว merge (ผู้ใช้เลือก "แก้แล้ว merge") |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [x] DESIGN.md §13 (+ `webhub daemon …`), §17  - [x] PLAN.md (status)  - [x] features/README.md (status)  - [ ] reports/README.md (ตอน done)  - [x] CR-003 (Q1 = A, done)
+- [x] DESIGN.md §13 (+ `webhub daemon …`), §17  - [x] PLAN.md (status)  - [x] features/README.md (status)  - [x] reports/README.md  - [x] CR-003 (Q1 = A, done)
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
@@ -217,3 +218,4 @@ Security checklist (WORKFLOW §8): secrets ไม่อยู่ใน argv/log/
 | 2026-11-14 | W3 | ผู้ใช้เลือก "แก้ทั้งหมด": env denylist, stop idempotent + ไม่ใช่ของเรา = impostor, kill fallback, start errors, tail อ่านท้ายไฟล์, JSON error, sanitize bidi mark, Ctrl+C / EPIPE; เทส mock platform + stop พร้อมกัน |
 | 2026-11-14 | W3 | review-2 FAIL (E1); ผู้ใช้เลือก "แก้ทั้งหมด": ENOENT ของ auth.json = ไม่รัน, 503 `SHUTTING_DOWN` = กำลังปิด, `stop` รอ PID ใน lock, `status` / `start` / `ensureDaemon` แยก daemon ของเราที่กำลังปิดออกจากโปรแกรมอื่น, ลบ auth.json เทียบ token, log rotate / tail gap / stdout error; เทส fake daemon ที่ผ่าน proof |
 | 2026-11-14 | W3 | review-3 PASS; ผู้ใช้เลือก "แก้ทั้งหมด" G1–G5: ถาม status ซ้ำระหว่างรอ daemon ที่กำลัง start, `--force` กับ daemon ค้างตอน start (lock + start time), output พังไม่ exit กลางคำสั่ง, เทสครอบ mutation ที่รอด (mock `readDoc` ENOENT), spec ขอบเขต |
+| 2026-11-14 | W3 | review-4 PASS; ผู้ใช้เลือก "แก้แล้ว merge": H1 เทส start-wait แบบ event, H2 ลบ auth.json ค้างหลัง `--force` กับตัวค้างตอน start, H3 เทส re-ask rethrow, H4 deadline เดียวทั้ง `stop` → `done`, merge เข้า `develop` |

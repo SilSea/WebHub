@@ -46,6 +46,8 @@ function fakePlatform() {
   const procs = new Map<number, ProcInfo>();
   const kills: { pid: number; startedAt: string }[] = [];
   let infoFails = false;
+  let infoCalls = 0;
+  let onInfo: (pid: number, call: number) => void = () => {};
   let onKill: (pid: number, startedAt: string) => void = (pid) => {
     procs.delete(pid);
   };
@@ -54,6 +56,8 @@ function fakePlatform() {
     process: {
       info: async (pid: number) => {
         if (infoFails) throw new PlatformError("PLATFORM_TOOL", "powershell failed");
+        infoCalls++;
+        onInfo(pid, infoCalls);
         return procs.get(pid);
       },
       killTree: async (pid: number, startedAt: string) => {
@@ -76,6 +80,10 @@ function fakePlatform() {
     },
     setOnKill(fn: (pid: number, startedAt: string) => void) {
       onKill = fn;
+    },
+    /** Called on every `process.info` (before it answers) with the running call count. */
+    setOnInfo(fn: (pid: number, call: number) => void) {
+      onInfo = fn;
     },
   };
 }
@@ -504,9 +512,12 @@ describe("no auth.json, lock held (review-3 G1 / G2, M9 / M18)", () => {
     const f = fakePlatform();
     f.add(PID, STARTED);
     writeLock(h.paths, PID, STARTED);
-    const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 300, force: true });
+    // it wrote auth.json but never listened (port 1: nothing there)
+    setTimeout(() => writeAuth(h.paths, PID, 1), 100);
+    const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 600, force: true });
     expect(r).toEqual({ wasRunning: true, forced: true });
     expect(f.kills).toEqual([{ pid: PID, startedAt: STARTED }]);
+    expect(existsSync(h.paths.auth)).toBe(false); // review-4 H2
   });
 
   it("hung while starting, no --force → DAEMON_STOP_TIMEOUT with the --force hint, nothing killed", async () => {
@@ -578,25 +589,47 @@ describe("status / start / ensureDaemon tell our stopping daemon apart (review-3
     expect(isServerError(err, "DAEMON_IMPOSTOR")).toBe(true);
   });
 
-  it("start waits for our stopping daemon to leave, then starts", async () => {
+  it("start waits for our stopping daemon to leave, then starts (review-4 H1)", async () => {
     const f = fakePlatform();
     f.add(PID, STARTED);
     writeAuth(h.paths, PID, sq.port);
     writeLock(h.paths, PID, STARTED);
-    setTimeout(() => {
-      f.procs.delete(PID);
-      sq.server.close();
-    }, 300);
-    const t0 = Date.now();
+    // event-driven, not a timer: alive for the first two looks (status check, owner check),
+    // gone on the third — which only the wait loop makes
+    let calls = 0;
+    f.setOnInfo((pid) => {
+      if (pid !== PID) return;
+      calls++;
+      if (calls === 3) {
+        f.procs.delete(PID);
+        sq.server.close();
+      }
+    });
     const err = (await startDaemonProcess(h.paths, {
       platform: f.platform,
       env: { ...process.env, WEBHUB_HOME: h.paths.home, WEBHUB_TEST_ENTRY: "fail-2" },
       daemonJs: ENTRY,
       timeoutMs: 5_000,
     }).catch((e: unknown) => e)) as CliError;
-    // it got as far as spawning (the fixture exits 2), after waiting for the old one
+    // it waited (third look) and then got as far as spawning (the fixture exits 2)
+    expect(calls).toBeGreaterThanOrEqual(3);
     expect(err.code).toBe("DAEMON_START_FAILED");
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
+  });
+
+  it("re-asking a starting daemon: a non-transient status error is reported (review-4 H3)", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    const d = await fakeDaemon({ statusPid: -1 }); // invalid status → DAEMON_BAD_STATUS
+    try {
+      writeAuth(h.paths, PID, d.port);
+      const err = (await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 2_000 }).catch(
+        (e: unknown) => e,
+      )) as CliError;
+      expect(err.code).toBe("DAEMON_BAD_STATUS");
+    } finally {
+      d.server.close();
+    }
   });
 
   it("ensureDaemon does not try to start over another program", async () => {

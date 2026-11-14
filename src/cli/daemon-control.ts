@@ -607,7 +607,10 @@ async function stopImpl(
       // stop it the normal way; asked again on every poll until then
       if (depth === 0 && readAuthPid(paths) === lock.pid) {
         const s = await daemonStatus(paths).catch(transientAsUndefined);
-        if (s?.pid === lock.pid) return stopImpl(paths, opts, 1);
+        if (s?.pid === lock.pid) {
+          // one deadline for the whole `stop` (review-4 H4)
+          return stopImpl(paths, { ...opts, timeoutMs: Math.max(0, deadline - Date.now()) }, 1);
+        }
       }
       if (Date.now() >= deadline) break;
       await sleep(POLL_MS);
@@ -616,6 +619,8 @@ async function stopImpl(
       // hung while starting (lock taken, no auth.json): the lock's PID + start time is the
       // same proof as for a running daemon (review-3 G2)
       await forceKill(platform, lock.pid, lock.startedAt);
+      // it may have written auth.json without ever listening (review-4 H2)
+      removeAuthOf(paths, lock.pid, undefined);
       return { wasRunning: true, forced: true };
     }
     throw new CliError(

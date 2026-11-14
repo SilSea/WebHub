@@ -8,7 +8,7 @@
 | F-001 | Config + `$WEBHUB_HOME` + migration | MVP-1 | `done` | [spec](F-001-config.md) | CR-002 | [CR-002 test-2](../reports/CR-002/test-2.md) |
 | F-002 | Platform layer (Windows) | MVP-1 | `done` | [spec](F-002-platform.md) | CR-001 | [test-5](../reports/F-002/test-5.md) |
 | F-003 | Daemon + API + auth | MVP-1 | `done` | [spec](F-003-daemon-api-auth.md) | CR-003 | [test-9](../reports/F-003/test-9.md) |
-| F-004 | CLI client | MVP-1 | `review` | [spec](F-004-cli-client.md) | CR-003 | — |
+| F-004 | CLI client | MVP-1 | `done` | [spec](F-004-cli-client.md) | CR-003 | — |
 | F-005 | Profile loader + built-in profiles | MVP-1 | `todo` | — | — | — |
 | F-006 | Scanner + detector | MVP-1 | `todo` | — | — | — |
 | F-007 | Site registry + approve/add | MVP-1 | `todo` | — | — | — |

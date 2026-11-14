@@ -17,6 +17,7 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 | CR-001 | 1 | [test-1](CR-001/test-1.md) | [F-002 review-3](F-002/review-3.md) — OK | [F-002 security-3](F-002/security-3.md) — OK | done — merge พร้อม F-002 |
 | F-003 | 9 | [test-9](F-003/test-9.md) | [review-8](F-003/review-8.md) | [security-8](F-003/security-8.md) — PASS | done — 8 รอบ review; ผู้ใช้ตัดสิน residual (N3, L3, CPU DoS ในเครื่อง); minor/nit รอบ 8 แก้ครบ; ไม่มีรอบ 9 ตามผู้ใช้ |
 | CR-002 | 2 | [test-2](CR-002/test-2.md) | [review-1](CR-002/review-1.md) — PASS | [security-1](CR-002/security-1.md) — PASS | done — minor แก้ครบตามผู้ใช้สั่ง |
+| F-004 | 5 | [test-5](F-004/test-5.md) | [review-4](F-004/review-4.md) — PASS | [security-1](F-004/security-1.md) FAIL → รอบ 2–4 รวมใน review — PASS | done — review-1 C1/C2 major + security-1 D1 critical, review-2 E1 major แก้แล้ว; minor/nit ทุกรอบแก้ครบตามผู้ใช้สั่ง; ไม่มี review รอบ 5 ตามผู้ใช้ |
 | CR-003 | 3 | [test-3](CR-003/test-3.md) | [review-2](CR-003/review-2.md) — PASS | [security-1](CR-003/security-1.md) — PASS; รอบ 2 รวมใน review-2 — PASS | done — review-1 Z1 major แก้แล้ว; minor/nit/info ทั้งสองรอบแก้ครบตามผู้ใช้สั่ง; ไม่มี review รอบ 3 ตามผู้ใช้ |
 
 ## Regression
