@@ -52,14 +52,18 @@ const problemOf = (file: string, err: unknown): ProfileProblem => {
   };
 };
 
-/** Reads one profile file: a regular file, not a link, one hard link, ≤ MAX_PROFILE_BYTES. */
-async function readProfileFile(abs: string): Promise<string> {
+/**
+ * Reads one profile file: a regular file, not a link, ≤ MAX_PROFILE_BYTES; a user file also has
+ * one hard link only. Built-in files may have several: pnpm / bun install packages as hard
+ * links into their store (review-1 K1).
+ */
+async function readProfileFile(abs: string, source: LoadedProfile["source"]): Promise<string> {
   // bigint: 64-bit Windows file ids lose precision as numbers (lstat vs fstat differ on Node 22)
   const st = await lstat(abs, { bigint: true });
   if (st.isSymbolicLink())
     throw new WebhubError("SYMLINK_REFUSED", "profile files must not be links");
   if (!st.isFile()) throw new WebhubError("CONFIG_INVALID", "not a regular file");
-  if (st.nlink > 1n)
+  if (source === "user" && st.nlink > 1n)
     throw new WebhubError("CONFIG_INVALID", "profile files must not be hard links");
   if (st.size > BigInt(MAX_PROFILE_BYTES)) {
     throw new WebhubError("FILE_TOO_LARGE", `profile file exceeds ${MAX_PROFILE_BYTES} bytes`);
@@ -115,7 +119,7 @@ async function loadDir(
       continue;
     }
     try {
-      const profile = parseProfile(await readProfileFile(join(dir, name)), rel);
+      const profile = parseProfile(await readProfileFile(join(dir, name), source), rel);
       if (profile.id !== name.slice(0, -PROFILE_EXT.length)) {
         throw new WebhubError("CONFIG_INVALID", `invalid profile ${name}`, {
           details: [`id "${profile.id}" must equal the file name (${profile.id}${PROFILE_EXT})`],

@@ -8,7 +8,7 @@ import { type LoadedProfile, loadProfiles } from "../../src/profiles/loader.js";
 import { effectiveProfile, evaluateDetect } from "../../src/profiles/match.js";
 import { assertUntouched, copyFixture, hashTree, removeFixtureCopy } from "../helpers/fixture.js";
 import { tempHome } from "../helpers/home.js";
-import { diskView } from "../helpers/project-view.js";
+import { diskView, memView } from "../helpers/project-view.js";
 
 const CASES: { fixture: string; profile: string; check?: (p: LoadedProfile["profile"]) => void }[] =
   [
@@ -90,6 +90,30 @@ describe("built-in profiles × fixtures", () => {
     const vite = byId("vite");
     expect(effectiveProfile(vite, new Map([["vite", "^5.4.0"]])).devServer?.hostRewrite).toBe(
       false,
+    );
+  });
+
+  it("fastapi: not for pyproject-only projects (K2) or Django with uvicorn (K4)", () => {
+    const fastapi = profiles.find((x) => x.profile.id === "fastapi")?.profile;
+    if (fastapi === undefined) throw new Error("fastapi");
+    expect(
+      evaluateDetect(
+        fastapi,
+        memView({ "pyproject.toml": '[project]\ndependencies = ["fastapi"]' }),
+      ).matched,
+    ).toBe(false);
+    expect(
+      evaluateDetect(
+        fastapi,
+        memView({ "requirements.txt": "django\nuvicorn\n", "manage.py": "" }, { uvicorn: "*" }),
+      ).matched,
+    ).toBe(false);
+    expect(
+      evaluateDetect(fastapi, memView({ "requirements.txt": "uvicorn\n" }, { uvicorn: "*" }))
+        .matched,
+    ).toBe(false);
+    expect(evaluateDetect(fastapi, memView({ "requirements.txt": "fastapi\n" })).matched).toBe(
+      true,
     );
   });
 });

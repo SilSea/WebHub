@@ -1,13 +1,17 @@
 # FastAPI with uvicorn (DESIGN §6.1). Dependencies go into data/venvs/<site>/ (never the project).
+# requirements.txt only: a pyproject-only project (uv / poetry) needs another install command —
+# a separate profile later (review-1 K2). Django (manage.py) with uvicorn is not FastAPI (K4).
 schemaVersion: 1
 id: fastapi
 language: python
 detect:
   all:
-    - { file: "requirements.txt|pyproject.toml" }
+    - { file: "requirements.txt" }
   any:
     - { dep: "fastapi" }
-    - { fileContains: ["requirements.txt|pyproject.toml", "fastapi|uvicorn"] }
+    - { fileContains: ["requirements.txt", "fastapi"] }
+  none:
+    - { file: "manage.py" }
   score: 70
 runtime:
   lang: python

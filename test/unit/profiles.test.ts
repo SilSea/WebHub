@@ -463,4 +463,16 @@ describe("loader (F-005 §3.3)", () => {
     expect(r.profiles).toEqual([]);
     expect(r.problems[0]).toMatchObject({ file: "profiles/demo.yml" });
   });
+
+  it("built-in files installed as hard links (pnpm / bun store) still load (review-1 K1)", async () => {
+    const store = join(h.root, "store");
+    const dir = join(h.root, "builtin");
+    mkdirSync(store);
+    mkdirSync(dir);
+    writeFileSync(join(store, "demo.yml"), MIN);
+    linkSync(join(store, "demo.yml"), join(dir, "demo.yml"));
+    const r = await loadProfiles(h.paths, { builtinDir: dir });
+    expect(r.problems).toEqual([]);
+    expect(r.profiles.map((p) => p.profile.id)).toEqual(["demo"]);
+  });
 });
