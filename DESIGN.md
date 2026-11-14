@@ -390,7 +390,7 @@ webhub รัน container + เพิ่ม connection ทุก site ให้
 
 `profiles/<id>.yml` (built-in) + `data/profiles/*.yml` (ผู้ใช้เพิ่ม/ทับ — id เดียวกับ built-in = ทับทั้งตัว ไม่ merge)
 
-กติกา (F-005): มี `schemaVersion`; ทุก object strict (key แปลก = error); `detect` มี `all` / `any` / `none` + `score` — ไม่มี regex (substring + `*` ใน segment เดียว, กัน ReDoS); path ใน rule เป็น relative `/` ห้าม `..`; `start.cmd` เป็น string ที่แยกเป็น argv เอง **ไม่ผ่าน shell** (printable ASCII, metachar ของ shell = error, ห้ามที่อยู่นอก loopback); `host.bind` เฉพาะ loopback; `port.env` = `PORT` / `<NAME>_PORT`; variants เทียบ version ต่ำสุดที่ประกาศ, `null` = ลบ key; ไฟล์ ≤ 256 KB, ≤ 5000 node, ≤ 200 ไฟล์ผู้ใช้
+กติกา (F-005): มี `schemaVersion`; ทุก object strict (key แปลก = error); `detect` มี `all` / `any` / `none` + `score` — ไม่มี regex (substring + `*` ใน segment เดียว, กัน ReDoS); path ใน rule เป็น relative `/` ห้าม `..`; `start.cmd` เป็น string ที่แยกเป็น argv เอง **ไม่ผ่าน shell** (printable ASCII, metachar ของ shell = error, ห้ามที่อยู่นอก loopback); `host.bind` เฉพาะ loopback; `port.env` = `PORT` / `<NAME>_PORT`; variants เทียบ version ต่ำสุดที่ประกาศ, `null` = ลบ key; ไฟล์ ≤ 64 KB, ≤ 5000 node, ≤ 8 variants, ≤ 200 ไฟล์ผู้ใช้
 
 ```yaml
 id: python-fastapi

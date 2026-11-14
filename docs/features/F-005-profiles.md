@@ -64,11 +64,11 @@ variants:
   - `file: "a|b"`: path relative ใช้ `/`, ห้าม `..` / absolute / drive / `\`; `*` ได้เฉพาะ segment สุดท้าย ≤ 4 ตัว (เช่น `*.uproject`, `src/*.config.*`); ลงท้าย `/` = folder
   - `fileContains: [files, "x|y"]`: substring (case-sensitive) ในไฟล์ที่อ่านได้ ≤ 256 KB ต่อไฟล์
   - `dep: "name"` (+ `range` ได้): อยู่ใน deps ที่ผู้เรียกส่งมา (package.json / requirements / pyproject — F-006 รวบรวม)
-- variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง; ไม่รับ `*` / `x` / `||`) (Q6); เทียบกับ **version ต่ำสุดที่ประกาศ** (`^5.4.0` = 5.4.0) ไม่ใช่ที่ติดตั้งจริง; ตรงหลายข้อ → apply ตามลำดับในไฟล์; ตอนโหลดตรวจทั้งแต่ละตัวเดี่ยว และทุกตัวรวมกันตามลำดับ (review-1 K9); ค่า `null` ใน variant = ลบ key (ตอนนี้ `port.env`)
+- variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง; ไม่รับ `*` / `x` / `||`) (Q6); เทียบกับ **version ต่ำสุดที่ประกาศ** (`^5.4.0` = 5.4.0) ไม่ใช่ที่ติดตั้งจริง; ตรงหลายข้อ → apply ตามลำดับในไฟล์; ≤ 8 variants; ตอนโหลดตรวจ**ทุกชุด**ที่ใช้พร้อมกันได้ (2^n − 1 ชุด, review-1 K9 / review-2 L2); ค่า `null` ใน variant = ลบ key (ตอนนี้ `port.env`)
 - `{PORT}` / `{HOST}` ใช้ได้ใน `start.cmd`, `runtime.install`, `container.setup`; `{name}` อื่นต้องมีใน `vars`; placeholder ไม่รู้จัก = error ตอนโหลด
-- คำสั่ง: printable ASCII เท่านั้น (ไม่มี control / C1 / bidi / zero-width / fullwidth / tab — security-1 S3); quote ครอบทั้ง argument เท่านั้น ห้ามมี quote อื่นข้างใน; ห้าม metachar ของ shell; ห้ามระบุที่อยู่นอก loopback (`0.0.0.0`, `::`, `[::]`, IPv4 นอก 127/8) ใน cmd / vars / ค่า placeholder (S4)
+- คำสั่ง: printable ASCII เท่านั้น (ไม่มี control / C1 / bidi / zero-width / fullwidth / tab — security-1 S3); quote ครอบทั้ง argument เท่านั้น ห้ามมี quote อื่นข้างใน; ห้าม metachar ของ shell; ห้ามระบุที่อยู่นอก loopback ใน cmd / vars / ค่า placeholder และใน argv ที่ render แล้ว (ประกอบจาก placeholder ก็ไม่ได้): dotted quad นอก 127/8 (รวม `0127.0.0.1`), IPv6 ทุกแบบยกเว้น `::1`, มี/ไม่มี `:port`; หลัง option host (`--host`, `-H`, `--bind`, `host=` …) ทุกรูปแบบ inet_aton (`0`, `0x0`, `0.0`) (S4, review-2 L1); เลข version 4 ส่วนแบบ `x==0.110.0.1` ไม่นับ (L5); ชื่อ host (`0.0.0.0.nip.io`) → F-017 ตรวจ listener
 - `port.env` = `PORT` หรือ `<NAME>_PORT` เท่านั้น (ไม่ให้ทับ `PATH`, `PATHEXT`, `NODE_OPTIONS` … — S5)
-- `file:` ตรงทั้งไฟล์และ folder ชื่อนั้น (ลงท้าย `/` = folder เท่านั้น); wildcard เรียงชื่อแล้วเก็บ 32 ตัวแรก (K8); detect ของ 1 profile อ่านไฟล์ได้ ≤ 64 ไฟล์ (เกิน = ถือว่าไม่เจอ — S6)
+- `file:` ตรงทั้งไฟล์และ folder ชื่อนั้น (ลงท้าย `/` = folder เท่านั้น); wildcard เรียงชื่อแล้วเก็บ 32 ตัวแรก (K8); detect ของ 1 profile อ่านไฟล์ได้ ≤ 64 ไฟล์สำหรับ `all`/`any` และอีก ≤ 64 สำหรับ `none` (เกิน = ถือว่าไม่เจอ — S6, L3)
 
 ### 3.2 Interface (TypeScript, `src/profiles/`)
 ```ts
@@ -103,12 +103,12 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 
 ### 3.3 Flow
 1. โหลดเมื่อเรียก route ทุกครั้ง (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี cache / file watcher; เรียกซ้อนกัน = ใช้ผลเดียวกัน) — ผู้ใช้อื่น (F-006/F-007) เรียก `loadProfiles` เอง
-2. อ่านไฟล์: `lstat` (bigint) → ต้องเป็น regular file, ไม่ใช่ link, ไม่ใช่ hard link (`nlink` 1), ≤ 256 KB → `open` → `fstat` ต้องเป็น `ino` เดียวกัน (ไม่เทียบ `dev`: Node 22 บน Windows ให้ 0 จาก lstat) → อ่าน ≤ 256 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
+2. อ่านไฟล์: `lstat` (bigint) → ต้องเป็น regular file, ไม่ใช่ link, ไม่ใช่ hard link (`nlink` 1, ไฟล์ผู้ใช้เท่านั้น), ≤ 64 KB → `open` → `fstat` ต้องเป็น `ino` เดียวกัน (ไม่เทียบ `dev`: Node 22 บน Windows ให้ 0 จาก lstat) → อ่าน ≤ 64 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
 3. parse YAML แบบ safe (YAML 1.2 core schema, ไม่มี custom tag, **ไม่รับ alias เลย** (ไม่มี alias bomb), key ซ้ำ / หลาย document / warning ของ YAML (เช่น tag ไม่รู้จัก) = error, ปฏิเสธ key `__proto__` / `constructor` / `prototype`, ข้อความ error ใช้แค่ code + บรรทัด ไม่ยกเนื้อไฟล์) → zod → ตรวจ placeholder / path pattern / range
-4. id ซ้ำ: id ต้องตรงชื่อไฟล์ → ไฟล์ผู้ใช้ id ซ้ำกันเองไม่ได้; ผู้ใช้ทับ built-in → ตาม Q3; built-in ไม่ตรวจ hard link (pnpm / bun ติดตั้งเป็น hard link — K1); YAML ≤ 5000 node, ตรวจ key ซ้ำเองแบบ O(n) (ของ `yaml` เป็น quadratic — S1)
+4. id ซ้ำ: id ต้องตรงชื่อไฟล์ → ไฟล์ผู้ใช้ id ซ้ำกันเองไม่ได้; ผู้ใช้ทับ built-in → ตาม Q3; built-in ไม่ตรวจ hard link (pnpm / bun ติดตั้งเป็น hard link — K1); YAML ≤ 5000 node (นับทุกชนิดรวม map — L4), ไฟล์ ≤ 64 KB (L4), ตรวจ key ซ้ำเองแบบ O(n) (ของ `yaml` เป็น quadratic — S1); ผล parse cache ตาม (ino, size, mtime, ชื่อ) — เรียก route ซ้ำไม่ parse ไฟล์เดิมใหม่ (L4)
 
 ### 3.4 Built-in ชุดแรก (Q2)
-`static`, `static-spa`, `vite`, `next`, `express`, `bun-elysia`, `fastapi` — แต่ละตัวมี fixture ใน `fixtures/<case>/` (ไฟล์ขั้นต่ำ) + ผลที่คาดหวัง; detect ของ `next` / `vite` อาศัย `dep`; `next` ใช้ variants (`<13`, `>=15` hostRewrite — Origin ยังเป็น spike ของ F-009)
+`static`, `static-spa`, `vite`, `next`, `express`, `bun-elysia`, `fastapi` — แต่ละตัวมี fixture ใน `fixtures/<case>/` (ไฟล์ขั้นต่ำ) + ผลที่คาดหวัง; detect ของ `next` / `vite` อาศัย `dep`; `next` ใช้ variant `>=15` hostRewrite (Origin ยังเป็น spike ของ F-009); `vite` hostRewrite ทุก version (K5)
 
 ### 3.4a ข้อจำกัด / ข้อกำหนดถึง feature ถัดไป (review-1 K11, security-1 S8)
 - `host.bind` เป็นค่าที่ webhub ส่งให้ (`{HOST}`); app ที่ไม่รับ HOST (express / Elysia `listen(PORT)`) bind ทุก interface ได้ → **F-017** ตรวจ listener หลัง start ว่าอยู่ใน loopback, ไม่ใช่ → เตือน / หยุด
@@ -132,14 +132,14 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 | feature ที่ done แล้ว | น้อย | F-003: เพิ่ม route ใน API ผ่าน `registrars` ที่มีอยู่ — `daemon.ts` ส่ง `profileRoutes(paths)` นำหน้า registrars จาก test (wiring 1 บรรทัด, route เดิม / auth / โครงไม่เปลี่ยน); F-004: เพิ่ม command ในตาราง (โครงรองรับไว้แล้ว) + export `explainImpostor` เพื่อใช้ซ้ำ (พฤติกรรมไม่เปลี่ยน) |
 | Zero-touch | ไม่ | อ่าน `profiles/` + `data/profiles/` เท่านั้น; F-005 ไม่แตะ project |
 | Security | ใช่ | ดู §6 |
-| Performance / resource | น้อย | ไฟล์ ≤ 200 × 256 KB; parse ตอนเรียก |
+| Performance / resource | น้อย | ไฟล์ ≤ 200 × 64 KB; parse เฉพาะไฟล์ที่เปลี่ยน (cache) |
 | Config / data เดิม | ไม่ | `data/profiles/` มีแล้ว (ว่าง) |
 | Dependency | ใช่ (Q1) | `yaml` (pin, ไม่มี dependency ต่อ, ไม่มี install script) |
 
 ## 6. Threat model (R6)
 | Asset | ผู้โจมตี / ช่องทาง | ป้องกันด้วย | เทส |
 |---|---|---|---|
-| daemon (ถือ token) | YAML ที่ทำให้ใช้ memory / CPU มาก (alias bomb, ไฟล์ใหญ่, ไฟล์เยอะ) — จาก profile ที่ผู้ใช้ copy มาจากที่อื่น | ขนาด ≤ 256 KB, ≤ 200 ไฟล์, `maxAliasCount`, ความลึก / ความยาว array จำกัดใน schema | alias bomb / ไฟล์ใหญ่ → problem, daemon ไม่ค้าง |
+| daemon (ถือ token) | YAML ที่ทำให้ใช้ memory / CPU มาก (alias bomb, ไฟล์ใหญ่, ไฟล์เยอะ) — จาก profile ที่ผู้ใช้ copy มาจากที่อื่น | ขนาด ≤ 64 KB, ≤ 5000 node, ≤ 200 ไฟล์, ไม่รับ alias, ตรวจ key ซ้ำ O(n), cache ผล parse, ความยาว array จำกัดใน schema | alias bomb / ไฟล์ใหญ่ → problem, daemon ไม่ค้าง |
 | daemon | prototype pollution จาก key `__proto__` | ปฏิเสธ key ต้องห้ามก่อน zod; strict object | YAML มี `__proto__` → problem; `Object.prototype` ไม่เปลี่ยน |
 | CPU | ReDoS จาก pattern ใน profile | ไม่มี regex จาก profile: substring + `*` แบบ segment เดียว (match แบบ linear) | pattern ยาว / `*` เยอะ → เวลาจำกัด |
 | ไฟล์นอก project | pattern `../` / absolute ใน `file` / `fileContains` | validate ตอนโหลด (ห้าม `..`, absolute, drive, `\`); `ProjectView` ของ F-006 จำกัด root อีกชั้น | pattern ต้องห้าม → problem |
@@ -169,7 +169,7 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | 2 | key แปลก / type ผิด / ค่าเกินช่วง → error มีไฟล์ + บรรทัด + path ของ field | unit |
 | 3 | ไฟล์ผู้ใช้เสีย 1 ไฟล์ → อยู่ใน problems, ที่เหลือโหลดได้ | unit |
 | 4 | ผู้ใช้ทับ built-in (Q3); id ต้องตรงชื่อไฟล์ | unit |
-| 5 | YAML alias bomb, ไฟล์ > 256 KB, > 200 ไฟล์, `__proto__`, custom tag → problem, ไม่ค้าง, prototype ไม่เปลี่ยน | security |
+| 5 | YAML alias bomb, ไฟล์ > 64 KB, > 5000 node, > 200 ไฟล์, `__proto__`, custom tag → problem, ไม่ค้าง, prototype ไม่เปลี่ยน | security |
 | 6 | link / hardlink ใน `data/profiles/` → problem | security |
 | 7 | pattern `..` / absolute / `C:` / `\` → error | security |
 | 8 | detect: all / any / none / score, `*` ใน segment, folder `x/`, fileContains จำกัด 256 KB, dep (+range) | unit |
@@ -186,7 +186,8 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-005/test-1.md) 436/6 | [review-1](../reports/F-005/review-1.md) **FAIL** (K1, K2 major) | [security-1](../reports/F-005/security-1.md) **FAIL** (S1 major) | K1, K2, K4, S1 แก้แล้ว; minor/nit ถามผู้ใช้ |
-| 2 | [test-2](../reports/F-005/test-2.md) 447/6 | | | minor/nit รอบ 1 แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") → review รอบ 2 |
+| 2 | [test-2](../reports/F-005/test-2.md) 447/6 | [review-2](../reports/F-005/review-2.md) code + security **PASS** (L1–L4 minor, L5–L6 nit) | (รวมใน review-2) | minor/nit รอบ 1 แก้ทั้งหมด → รอบ 2 PASS |
+| 3 | [test-3](../reports/F-005/test-3.md) 452/6 (+1 F-004 flaky → CR-004) | — | — | L1–L6 แก้ทั้งหมด (ผู้ใช้เลือก "แก้แล้ว merge") |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md

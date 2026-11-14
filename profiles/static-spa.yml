@@ -8,6 +8,8 @@ detect:
   any:
     - { fileContains: ["index.html", 'id="root"|id="app"|<app-root'] }
   none:
-    - { file: "package.json" }
+    - {
+        file: "package.json|go.mod|Cargo.toml|pyproject.toml|requirements.txt|manage.py|composer.json|Gemfile",
+      }
   score: 55
 static: { spa: true }

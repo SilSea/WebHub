@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebhubError } from "../../src/errors.js";
 import {
+  bindsNonLoopback,
   CommandError,
   namesNonLoopback,
   renderCommand,
@@ -209,9 +210,9 @@ describe("profile schema (F-005 §3.1)", () => {
       expect(Date.now() - t0).toBeLessThan(5_000);
     });
 
-    it("256 KB of keys (flow or block) is refused fast — no quadratic duplicate check (security-1 S1)", () => {
-      const block = Array.from({ length: 28_000 }, (_, i) => `${i}: 1`).join("\n");
-      const flow = `{${Array.from({ length: 22_000 }, (_, i) => `a${i}: 1`).join(", ")}}`;
+    it("64 KB of keys (flow or block) is refused fast — no quadratic duplicate check (security-1 S1)", () => {
+      const block = Array.from({ length: 7_000 }, (_, i) => `${i}: 1`).join("\n");
+      const flow = `{${Array.from({ length: 5_500 }, (_, i) => `a${i}: 1`).join(", ")}}`;
       for (const text of [block, flow]) {
         expect(text.length).toBeLessThan(MAX_PROFILE_BYTES);
         const t0 = Date.now();
@@ -523,15 +524,10 @@ describe("review-1 / security-1 fixes", () => {
   });
 
   it("non-loopback bind addresses refused in commands and values (S4)", () => {
-    for (const t of [
-      "0.0.0.0",
-      "--host=0.0.0.0",
-      "192.168.1.5",
-      "[::]",
-      "::",
-      "--host=::",
-      "10.0.0.1:80",
-    ]) {
+    for (const t of ["--host=0.0.0.0", "--host=::", "--server.address=0.0.0.0"]) {
+      expect(bindsNonLoopback(["x", t]), t).toBe(true);
+    }
+    for (const t of ["0.0.0.0", "192.168.1.5", "[::]", "::", "10.0.0.1:80"]) {
       expect(namesNonLoopback(t), t).toBe(true);
     }
     for (const t of ["127.0.0.1", "::1", "[::1]", "localhost", "1.2.3", "{HOST}"]) {
@@ -567,7 +563,7 @@ describe("review-1 / security-1 fixes", () => {
     // alone each is fine; together the second keeps via arg but the first removed {PORT}
     const together = `${MIN}variants:\n  - when: { dep: demo, range: ">=2" }\n    start: { cmd: "demo2" }\n    port: { via: fixed }\n  - when: { dep: demo, range: ">=3" }\n    port: { via: arg }\n`;
     expect(details(together)).toMatch(
-      /variants\.1: with variants 0–1 together: port\.via arg needs \{PORT\}/,
+      /variants\.1: with variants 0, 1 together: port\.via arg needs \{PORT\}/,
     );
     const switchVia = `${base}variants:\n  - when: { dep: demo, range: ">=2" }\n    port: { via: fixed, env: null }\n`;
     const p = parseProfile(switchVia, "x");
@@ -629,6 +625,119 @@ describe("review-1 / security-1 fixes", () => {
         },
       ]);
       expect(JSON.stringify(r)).not.toContain(h.root.replaceAll("\\", "\\\\"));
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("review-2 fixes", () => {
+  it("addresses assembled from placeholders or written short are refused (L1)", () => {
+    const withVar = (cmd: string, vars: string) =>
+      MIN.replace('"demo --port {PORT}"', `"${cmd}", vars: { ${vars} }`);
+    expect(details(withVar("x --host 0.0.0.{Z} --port {PORT}", 'Z: "0"'))).toMatch(
+      /binds outside loopback/,
+    );
+    for (const host of [
+      "0",
+      "0x0",
+      "0.0",
+      "0.0.0",
+      "::0",
+      "0::",
+      "[::0]",
+      "0:0:0:0:0:0:0:0",
+      "0127.0.0.1",
+      "167772161",
+      "0177.1",
+    ]) {
+      expect(bindsNonLoopback(["x", "--host", host]), host).toBe(true);
+      expect(bindsNonLoopback(["x", `--host=${host}`]), host).toBe(true);
+    }
+    for (const arg of ["0.0.0.0:8000", "[::]:80", "10.0.0.1", "HOST=0"]) {
+      expect(bindsNonLoopback(["x", arg]), arg).toBe(true);
+    }
+    expect(() => renderCommand("x --host {a}.{b}", { a: "0.0", b: "0.0" })).toThrow(
+      /binds outside/,
+    );
+    expect(() => renderCommand("x -H {HOST}", { HOST: "0" })).toThrow(/binds outside/);
+    // loopback and ordinary arguments still fine
+    for (const args of [
+      ["x", "--host", "127.0.0.1"],
+      ["x", "--host", "::1"],
+      ["x", "--host=[::1]", "--port", "0"],
+      ["uvicorn", "main:app", "--workers", "0"],
+      ["x", "127.0.0.1:8000"],
+      ["x", "--host", "localhost"],
+    ]) {
+      expect(bindsNonLoopback(args), args.join(" ")).toBe(false);
+    }
+  });
+
+  it("4-part versions are not addresses (L5)", () => {
+    for (const a of ["fastapi==0.110.0.1", "pkg=1.2.3.4-1"]) {
+      expect(bindsNonLoopback(["pip", "install", a]), a).toBe(false);
+      expect(namesNonLoopback(a), a).toBe(false);
+    }
+    expect(() =>
+      parseProfile(
+        `${MIN}runtime: { lang: python, install: "pip install fastapi==0.110.0.1" }\n`,
+        "x",
+      ),
+    ).not.toThrow();
+  });
+
+  it("every set of variants is checked, also with a gap (L2); at most 8 variants", () => {
+    const base = MIN.replace("demo --port {PORT}", "demo --port {PORT}").replace(
+      "via: arg }",
+      "via: env, env: PORT }",
+    );
+    const gap = `${base}variants:\n  - when: { dep: demo, range: ">=2" }\n    port: { via: arg, env: null }\n  - when: { dep: demo, range: ">=3 <4" }\n    port: { via: env, env: PORT }\n  - when: { dep: demo, range: ">=4" }\n    port: { via: env }\n`;
+    expect(details(gap)).toMatch(
+      /variants\.2: with variants 0, 2 together: port\.via env needs port\.env/,
+    );
+    const nine = `${MIN}variants:\n${Array.from({ length: 9 }, (_, i) => `  - when: { dep: d${i}, range: ">=1" }\n    devServer: { hostRewrite: true }`).join("\n")}\n`;
+    expect(details(nine)).toMatch(/variants/);
+  });
+
+  it("the read budget of `none` is separate (L3)", () => {
+    const files: Record<string, string> = { "x.txt": "excluded" };
+    for (let i = 0; i < 70; i++) files[`a${String(i).padStart(2, "0")}.md`] = "";
+    const p = parseProfile(
+      MIN.replace(
+        'all: [{ file: "package.json" }]',
+        'any: [{ fileContains: ["*.md|a*.md|b*.md", "nothere"] }, { file: "x.txt" }]\n  none: [{ fileContains: ["x.txt", "excluded"] }]',
+      ),
+      "x",
+    );
+    expect(evaluateDetect(p, memView(files)).matched).toBe(false);
+  });
+
+  it("maps count toward the node cap (L4)", () => {
+    const text = `a: [${Array.from({ length: 6000 }, () => "{}").join(", ")}]`;
+    expect(text.length).toBeLessThan(MAX_PROFILE_BYTES);
+    expect(details(text)).toMatch(/more than 5000 YAML nodes/);
+  });
+});
+
+describe("parse cache (review-2 L4)", () => {
+  it("an edited file is parsed again; an unchanged one is not re-read wrong", async () => {
+    const h = await tempHome();
+    try {
+      mkdirSync(h.paths.profiles, { recursive: true });
+      const f = join(h.paths.profiles, "demo.yml");
+      writeFileSync(f, MIN);
+      const score = async () =>
+        (await loadProfiles(h.paths)).profiles.find((p) => p.profile.id === "demo")?.profile.detect
+          .score;
+      expect(await score()).toBe(60);
+      expect(await score()).toBe(60);
+      writeFileSync(f, MIN.replace("score: 60", "score: 61"));
+      expect(await score()).toBe(61);
+      writeFileSync(f, "id: [");
+      const r = await loadProfiles(h.paths);
+      expect(r.problems.map((p) => p.file)).toEqual(["data/profiles/demo.yml"]);
+      expect((await loadProfiles(h.paths)).problems).toHaveLength(1);
     } finally {
       await h.cleanup();
     }

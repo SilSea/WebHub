@@ -6,14 +6,14 @@
  * plain substrings. Commands are split into argv and never reach a shell (command.ts).
  */
 import { basename } from "node:path";
-import { isAlias, isPair, isScalar, LineCounter, parseDocument, visit } from "yaml";
+import { isAlias, isMap, isPair, isScalar, LineCounter, parseDocument, visit } from "yaml";
 import { z } from "zod";
 import { WebhubError } from "../errors.js";
 import {
   BUILTIN_PLACEHOLDERS,
+  bindsNonLoopback,
   CommandError,
   isSafeValue,
-  namesNonLoopback,
   placeholdersOf,
   splitCommand,
   VAR_NAME,
@@ -22,13 +22,16 @@ import { parseRange } from "./range.js";
 
 export const PROFILE_SCHEMA_VERSION = 1;
 /** Largest profile file read (bytes). */
-export const MAX_PROFILE_BYTES = 256 * 1024;
+/** Real profiles are < 2 KB; 64 KB bounds the parser's CPU per file (review-2 L4). */
+export const MAX_PROFILE_BYTES = 64 * 1024;
 /** Bytes of one project file a `fileContains` rule reads at most. */
 export const MAX_CONTAINS_BYTES = 256 * 1024;
 
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 /** YAML nodes per profile at most (real profiles have < 200): bounds every pass after parsing. */
 export const MAX_PROFILE_NODES = 5000;
+/** Variants per profile at most: every combination is checked at load (2^8 - 1 = 255 sets). */
+export const MAX_VARIANTS = 8;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused on purpose
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
@@ -230,20 +233,33 @@ const Base = z.strictObject({
   container: Container.optional(),
   db: Db.optional(),
   routes: Routes.optional(),
-  variants: z.array(Variant).max(16).optional(),
+  variants: z.array(Variant).max(MAX_VARIANTS).optional(),
 });
 
 export type Profile = z.infer<typeof Base>;
 export type DetectRule = z.infer<typeof Rule>;
 
 /** Checks that need the whole profile (also run on every variant applied to it). */
-const splitSafe = (cmd: string): string[] => {
+/**
+ * The command binds outside loopback once its placeholders are filled in (vars + PORT + HOST
+ * as webhub sets them): catches an address assembled from parts, `0.0.0.{Z}` (review-2 L1).
+ */
+function bindsAfterRender(cmd: string, vars: Readonly<Record<string, string>>): boolean {
+  let args: string[];
   try {
-    return splitCommand(cmd);
+    args = splitCommand(cmd);
   } catch {
-    return []; // reported by the field's own check
+    return false; // reported by the field's own check
   }
-};
+  const values: Record<string, string> = { ...vars, PORT: "1", HOST: "127.0.0.1" };
+  // unknown placeholders are reported elsewhere: leave them as they are here
+  const filled = args.map((a) =>
+    a.replace(/\{([A-Za-z][A-Za-z0-9_]{0,31})\}/g, (m, n: string) =>
+      Object.hasOwn(values, n) ? (values[n] ?? m) : m,
+    ),
+  );
+  return bindsNonLoopback(filled);
+}
 
 function crossProblems(p: Omit<Profile, "variants">): { path: PropertyKey[]; message: string }[] {
   const out: { path: PropertyKey[]; message: string }[] = [];
@@ -257,7 +273,7 @@ function crossProblems(p: Omit<Profile, "variants">): { path: PropertyKey[]; mes
     [["container", "setup"], p.container?.setup],
   ];
   for (const [path, cmd] of cmds) {
-    if (cmd !== undefined && splitSafe(cmd).some(namesNonLoopback)) {
+    if (cmd !== undefined && bindsAfterRender(cmd, p.start?.vars ?? {})) {
       out.push({
         path,
         message: "binds outside loopback (0.0.0.0, ::, a LAN address); use {HOST}",
@@ -306,19 +322,29 @@ export function deepMerge<T>(base: T, over: unknown): T {
 
 export const ProfileSchema = Base.superRefine((p, ctx) => {
   for (const issue of crossProblems(p)) ctx.addIssue({ code: "custom", ...issue });
-  // every variant must give a valid profile alone, and so must all of them applied in order
-  // (several can hold at once) — caught at load, not at start (review-1 K9)
+  // every set of variants that can hold at once gives a valid profile (applied in file order):
+  // all 2^n - 1 sets, n <= MAX_VARIANTS — caught at load, not at start (review-1 K9, review-2 L2)
   const base = { ...p, variants: undefined };
-  let all: typeof base = base;
-  for (const [i, v] of (p.variants ?? []).entries()) {
-    const { when: _when, ...over } = v;
-    all = deepMerge(all, over);
-    const alone = crossProblems(deepMerge(base, over)).map(
-      (x) => `with this variant: ${x.message}`,
-    );
-    const together = crossProblems(all).map((x) => `with variants 0–${i} together: ${x.message}`);
-    for (const message of new Set([...alone, ...(alone.length > 0 ? [] : together)])) {
-      ctx.addIssue({ code: "custom", path: ["variants", i], message });
+  const variants = (p.variants ?? []).map(({ when: _when, ...over }) => over);
+  const reported = new Set<string>();
+  for (let mask = 1; mask < 1 << variants.length; mask++) {
+    let merged: typeof base = base;
+    const used: number[] = [];
+    for (const [i, over] of variants.entries()) {
+      if ((mask & (1 << i)) !== 0) {
+        merged = deepMerge(merged, over);
+        used.push(i);
+      }
+    }
+    const last = used[used.length - 1] ?? 0;
+    const label =
+      used.length === 1 ? "with this variant" : `with variants ${used.join(", ")} together`;
+    for (const x of crossProblems(merged)) {
+      // one report per problem and last variant: the smallest set shows it
+      const key = `${last}:${x.message}`;
+      if (reported.has(key)) continue;
+      reported.add(key);
+      ctx.addIssue({ code: "custom", path: ["variants", last], message: `${label}: ${x.message}` });
     }
   }
 });
@@ -378,19 +404,6 @@ export function parseProfile(source: string, file: string): Profile {
   const bad: string[] = [];
   let nodes = 0;
   visit(doc, {
-    Map(_k, map) {
-      const seen = new Set<string>();
-      for (const pair of map.items) {
-        if (!isPair(pair) || !isScalar(pair.key)) continue;
-        // 1 and "1" become the same object key: one duplicate
-        const name = String(pair.key.value);
-        if (seen.has(name)) {
-          bad.push(`line ${lineOf(pair.key.range?.[0])}: duplicate key`);
-          return visit.BREAK;
-        }
-        seen.add(name);
-      }
-    },
     Alias(_k, node) {
       bad.push(`line ${lineOf(node.range?.[0])}: aliases (*name) are not allowed`);
       return visit.BREAK;
@@ -404,10 +417,25 @@ export function parseProfile(source: string, file: string): Profile {
         bad.push("complex keys are not allowed");
       }
     },
+    // one handler for every node kind: a `Map` handler would stop `Node` for maps, which then
+    // escaped the node cap and the tag check (review-2 L4)
     Node(_k, node) {
       if (++nodes > MAX_PROFILE_NODES) {
         bad.push(`more than ${MAX_PROFILE_NODES} YAML nodes`);
         return visit.BREAK;
+      }
+      if (isMap(node)) {
+        const seen = new Set<string>();
+        for (const pair of node.items) {
+          if (!isPair(pair) || !isScalar(pair.key)) continue;
+          // 1 and "1" become the same object key: one duplicate
+          const name = String(pair.key.value);
+          if (seen.has(name)) {
+            bad.push(`line ${lineOf(pair.key.range?.[0])}: duplicate key`);
+            return visit.BREAK;
+          }
+          seen.add(name);
+        }
       }
       if (
         !isAlias(node) &&

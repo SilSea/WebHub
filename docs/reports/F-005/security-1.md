@@ -32,3 +32,6 @@
 ## Status after this round
 - S1 fixed: `uniqueKeys: false`; duplicates found in the existing `visit` with a Set per map (also `1` vs `"1"`); ≤ 5000 YAML nodes per profile; test: 256 KB block and flow maps refused in < 2 s (≈ 10 ms), duplicates still found.
 - S2–S8: asked the user (minor / nit / info).
+
+## Addendum (2026-11-14)
+The minor / nit / info findings "asked the user" above were fixed in `ba99faa` (user chose "fix all"); remaining gaps found in [review-2](review-2.md) (L1–L6).

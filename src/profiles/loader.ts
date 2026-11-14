@@ -64,11 +64,23 @@ const problemOf = (file: string, err: unknown): ProfileProblem => {
 };
 
 /**
- * Reads one profile file: a regular file, not a link, ≤ MAX_PROFILE_BYTES; a user file also has
- * one hard link only. Built-in files may have several: pnpm / bun install packages as hard
- * links into their store (review-1 K1).
+ * Parsed files by absolute path, valid while (ino, size, mtime) and the shown name stay the
+ * same: a repeated `GET /api/v1/profiles` does not re-parse unchanged files (review-2 L4).
+ * Results (profiles and errors) are shared: callers must not change them.
  */
-async function readProfileFile(abs: string, source: LoadedProfile["source"]): Promise<string> {
+const parsed = new Map<string, { key: string; profile?: Profile; error?: unknown }>();
+const MAX_CACHED = 512;
+
+/**
+ * Loads one profile file: a regular file, not a link, ≤ MAX_PROFILE_BYTES; a user file also has
+ * one hard link only. Built-in files may have several: pnpm / bun install packages as hard
+ * links into their store (review-1 K1). The checks run every time; only the parse is cached.
+ */
+async function loadProfileFile(
+  abs: string,
+  rel: string,
+  source: LoadedProfile["source"],
+): Promise<Profile> {
   // bigint: 64-bit Windows file ids lose precision as numbers (lstat vs fstat differ on Node 22)
   const st = await lstat(abs, { bigint: true });
   if (st.isSymbolicLink())
@@ -79,6 +91,14 @@ async function readProfileFile(abs: string, source: LoadedProfile["source"]): Pr
   if (st.size > BigInt(MAX_PROFILE_BYTES)) {
     throw new WebhubError("FILE_TOO_LARGE", `profile file exceeds ${MAX_PROFILE_BYTES} bytes`);
   }
+  const key = `${st.ino}:${st.size}:${st.mtimeNs}:${rel}`;
+  const hit = parsed.get(abs);
+  if (hit?.key === key) {
+    if (hit.profile !== undefined) return hit.profile;
+    throw hit.error;
+  }
+  if (parsed.size >= MAX_CACHED) parsed.clear();
+  let text: string;
   const fh = await open(abs, constants.O_RDONLY);
   try {
     // the file opened is the one checked (not swapped for a link in between)
@@ -92,9 +112,17 @@ async function readProfileFile(abs: string, source: LoadedProfile["source"]): Pr
     if (bytesRead > MAX_PROFILE_BYTES) {
       throw new WebhubError("FILE_TOO_LARGE", `profile file exceeds ${MAX_PROFILE_BYTES} bytes`);
     }
-    return buf.subarray(0, bytesRead).toString("utf8");
+    text = buf.subarray(0, bytesRead).toString("utf8");
   } finally {
     await fh.close();
+  }
+  try {
+    const profile = parseProfile(text, rel);
+    parsed.set(abs, { key, profile });
+    return profile;
+  } catch (error) {
+    parsed.set(abs, { key, error });
+    throw error;
   }
 }
 
@@ -130,7 +158,7 @@ async function loadDir(
       continue;
     }
     try {
-      const profile = parseProfile(await readProfileFile(join(dir, name), source), rel);
+      const profile = await loadProfileFile(join(dir, name), rel, source);
       if (profile.id !== name.slice(0, -PROFILE_EXT.length)) {
         throw new WebhubError("CONFIG_INVALID", `invalid profile ${name}`, {
           details: [`id "${profile.id}" must equal the file name (${profile.id}${PROFILE_EXT})`],

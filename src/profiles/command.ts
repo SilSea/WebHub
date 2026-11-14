@@ -110,25 +110,89 @@ export function isSafeValue(value: string): boolean {
   return VALUE.test(value) && !namesNonLoopback(value);
 }
 
+/** Options whose next argument (or `=value`) is a bind address. */
+const HOST_OPTIONS = new Set([
+  "--host",
+  "--hostname",
+  "-H",
+  "--bind",
+  "-b",
+  "--listen",
+  "--ip",
+  "--addr",
+  "--address",
+  "--bind-address",
+  "host",
+  "hostname",
+  "bind",
+  "HOST",
+  "HOSTNAME",
+  "BIND",
+]);
+/** IPv4 as inet_aton reads it: 1–4 parts, decimal / octal (leading 0) / hex (0x). */
+const INET_ATON = /^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$/i;
+const LOOPBACK_V4 =
+  /^127\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){2}$/;
+const DOTTED_QUAD = /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/;
+
+/** An address literal in any form a resolver accepts, or undefined when `v` is not one. */
+function addressLiteral(v: string, hostValue: boolean): "loopback" | "other" | undefined {
+  let s = v.startsWith("[") && v.includes("]") ? v.slice(1, v.indexOf("]")) : v;
+  if (/^[0-9a-f:.]+$/i.test(s) && (s.match(/:/g)?.length ?? 0) >= 2) {
+    return s === "::1" ? "loopback" : "other"; // IPv6 (any spelling other than ::1)
+  }
+  // `addr:port` (one colon) → the address part
+  const colon = s.indexOf(":");
+  if (colon !== -1 && s.indexOf(":", colon + 1) === -1 && /^[0-9]+$/.test(s.slice(colon + 1))) {
+    s = s.slice(0, colon);
+  }
+  // positional literals only as dotted quads (a lone `0` / `8000` is not an address); after a
+  // host option every inet_aton form counts (`--host 0`, `-H 0x0`, `--host=0177.1`)
+  if (!(hostValue ? INET_ATON.test(s) : DOTTED_QUAD.test(s))) return undefined;
+  return LOOPBACK_V4.test(s) ? "loopback" : "other";
+}
+
 /**
- * True when an argument or value names a non-loopback bind address: `0.0.0.0`, `::`, `[::]`,
- * or an IPv4 literal outside 127/8 (security-1 S4). Host names are left to the run approval
- * and the listener check (F-007 / F-017).
+ * True when a single value names a non-loopback address: a dotted quad outside 127/8 (also
+ * `0127.0.0.1`), any IPv6 literal other than `::1` (`::`, `[::]`, `::0`, `0::`), with or
+ * without `:port` (security-1 S4, review-2 L1). Version numbers like `x==0.110.0.1` or
+ * `pkg=1.2.3.4-1` are not addresses (L5).
  */
 export function namesNonLoopback(text: string): boolean {
-  if (text.includes("[::]") || /(^|[=:,@ ])::($|[ ,/])/.test(text) || text === "::") return true;
-  for (const m of text.matchAll(/(?<![0-9.])(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![0-9.])/g)) {
-    if (m[1] !== "127") return true;
+  return addressLiteral(text, false) === "other";
+}
+
+/**
+ * True when finished argv binds outside loopback: positional literals, and every address form
+ * after a host option (`--host 0`, `--host=0x0`, `HOST=0.0`). Host names (`0.0.0.0.nip.io`)
+ * are left to the run approval and the listener check (F-007 / F-017 — spec §3.4a).
+ */
+export function bindsNonLoopback(args: readonly string[]): boolean {
+  for (const [i, arg] of args.entries()) {
+    const eq = arg.indexOf("=");
+    const key = eq === -1 ? undefined : arg.slice(0, eq);
+    const value = eq === -1 ? undefined : arg.slice(eq + 1);
+    if (addressLiteral(arg, false) === "other") return true;
+    if (
+      value !== undefined &&
+      addressLiteral(value, key !== undefined && HOST_OPTIONS.has(key)) === "other"
+    ) {
+      return true;
+    }
+    const next = args[i + 1];
+    if (HOST_OPTIONS.has(arg) && next !== undefined && addressLiteral(next, true) === "other")
+      return true;
   }
   return false;
 }
 
 /**
  * argv of `cmd` with its placeholders replaced. A value replaces text inside one argument and
- * never splits it. Throws CommandError on a missing / unsafe value.
+ * never splits it. Throws CommandError on a missing / unsafe value, or when the finished argv
+ * binds outside loopback (an address assembled from parts — review-2 L1).
  */
 export function renderCommand(cmd: string, values: Readonly<Record<string, string>>): string[] {
-  return splitCommand(cmd).map((arg) =>
+  const args = splitCommand(cmd).map((arg) =>
     arg.replace(PLACEHOLDER, (_m, name: string) => {
       const v = Object.hasOwn(values, name) ? values[name] : undefined;
       if (v === undefined) throw new CommandError(`no value for placeholder {${name}}`);
@@ -136,4 +200,10 @@ export function renderCommand(cmd: string, values: Readonly<Record<string, strin
       return v;
     }),
   );
+  if (bindsNonLoopback(args)) {
+    throw new CommandError(
+      "binds outside loopback (0.0.0.0, ::, a LAN address in any spelling); use {HOST}",
+    );
+  }
+  return args;
 }

@@ -30,3 +30,6 @@ Checked and found correct: YAML hardening (aliases, `__proto__`, tags, duplicate
 - K2 fixed: `fastapi` detects `requirements.txt` only (pyproject → later profile, follow-up); test.
 - K4 fixed with K2 (`none: manage.py`, needle `fastapi`); test.
 - K3, K5–K12: asked the user (minor / nit).
+
+## Addendum (2026-11-14)
+The minor / nit / info findings "asked the user" above were fixed in `ba99faa` (user chose "fix all"); remaining gaps found in [review-2](review-2.md) (L1–L6).

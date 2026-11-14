@@ -60,7 +60,8 @@ export function wildcardMatch(pattern: string, name: string, caseInsensitive = f
 export const MAX_WILDCARD_MATCHES = 32;
 /**
  * Project files one profile's detect rules read at most (`fileContains`): bounds the work a
- * profile can cause on a big project (security-1 S6). Further reads count as "not found".
+ * profile can cause on a big project (security-1 S6): once for `all` / `any`, once for `none`.
+ * Further reads count as "not found".
  */
 export const MAX_READS_PER_PROFILE = 64;
 
@@ -123,6 +124,9 @@ function ruleHolds(
 export function evaluateDetect(p: Profile, view: ProjectView): DetectResult {
   const reasons: string[] = [];
   const budget = { reads: 0 };
+  // `none` has its own budget: reads used up by all / any must not turn an exclusion off
+  // (review-2 L3)
+  const noneBudget = { reads: 0 };
   const check = (r: DetectRule) => {
     const why = ruleHolds(r, view, budget);
     if (why !== undefined) reasons.push(why);
@@ -131,7 +135,7 @@ export function evaluateDetect(p: Profile, view: ProjectView): DetectResult {
   const { all = [], any = [], none = [] } = p.detect;
   const allOk = all.every(check);
   const anyOk = allOk && (any.length === 0 || any.some(check));
-  const noneHit = anyOk && none.some((r) => ruleHolds(r, view, budget) !== undefined);
+  const noneHit = anyOk && none.some((r) => ruleHolds(r, view, noneBudget) !== undefined);
   const matched = allOk && anyOk && !noneHit;
   return { matched, score: matched ? p.detect.score : 0, reasons: matched ? reasons : [] };
 }
