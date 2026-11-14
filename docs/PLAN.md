@@ -15,6 +15,7 @@
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 | 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
+| 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `review` | [CR](changes/CR-004-flaky-f004-tests.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -125,4 +126,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-003 และ F-004 `done` (2026-11-14) → W1 ของ F-005
+CR-003 และ F-004 `done` (2026-11-14); F-005 `review` (review-2 PASS, L1–L6 แก้แล้ว) → CR-004 (เทส F-004) → merge F-005 → W1 ของ F-006
