@@ -6,7 +6,7 @@
  * plain substrings. Commands are split into argv and never reach a shell (command.ts).
  */
 import { basename } from "node:path";
-import { isAlias, isScalar, LineCounter, parseDocument, visit } from "yaml";
+import { isAlias, isPair, isScalar, LineCounter, parseDocument, visit } from "yaml";
 import { z } from "zod";
 import { WebhubError } from "../errors.js";
 import {
@@ -26,6 +26,8 @@ export const MAX_PROFILE_BYTES = 256 * 1024;
 export const MAX_CONTAINS_BYTES = 256 * 1024;
 
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+/** YAML nodes per profile at most (real profiles have < 200): bounds every pass after parsing. */
+export const MAX_PROFILE_NODES = 5000;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused on purpose
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
@@ -326,7 +328,9 @@ export function parseProfile(source: string, file: string): Profile {
       schema: "core",
       customTags: [],
       merge: false,
-      uniqueKeys: true,
+      // the yaml package's duplicate-key check is quadratic (a 256 KB file of short keys blocked
+      // the daemon ~16 s — security-1 S1): duplicates are found below with a Set per map
+      uniqueKeys: false,
       strict: true,
       prettyErrors: false,
       version: "1.2",
@@ -350,7 +354,21 @@ export function parseProfile(source: string, file: string): Profile {
     );
   }
   const bad: string[] = [];
+  let nodes = 0;
   visit(doc, {
+    Map(_k, map) {
+      const seen = new Set<string>();
+      for (const pair of map.items) {
+        if (!isPair(pair) || !isScalar(pair.key)) continue;
+        // 1 and "1" become the same object key: one duplicate
+        const name = String(pair.key.value);
+        if (seen.has(name)) {
+          bad.push(`line ${lineOf(pair.key.range?.[0])}: duplicate key`);
+          return visit.BREAK;
+        }
+        seen.add(name);
+      }
+    },
     Alias(_k, node) {
       bad.push(`line ${lineOf(node.range?.[0])}: aliases (*name) are not allowed`);
       return visit.BREAK;
@@ -365,6 +383,10 @@ export function parseProfile(source: string, file: string): Profile {
       }
     },
     Node(_k, node) {
+      if (++nodes > MAX_PROFILE_NODES) {
+        bad.push(`more than ${MAX_PROFILE_NODES} YAML nodes`);
+        return visit.BREAK;
+      }
       if (
         !isAlias(node) &&
         typeof node.tag === "string" &&

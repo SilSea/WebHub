@@ -186,7 +186,7 @@ describe("profile schema (F-005 §3.1)", () => {
     it("custom tags, duplicate keys, several documents, non-mapping → problem", () => {
       expect(details(`${MIN}db: !!js/function "x"\n`)).toMatch(/YAML|tags/);
       expect(details(`${MIN}db: !custom x\n`)).toMatch(/custom tags|YAML/);
-      expect(details(`${MIN}id: other\n`)).toMatch(/YAML DUPLICATE_KEY/);
+      expect(details(`${MIN}id: other\n`)).toMatch(/line 9: duplicate key/);
       expect(details(`${MIN}---\nid: x\n`)).toMatch(/YAML/);
       expect(details("- a\n- b\n")).toMatch(/mapping/);
     });
@@ -196,6 +196,21 @@ describe("profile schema (F-005 §3.1)", () => {
       const t0 = Date.now();
       expect(invalid(deep).code).toBe("CONFIG_INVALID");
       expect(Date.now() - t0).toBeLessThan(5_000);
+    });
+
+    it("256 KB of keys (flow or block) is refused fast — no quadratic duplicate check (security-1 S1)", () => {
+      const block = Array.from({ length: 28_000 }, (_, i) => `${i}: 1`).join("\n");
+      const flow = `{${Array.from({ length: 22_000 }, (_, i) => `a${i}: 1`).join(", ")}}`;
+      for (const text of [block, flow]) {
+        expect(text.length).toBeLessThan(MAX_PROFILE_BYTES);
+        const t0 = Date.now();
+        expect(details(text)).toMatch(/more than 5000 YAML nodes/);
+        expect(Date.now() - t0).toBeLessThan(2_000);
+      }
+      // duplicates are still found, also 1 vs "1"
+      expect(details(`${MIN}id: other\n`)).toMatch(/line 9: duplicate key/);
+      expect(details('a: 1\n"a": 2\n')).toMatch(/duplicate key/);
+      expect(details('1: 1\n"1": 2\n')).toMatch(/duplicate key/);
     });
 
     it("YAML error messages do not echo file content", () => {
