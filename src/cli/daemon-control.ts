@@ -269,7 +269,8 @@ export async function startDaemonProcess(
     // our daemon is stopping (`stop` then `start` in a script): let it leave, then start
     const o = await ownerOfAuth(platform, paths);
     if (o.owner === "ours" && o.pid !== undefined) {
-      if (!(await waitDead(platform, o.pid, o.lock, STOP_TIMEOUT_MS))) throw err;
+      const wait = opts.timeoutMs ?? STOP_TIMEOUT_MS;
+      if (!(await waitDead(platform, o.pid, o.lock, wait))) throw err;
     }
     running = await daemonStatusChecked(paths, platform);
   }
@@ -375,7 +376,7 @@ export async function startDaemonProcess(
 }
 
 /** Errors that only mean "not ready yet" while a start is in progress (review C8). */
-function transientAsUndefined(err: unknown): undefined {
+export function transientAsUndefined(err: unknown): undefined {
   if (
     authVanished(err) ||
     isServerError(err, "DAEMON_NOT_RUNNING") ||
@@ -602,15 +603,26 @@ async function stopImpl(
       if ((await procState(platform, lock.pid, lock)).state === "dead") {
         return { wasRunning: true, forced: false };
       }
-      if (depth === 0 && readAuthPid(paths) === lock.pid) return stopImpl(paths, opts, 1);
+      // it was starting: once it answers (auth.json written AND listening — review-3 G1),
+      // stop it the normal way; asked again on every poll until then
+      if (depth === 0 && readAuthPid(paths) === lock.pid) {
+        const s = await daemonStatus(paths).catch(transientAsUndefined);
+        if (s?.pid === lock.pid) return stopImpl(paths, opts, 1);
+      }
       if (Date.now() >= deadline) break;
       await sleep(POLL_MS);
+    }
+    if (opts.force === true) {
+      // hung while starting (lock taken, no auth.json): the lock's PID + start time is the
+      // same proof as for a running daemon (review-3 G2)
+      await forceKill(platform, lock.pid, lock.startedAt);
+      return { wasRunning: true, forced: true };
     }
     throw new CliError(
       EXIT.error,
       "DAEMON_STOP_TIMEOUT",
       `a webhub daemon (PID ${lock.pid}) holds the lock but did not stop`,
-      { hint: "Run `webhub daemon status`, then `webhub daemon stop --force`." },
+      { hint: "Run `webhub daemon stop --force` to end the process." },
     );
   }
   if (pid === undefined) return { wasRunning: false, forced: false };
@@ -651,8 +663,15 @@ async function stopImpl(
       "cannot tell which process is the daemon (auth.json and the lock file disagree); nothing was killed",
     );
   }
+  await forceKill(platform, pid, lock.startedAt);
+  removeAuthOf(paths, pid, seen);
+  return { wasRunning: true, forced: true };
+}
+
+/** `killTree` with the start time from the lock file; errors told apart (review C5). */
+async function forceKill(platform: Platform, pid: number, startedAt: string): Promise<void> {
   try {
-    await platform.process.killTree(pid, lock.startedAt);
+    await platform.process.killTree(pid, startedAt);
   } catch (err) {
     if (isPlatformError(err, "PROCESS_MISMATCH")) {
       throw new CliError(
@@ -666,8 +685,6 @@ async function stopImpl(
       hint: "End it in Task Manager, or run the command as the user that started it.",
     });
   }
-  removeAuthOf(paths, pid, seen);
-  return { wasRunning: true, forced: true };
 }
 
 /**

@@ -164,18 +164,27 @@ if (isMain()) {
     }
     abort.abort();
   });
-  // `webhub daemon logs -f | head`: the reader went away — end quietly, not with a stack
+  // Output gone (`webhub daemon logs -f | head` → EPIPE, closed console …): no stack, no
+  // exit in the middle of a command (a `start` still finishes and keeps daemon.err); further
+  // output is dropped and `logs -f` ends. The command's own exit code is kept; any error
+  // other than EPIPE turns a success into 1 (review-3 G5).
+  let outputGone = false;
+  let outputFailed = false;
   for (const stream of [process.stdout, process.stderr]) {
-    // any other write error (closed console …): stop too, `logs -f` must not poll forever
     stream.on("error", (err: NodeJS.ErrnoException) => {
-      process.exit(err.code === "EPIPE" ? (process.exitCode ?? 0) : 1);
+      outputGone = true;
+      if (err.code !== "EPIPE") outputFailed = true;
+      abort.abort();
     });
   }
+  const write = (stream: NodeJS.WriteStream, line: string) => {
+    if (!outputGone) stream.write(`${line}\n`);
+  };
   run(
     process.argv.slice(2),
     {
-      out: (line) => process.stdout.write(`${line}\n`),
-      err: (line) => process.stderr.write(`${line}\n`),
+      out: (line) => write(process.stdout, line),
+      err: (line) => write(process.stderr, line),
     },
     {
       signal: abort.signal,
@@ -185,11 +194,11 @@ if (isMain()) {
     },
   ).then(
     (code) => {
-      process.exitCode = code;
+      process.exitCode = outputFailed && code === 0 ? 1 : code;
     },
     (err: unknown) => {
       // run() reports its own errors; this is only a last resort (never a stack)
-      process.stderr.write(`${errorLines(err).join("\n")}\n`);
+      for (const line of errorLines(err)) write(process.stderr, line);
       process.exitCode = 1;
     },
   );

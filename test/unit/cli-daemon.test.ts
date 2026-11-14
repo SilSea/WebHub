@@ -226,6 +226,11 @@ describe("daemon logs (F-004 §3.6)", () => {
     expect(tailLogs(h.paths, 5)).toEqual(["last"]);
   });
 
+  it("tail with only .1 (current file not created yet) → lines of .1 (review-3 G3 M16)", () => {
+    writeFileSync(`${file()}.1`, "a\nb\n");
+    expect(tailLogs(h.paths, 5)).toEqual(["a", "b"]);
+  });
+
   it("tail sanitises (paths from requests can hold escapes)", () => {
     writeFileSync(file(), `{"path":"/a${ch(0x1b)}[2J${ch(0x202e)}"}\n`);
     expect(tailLogs(h.paths, 1)[0]).toBe('{"path":"/a?[2J?"}');

@@ -1,8 +1,34 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
-import { dirname } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { authVanished, isStopping, stopDaemon } from "../../src/cli/daemon-control.js";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/** `readDoc` throws ENOENT on its n-th call once (auth.json removed between lstat and read). */
+const store = vi.hoisted(() => ({ vanishOnCall: 0, calls: 0 }));
+vi.mock("../../src/store/json-store.js", async (orig) => {
+  const m = await orig<typeof import("../../src/store/json-store.js")>();
+  return {
+    ...m,
+    readDoc: (async (...args: Parameters<typeof m.readDoc>) => {
+      store.calls++;
+      if (store.vanishOnCall !== 0 && store.calls === store.vanishOnCall) {
+        throw Object.assign(new Error("auth.json vanished"), { code: "ENOENT" });
+      }
+      return m.readDoc(...args);
+    }) as typeof m.readDoc,
+  };
+});
+
+import {
+  authVanished,
+  daemonStatus,
+  daemonStatusChecked,
+  ensureDaemon,
+  isStopping,
+  startDaemonProcess,
+  stopDaemon,
+  transientAsUndefined,
+} from "../../src/cli/daemon-control.js";
 import { CliError } from "../../src/cli/output.js";
 import type { Paths } from "../../src/config/home.js";
 import { type Platform, PlatformError, type ProcInfo } from "../../src/platform/index.js";
@@ -11,6 +37,7 @@ import { isServerError, ServerError } from "../../src/server/errors.js";
 import { tempHome } from "../helpers/home.js";
 
 const PID = 4242;
+const ENTRY = join(import.meta.dirname, "../fixtures/cli-daemon-entry.mjs");
 const STARTED = "2026-11-14T01:02:03.0000000Z";
 const TOKEN = "A".repeat(43);
 
@@ -77,6 +104,8 @@ async function squatter(): Promise<{ server: Server; port: number; seen: Incomin
 let h: Awaited<ReturnType<typeof tempHome>>;
 let sq: Awaited<ReturnType<typeof squatter>>;
 beforeEach(async () => {
+  store.vanishOnCall = 0;
+  store.calls = 0;
   h = await tempHome();
   sq = await squatter();
 });
@@ -446,5 +475,181 @@ describe("error mapping (review-2 E1 / E2)", () => {
     expect(isStopping(new ServerError("API_ERROR", "x", { status: 500, apiCode: "X" }))).toBe(
       false,
     );
+  });
+});
+
+describe("no auth.json, lock held (review-3 G1 / G2, M9 / M18)", () => {
+  it("a starting daemon writes auth.json, listens later → asked again until it answers, then stopped", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    const d = await fakeDaemon({
+      statusPid: PID,
+      onShutdown: () => setTimeout(() => f.procs.delete(PID), 100),
+    });
+    const port = d.port;
+    await new Promise((r) => d.server.close(r)); // not listening yet
+    setTimeout(() => writeAuth(h.paths, PID, port), 150);
+    setTimeout(() => d.server.listen({ host: "127.0.0.1", port }), 450);
+    try {
+      const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+      expect(r).toEqual({ wasRunning: true, forced: false });
+      expect(d.shutdowns()).toBe(1);
+    } finally {
+      d.server.close();
+    }
+  });
+
+  it("hung while starting: --force kills (lock pid, lock start time)", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 300, force: true });
+    expect(r).toEqual({ wasRunning: true, forced: true });
+    expect(f.kills).toEqual([{ pid: PID, startedAt: STARTED }]);
+  });
+
+  it("hung while starting, no --force → DAEMON_STOP_TIMEOUT with the --force hint, nothing killed", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    const err = (await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 300 }).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(err.code).toBe("DAEMON_STOP_TIMEOUT");
+    expect(err.hint).toContain("--force");
+    expect(f.kills).toEqual([]);
+  });
+
+  it("lock PID alive with unknown start time → not running, nothing waited for", async () => {
+    const f = fakePlatform();
+    f.add(PID, undefined);
+    writeLock(h.paths, PID, STARTED);
+    const t0 = Date.now();
+    expect(await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 })).toEqual({
+      wasRunning: false,
+      forced: false,
+    });
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it("process table fails while waiting on the lock PID → not taken as dead", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    setTimeout(() => f.failInfo(), 150);
+    const err = (await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 600 }).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(err.code).toBe("DAEMON_STOP_TIMEOUT");
+  });
+});
+
+describe("status / start / ensureDaemon tell our stopping daemon apart (review-3 G3)", () => {
+  it("ours not answering → DAEMON_NOT_ANSWERING (not 'another program')", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    const err = (await daemonStatusChecked(h.paths, f.platform).catch(
+      (e: unknown) => e,
+    )) as CliError;
+    expect(err.code).toBe("DAEMON_NOT_ANSWERING");
+  });
+
+  it("ours gone, a new daemon answers → its status", async () => {
+    const NEW = PID + 7;
+    const f = fakePlatform(); // PID dead
+    f.add(NEW, STARTED);
+    const d = await fakeDaemon({ statusPid: NEW, helloFailsFirst: true });
+    try {
+      writeAuth(h.paths, PID, d.port);
+      expect((await daemonStatusChecked(h.paths, f.platform))?.pid).toBe(NEW);
+    } finally {
+      d.server.close();
+    }
+  });
+
+  it("ours gone, a program squats the port → DAEMON_IMPOSTOR", async () => {
+    const f = fakePlatform();
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    const err = await daemonStatusChecked(h.paths, f.platform).catch((e: unknown) => e);
+    expect(isServerError(err, "DAEMON_IMPOSTOR")).toBe(true);
+  });
+
+  it("start waits for our stopping daemon to leave, then starts", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    setTimeout(() => {
+      f.procs.delete(PID);
+      sq.server.close();
+    }, 300);
+    const t0 = Date.now();
+    const err = (await startDaemonProcess(h.paths, {
+      platform: f.platform,
+      env: { ...process.env, WEBHUB_HOME: h.paths.home, WEBHUB_TEST_ENTRY: "fail-2" },
+      daemonJs: ENTRY,
+      timeoutMs: 5_000,
+    }).catch((e: unknown) => e)) as CliError;
+    // it got as far as spawning (the fixture exits 2), after waiting for the old one
+    expect(err.code).toBe("DAEMON_START_FAILED");
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
+  });
+
+  it("ensureDaemon does not try to start over another program", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    f.add(PID + 1, STARTED);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID + 1, STARTED);
+    let started = false;
+    const err = await ensureDaemon(h.paths, {
+      platform: f.platform,
+      onStart: () => {
+        started = true;
+      },
+    }).catch((e: unknown) => e);
+    expect(isServerError(err, "DAEMON_IMPOSTOR")).toBe(true);
+    expect(started).toBe(false);
+  });
+});
+
+describe("ENOENT wiring (review-3 G3: M1 / M3 / M8, M14)", () => {
+  it("the start poll treats ENOENT as not ready; other errors stop it", () => {
+    expect(transientAsUndefined(Object.assign(new Error("x"), { code: "ENOENT" }))).toBeUndefined();
+    expect(() => transientAsUndefined(new Error("other"))).toThrow("other");
+  });
+
+  it("isStopping needs status 503", () => {
+    expect(
+      isStopping(new ServerError("API_ERROR", "x", { status: 500, apiCode: "SHUTTING_DOWN" })),
+    ).toBe(false);
+  });
+
+  it("auth.json gone between lstat and read → daemonStatus = not running", async () => {
+    store.calls = 0;
+    store.vanishOnCall = 1;
+    writeAuth(h.paths, PID, sq.port);
+    expect(await daemonStatus(h.paths)).toBeUndefined();
+  });
+
+  it("auth.json gone when connecting for the shutdown → waited for, stopped", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    const d = await fakeDaemon({ statusPid: PID });
+    try {
+      writeAuth(h.paths, PID, d.port);
+      writeLock(h.paths, PID, STARTED);
+      store.calls = 0;
+      store.vanishOnCall = 2; // 1 = status connect, 2 = shutdown connect
+      setTimeout(() => f.procs.delete(PID), 300);
+      const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+      expect(r).toEqual({ wasRunning: true, forced: false });
+    } finally {
+      d.server.close();
+    }
   });
 });
