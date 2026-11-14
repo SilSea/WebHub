@@ -186,6 +186,7 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-005/test-1.md) 436/6 | [review-1](../reports/F-005/review-1.md) **FAIL** (K1, K2 major) | [security-1](../reports/F-005/security-1.md) **FAIL** (S1 major) | K1, K2, K4, S1 แก้แล้ว; minor/nit ถามผู้ใช้ |
+| 2 | [test-2](../reports/F-005/test-2.md) 447/6 | | | minor/nit รอบ 1 แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") → review รอบ 2 |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
