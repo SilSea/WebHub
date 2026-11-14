@@ -23,6 +23,8 @@
 
 **ติดตามต่อ (CR-003 security-1 AA3):** audit ของ F-001 (`ensureHome` บน Windows) อาจข้าม entry ชื่อแปลก (`CON`, ชื่อลงท้าย `.`/ช่องว่าง, ADS) โดยไม่รายงาน → สืบแบบ read-only ก่อน แล้วเสนอ CR ถ้าจริง (F-001 `done`, R1)
 
+**ติดตามต่อ (F-005):** (1) profile Python สำหรับ project pyproject-only (uv / poetry) — `fastapi` ตอนนี้ `requirements.txt` เท่านั้น (review-1 K2) → W1 item ใหม่; (2) เทส F-004 `cli-stop` "start waits for our stopping daemon" timeout 5 วิ ครั้งเดียวตอนรันทั้งชุด (เครื่องโหลด) — ถ้าเกิดซ้ำ → CR เพิ่ม timeout ของเทส (F-004 `done`, R1)
+
 ---
 
 ## 1. ลำดับ + dependency
@@ -57,7 +59,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; รอ `auth.pid` = PID ที่ spawn (H16); log ของ daemon จำกัดขนาด**เป็น byte** (CR-003 — F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (security-8 Y2); `webhub ui` ย้ายไป F-009 (F-004 Q2) | — |
 | F-005 | Profile loader (YAML + zod) + built-in (static, static-spa, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
-| F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
+| F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval: แสดง argv ที่ render แล้ว + executable ที่ resolve แล้ว, ผูกกับเนื้อหา profile ไม่ใช่แค่ id (F-005 S8) | — |
 | F-008 | `setup` wizard + `doctor` | §21.4 | — | — |
 
 ### MVP-2 — Routing
@@ -75,7 +77,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-014 | Port Manager (ports.json, probe 3 ชั้น, apply/rollback) | §4.1–4.3 | expose default host | Windows excluded range |
 | F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น | ต้องมี internet |
 | F-016 | Env resolver + env sets + URL rewrite | §11.1–11.2 | secret ไม่ลง log | precedence ผิด |
-| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
+| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; resolve executable เอง ไม่หาใน cwd ของ project, ห้าม `shell: true` บน POSIX, ตรวจ listener หลัง start ว่าอยู่ใน loopback (app ที่ไม่สน HOST — F-005 K11/S4/S8); route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
 | F-018 | Container runner พื้นฐาน | §7 | ไม่ privileged, mount ตามจำเป็น | — |
 
 ### MVP-4 — Compose

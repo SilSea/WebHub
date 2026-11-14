@@ -13,6 +13,7 @@ import {
   BUILTIN_PLACEHOLDERS,
   CommandError,
   isSafeValue,
+  namesNonLoopback,
   placeholdersOf,
   splitCommand,
   VAR_NAME,
@@ -156,12 +157,14 @@ const command = z
   });
 
 const varValue = z.string().refine(isSafeValue, {
-  message: "1–200 of letters, digits and . _ : @ / + = - (not starting with -)",
+  message:
+    "1–200 of letters, digits and . _ : @ / + = - (not starting with -, not a non-loopback address)",
 });
 
 const port = z.number().int().min(1).max(65535);
-const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, {
-  message: "invalid env var name",
+/** `PORT` or `<NAME>_PORT` only: never PATH, PATHEXT, NODE_OPTIONS, ComSpec … (security-1 S5). */
+const portEnvName = z.string().regex(/^([A-Z][A-Z0-9_]{0,40}_)?PORT$/, {
+  message: "PORT or <NAME>_PORT (e.g. SERVER_PORT)",
 });
 
 const Runtime = z.strictObject({
@@ -178,7 +181,7 @@ const Start = z.strictObject({
 const Port = z.strictObject({
   default: port,
   via: z.enum(["env", "arg", "fixed"]),
-  env: envName.optional(),
+  env: portEnvName.optional(),
 });
 const Host = z.strictObject({
   // never outside loopback: no LAN exposure, no firewall prompt (DESIGN §6.1 / §17 10b)
@@ -203,7 +206,8 @@ const Variant = z.strictObject({
   when: z.strictObject({ dep: depName, range }),
   runtime: Runtime.partial().optional(),
   start: Start.partial().optional(),
-  port: Port.partial().optional(),
+  // `env: null` removes port.env when a variant switches away from via env (review-1 K9)
+  port: Port.partial().extend({ env: portEnvName.nullable().optional() }).optional(),
   devServer: DevServer.partial().optional(),
   health: Health.partial().optional(),
   container: Container.partial().optional(),
@@ -233,6 +237,14 @@ export type Profile = z.infer<typeof Base>;
 export type DetectRule = z.infer<typeof Rule>;
 
 /** Checks that need the whole profile (also run on every variant applied to it). */
+const splitSafe = (cmd: string): string[] => {
+  try {
+    return splitCommand(cmd);
+  } catch {
+    return []; // reported by the field's own check
+  }
+};
+
 function crossProblems(p: Omit<Profile, "variants">): { path: PropertyKey[]; message: string }[] {
   const out: { path: PropertyKey[]; message: string }[] = [];
   if ((p.start === undefined) === (p.static === undefined)) {
@@ -245,6 +257,12 @@ function crossProblems(p: Omit<Profile, "variants">): { path: PropertyKey[]; mes
     [["container", "setup"], p.container?.setup],
   ];
   for (const [path, cmd] of cmds) {
+    if (cmd !== undefined && splitSafe(cmd).some(namesNonLoopback)) {
+      out.push({
+        path,
+        message: "binds outside loopback (0.0.0.0, ::, a LAN address); use {HOST}",
+      });
+    }
     for (const name of cmd === undefined ? [] : placeholdersOf(cmd)) {
       if (!known.has(name)) {
         out.push({ path, message: `unknown placeholder {${name}} (declare it in start.vars)` });
@@ -274,29 +292,33 @@ function crossProblems(p: Omit<Profile, "variants">): { path: PropertyKey[]; mes
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Objects merge key by key; arrays and scalars replace. Inputs are not changed. */
+/** Objects merge key by key; arrays and scalars replace; `null` removes the key. Inputs are not changed. */
 export function deepMerge<T>(base: T, over: unknown): T {
   if (!isObject(base) || !isObject(over)) return (over === undefined ? base : over) as T;
   const out: Record<string, unknown> = { ...base };
   for (const [k, v] of Object.entries(over)) {
     if (FORBIDDEN_KEYS.has(k) || v === undefined) continue;
-    out[k] = deepMerge(out[k], v);
+    if (v === null) delete out[k];
+    else out[k] = deepMerge(out[k], v);
   }
   return out as T;
 }
 
 export const ProfileSchema = Base.superRefine((p, ctx) => {
   for (const issue of crossProblems(p)) ctx.addIssue({ code: "custom", ...issue });
-  // every variant must give a valid profile on its own (caught at load, not at start)
+  // every variant must give a valid profile alone, and so must all of them applied in order
+  // (several can hold at once) — caught at load, not at start (review-1 K9)
+  const base = { ...p, variants: undefined };
+  let all: typeof base = base;
   for (const [i, v] of (p.variants ?? []).entries()) {
     const { when: _when, ...over } = v;
-    const merged = deepMerge({ ...p, variants: undefined }, over);
-    for (const issue of crossProblems(merged)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["variants", i],
-        message: `with this variant: ${issue.message}`,
-      });
+    all = deepMerge(all, over);
+    const alone = crossProblems(deepMerge(base, over)).map(
+      (x) => `with this variant: ${x.message}`,
+    );
+    const together = crossProblems(all).map((x) => `with variants 0–${i} together: ${x.message}`);
+    for (const message of new Set([...alone, ...(alone.length > 0 ? [] : together)])) {
+      ctx.addIssue({ code: "custom", path: ["variants", i], message });
     }
   }
 });

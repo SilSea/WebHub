@@ -171,7 +171,7 @@ describe("webhub profiles (F-005)", { timeout: 120_000 }, () => {
     // terminal raw
     writeFileSync(
       join(h.paths.profiles, "evil.yml"),
-      `${VALID.replace("id: mine", "id: evil")}"k\\e[31mRED": 1\n`,
+      `${VALID.replace("id: mine", "id: evil")}"k\\e[31m\\x9bRED": 1\n`,
     );
     const list = await cli(["profiles"], env);
     expect(list.code).toBe(0);
@@ -179,7 +179,7 @@ describe("webhub profiles (F-005)", { timeout: 120_000 }, () => {
       /\nvite\s+node\s+user \(data\/profiles\/vite\.yml, replaces built-in\)/,
     );
     expect(list.err).toContain("data/profiles/evil.yml");
-    expect(list.err).toContain("k?[31mRED");
+    expect(list.err).toContain("k?[31m?RED");
     expect(list.err).not.toContain("\u001b");
 
     const check = await cli(["profiles", "--check"], env);
@@ -192,6 +192,9 @@ describe("webhub profiles (F-005)", { timeout: 120_000 }, () => {
     };
     expect(body.problems.map((p) => p.file)).toEqual(["data/profiles/evil.yml"]);
     expect(body.profiles.length).toBeGreaterThanOrEqual(7);
+    // C1 (8-bit CSI) is not escaped by JSON.stringify: sanitised too (security-1 S7)
+    expect(json.out).not.toContain(String.fromCharCode(0x9b));
+    expect(json.out).toContain("k?[31m?RED");
   });
 
   it("bad option → exit 2", async () => {

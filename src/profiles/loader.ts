@@ -40,6 +40,17 @@ export interface LoadResult {
 }
 
 const problemOf = (file: string, err: unknown): ProfileProblem => {
+  // these messages hold the absolute path: never to the API / browser (review-1 K3, security-1 S2)
+  if (
+    err instanceof WebhubError &&
+    (err.code === "SYMLINK_REFUSED" || err.code === "PATH_OUTSIDE_HOME")
+  ) {
+    return {
+      file,
+      message: `${file} must be a real folder / file inside WEBHUB_HOME, not a link`,
+      details: [],
+    };
+  }
   if (err instanceof WebhubError) {
     return { file, message: err.message.split("\n")[0] ?? "", details: [...err.details] };
   }

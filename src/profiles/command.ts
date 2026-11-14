@@ -13,9 +13,14 @@ export const MAX_ARGS = 64;
 /** Placeholders every command may use; others must be declared in `start.vars`. */
 export const BUILTIN_PLACEHOLDERS = ["PORT", "HOST"] as const;
 
-/** Characters a shell (cmd.exe or sh) would interpret, plus control characters. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused on purpose
-const UNSAFE = /[&|;<>()`$^%!\\\n\r\u0000-\u001f\u007f]/;
+/**
+ * Printable ASCII only (space included): no control / C1 characters, no tab, no bidi,
+ * zero-width, NBSP or fullwidth look-alikes (`＂` becomes `"` under Windows best-fit) — the
+ * command shown at run approval is the one that runs (review-1 K7, security-1 S3).
+ */
+const PRINTABLE = /^[\x20-\x7e]*$/;
+/** Characters a shell (cmd.exe or sh) would interpret. */
+const UNSAFE = /[&|;<>()`$^%!\\]/;
 const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]{0,31})\}/g;
 /** Value of a placeholder: no spaces, quotes, shell characters; never an option (`-x`). */
 const VALUE = /^[A-Za-z0-9._:@/+=][A-Za-z0-9._:@/+=-]{0,199}$/;
@@ -29,34 +34,51 @@ export class CommandError extends Error {
 }
 
 /**
- * Splits a command into arguments: whitespace separates, `"..."` or `'...'` keep spaces
- * together (no escapes inside). Throws CommandError on a shell character, an unclosed quote,
- * a stray `{` / `}`, or a command that is empty / too long.
+ * Splits a command into arguments: spaces separate, `"..."` or `'...'` around a WHOLE argument
+ * keep spaces together (no escapes, no other quote inside). Throws CommandError on a
+ * non-printable / non-ASCII or shell character, a misplaced or unclosed quote, a stray `{` /
+ * `}`, an option as the program, or a command that is empty / too long.
  */
 export function splitCommand(cmd: string): string[] {
   if (cmd.length === 0 || cmd.length > MAX_COMMAND_LENGTH) {
     throw new CommandError(`command must be 1–${MAX_COMMAND_LENGTH} characters`);
   }
+  if (!PRINTABLE.test(cmd)) {
+    throw new CommandError("command must be printable ASCII (no control or non-ASCII characters)");
+  }
   if (UNSAFE.test(cmd)) {
     throw new CommandError(
-      "command contains a shell character (& | ; < > ( ) ` $ ^ % ! \\ or a control character); commands never run through a shell",
+      "command contains a shell character (& | ; < > ( ) ` $ ^ % ! or backslash); commands never run through a shell",
     );
   }
+  const misplaced = () =>
+    new CommandError("quotes must enclose a whole argument and hold no other quote");
   const args: string[] = [];
   let cur = "";
   let inArg = false;
   let quote: string | undefined;
+  let closed = false;
   for (const ch of cmd) {
     if (quote !== undefined) {
-      if (ch === quote) quote = undefined;
-      else cur += ch;
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
-      inArg = true;
-    } else if (ch === " " || ch === "\t") {
+      if (ch === quote) {
+        quote = undefined;
+        closed = true;
+      } else if (ch === '"' || ch === "'") {
+        throw misplaced();
+      } else {
+        cur += ch;
+      }
+    } else if (ch === " ") {
       if (inArg) args.push(cur);
       cur = "";
       inArg = false;
+      closed = false;
+    } else if (closed) {
+      throw misplaced(); // `"a"b`
+    } else if (ch === '"' || ch === "'") {
+      if (inArg) throw misplaced(); // `a"b"`
+      quote = ch;
+      inArg = true;
     } else {
       cur += ch;
       inArg = true;
@@ -85,7 +107,20 @@ export function placeholdersOf(cmd: string): string[] {
 
 /** True when `value` may be put into a placeholder. */
 export function isSafeValue(value: string): boolean {
-  return VALUE.test(value);
+  return VALUE.test(value) && !namesNonLoopback(value);
+}
+
+/**
+ * True when an argument or value names a non-loopback bind address: `0.0.0.0`, `::`, `[::]`,
+ * or an IPv4 literal outside 127/8 (security-1 S4). Host names are left to the run approval
+ * and the listener check (F-007 / F-017).
+ */
+export function namesNonLoopback(text: string): boolean {
+  if (text.includes("[::]") || /(^|[=:,@ ])::($|[ ,/])/.test(text) || text === "::") return true;
+  for (const m of text.matchAll(/(?<![0-9.])(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![0-9.])/g)) {
+    if (m[1] !== "127") return true;
+  }
+  return false;
 }
 
 /**

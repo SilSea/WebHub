@@ -64,8 +64,11 @@ variants:
   - `file: "a|b"`: path relative ใช้ `/`, ห้าม `..` / absolute / drive / `\`; `*` ได้เฉพาะ segment สุดท้าย ≤ 4 ตัว (เช่น `*.uproject`, `src/*.config.*`); ลงท้าย `/` = folder
   - `fileContains: [files, "x|y"]`: substring (case-sensitive) ในไฟล์ที่อ่านได้ ≤ 256 KB ต่อไฟล์
   - `dep: "name"` (+ `range` ได้): อยู่ใน deps ที่ผู้เรียกส่งมา (package.json / requirements / pyproject — F-006 รวบรวม)
-- variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง) (Q6); ตรงหลายข้อ → apply ตามลำดับในไฟล์
+- variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง; ไม่รับ `*` / `x` / `||`) (Q6); เทียบกับ **version ต่ำสุดที่ประกาศ** (`^5.4.0` = 5.4.0) ไม่ใช่ที่ติดตั้งจริง; ตรงหลายข้อ → apply ตามลำดับในไฟล์; ตอนโหลดตรวจทั้งแต่ละตัวเดี่ยว และทุกตัวรวมกันตามลำดับ (review-1 K9); ค่า `null` ใน variant = ลบ key (ตอนนี้ `port.env`)
 - `{PORT}` / `{HOST}` ใช้ได้ใน `start.cmd`, `runtime.install`, `container.setup`; `{name}` อื่นต้องมีใน `vars`; placeholder ไม่รู้จัก = error ตอนโหลด
+- คำสั่ง: printable ASCII เท่านั้น (ไม่มี control / C1 / bidi / zero-width / fullwidth / tab — security-1 S3); quote ครอบทั้ง argument เท่านั้น ห้ามมี quote อื่นข้างใน; ห้าม metachar ของ shell; ห้ามระบุที่อยู่นอก loopback (`0.0.0.0`, `::`, `[::]`, IPv4 นอก 127/8) ใน cmd / vars / ค่า placeholder (S4)
+- `port.env` = `PORT` หรือ `<NAME>_PORT` เท่านั้น (ไม่ให้ทับ `PATH`, `PATHEXT`, `NODE_OPTIONS` … — S5)
+- `file:` ตรงทั้งไฟล์และ folder ชื่อนั้น (ลงท้าย `/` = folder เท่านั้น); wildcard เรียงชื่อแล้วเก็บ 32 ตัวแรก (K8); detect ของ 1 profile อ่านไฟล์ได้ ≤ 64 ไฟล์ (เกิน = ถือว่าไม่เจอ — S6)
 
 ### 3.2 Interface (TypeScript, `src/profiles/`)
 ```ts
@@ -95,17 +98,23 @@ export function evaluateDetect(p: Profile, view: ProjectView): { matched: boolea
 export function effectiveProfile(p: Profile, deps: ReadonlyMap<string, string>): Profile;   // apply variants
 export function renderCommand(cmd: string, values: Record<string, string>): string[];        // argv, ไม่มี shell
 ```
-- REST: `GET /api/v1/profiles` → `{ profiles: [{ id, language, source, overrides? }], problems: [...] }` (auth เหมือน route อื่น; ไม่ส่ง path เต็มของ home ออกไป browser — ส่งชื่อไฟล์ relative)
+- REST: `GET /api/v1/profiles` → `{ profiles: [{ id, language, source, file, overrides? }], problems: [{ file, message, details }] }` (auth เหมือน route อื่น; ไม่ส่ง path เต็มของ home ออกไป browser — `file` เป็น relative, error ที่มี path เต็ม (link / นอก home) แปลงเป็นข้อความคงที่ — K3/S2)
 - CLI: `webhub profiles` (ตาราง id / language / source), `--check` → exit 2 ถ้ามี problem (สำหรับคนเขียน profile เอง), `--json`
 
 ### 3.3 Flow
-1. daemon start → `loadProfiles` ครั้งเดียว + โหลดใหม่เมื่อเรียก route (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี file watcher)
+1. โหลดเมื่อเรียก route ทุกครั้ง (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี cache / file watcher; เรียกซ้อนกัน = ใช้ผลเดียวกัน) — ผู้ใช้อื่น (F-006/F-007) เรียก `loadProfiles` เอง
 2. อ่านไฟล์: `lstat` (bigint) → ต้องเป็น regular file, ไม่ใช่ link, ไม่ใช่ hard link (`nlink` 1), ≤ 256 KB → `open` → `fstat` ต้องเป็น `ino` เดียวกัน (ไม่เทียบ `dev`: Node 22 บน Windows ให้ 0 จาก lstat) → อ่าน ≤ 256 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
 3. parse YAML แบบ safe (YAML 1.2 core schema, ไม่มี custom tag, **ไม่รับ alias เลย** (ไม่มี alias bomb), key ซ้ำ / หลาย document / warning ของ YAML (เช่น tag ไม่รู้จัก) = error, ปฏิเสธ key `__proto__` / `constructor` / `prototype`, ข้อความ error ใช้แค่ code + บรรทัด ไม่ยกเนื้อไฟล์) → zod → ตรวจ placeholder / path pattern / range
-4. id ซ้ำ: ระหว่างไฟล์ผู้ใช้ = problem ทั้งคู่; ผู้ใช้ทับ built-in → ตาม Q3
+4. id ซ้ำ: id ต้องตรงชื่อไฟล์ → ไฟล์ผู้ใช้ id ซ้ำกันเองไม่ได้; ผู้ใช้ทับ built-in → ตาม Q3; built-in ไม่ตรวจ hard link (pnpm / bun ติดตั้งเป็น hard link — K1); YAML ≤ 5000 node, ตรวจ key ซ้ำเองแบบ O(n) (ของ `yaml` เป็น quadratic — S1)
 
 ### 3.4 Built-in ชุดแรก (Q2)
 `static`, `static-spa`, `vite`, `next`, `express`, `bun-elysia`, `fastapi` — แต่ละตัวมี fixture ใน `fixtures/<case>/` (ไฟล์ขั้นต่ำ) + ผลที่คาดหวัง; detect ของ `next` / `vite` อาศัย `dep`; `next` ใช้ variants (`<13`, `>=15` hostRewrite — Origin ยังเป็น spike ของ F-009)
+
+### 3.4a ข้อจำกัด / ข้อกำหนดถึง feature ถัดไป (review-1 K11, security-1 S8)
+- `host.bind` เป็นค่าที่ webhub ส่งให้ (`{HOST}`); app ที่ไม่รับ HOST (express / Elysia `listen(PORT)`) bind ทุก interface ได้ → **F-017** ตรวจ listener หลัง start ว่าอยู่ใน loopback, ไม่ใช่ → เตือน / หยุด
+- `start.cmd` รันโปรแกรมอะไรก็ได้ (`powershell -EncodedCommand`, UNC, `cmd /c`): ขอบเขตความปลอดภัยคือ **run approval (F-007)** — แสดง argv ที่ render แล้ว + executable ที่ resolve แล้ว (ไม่ใช่ string ดิบ), ผูก approval กับเนื้อหา profile ไม่ใช่แค่ id (ผู้ใช้ทับ built-in id ได้)
+- **F-017**: resolve executable เอง (ไม่ให้ Windows หาใน cwd ของ project ก่อน — `NoDefaultCurrentDirectoryInExePath`), ห้าม `shell: true` บน POSIX, ค่าที่มี `=` / `,` / ขึ้นต้น `/` ผ่าน `.cmd` shim
+- `fastapi` รองรับ `requirements.txt` เท่านั้น; project pyproject-only (uv / poetry) → profile แยกภายหลัง (follow-up)
 
 ### 3.5 Platform
 - path pattern ใช้ `/` เสมอ; เทียบชื่อไฟล์แบบ case-insensitive บน Windows (ผ่าน `ProjectView` ของผู้เรียก)
@@ -135,7 +144,7 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 | CPU | ReDoS จาก pattern ใน profile | ไม่มี regex จาก profile: substring + `*` แบบ segment เดียว (match แบบ linear) | pattern ยาว / `*` เยอะ → เวลาจำกัด |
 | ไฟล์นอก project | pattern `../` / absolute ใน `file` / `fileContains` | validate ตอนโหลด (ห้าม `..`, absolute, drive, `\`); `ProjectView` ของ F-006 จำกัด root อีกชั้น | pattern ต้องห้าม → problem |
 | เครื่องผู้ใช้ | command injection ผ่าน `cmd` / `vars` / ค่า placeholder | `renderCommand` → argv (ไม่มี shell), metachar ของ shell ใน cmd = error ตอนโหลด, ค่า vars / placeholder ต้องตรง allowlist อักขระ, แทนได้เฉพาะชื่อที่ประกาศ | cmd มี `&` / `|` / `;` / `` ` `` / `$(` → error; ค่ามีช่องว่าง / quote → error |
-| เครื่องผู้ใช้ | profile สั่ง bind นอก loopback | `host.bind` เฉพาะ `127.0.0.1` / `::1` | `0.0.0.0` → error |
+| เครื่องผู้ใช้ | profile สั่ง bind นอก loopback | `host.bind` เฉพาะ `127.0.0.1` / `::1`; cmd / vars / ค่า placeholder ห้ามที่อยู่นอก loopback; app ที่ไม่สน HOST → F-017 ตรวจ listener (§3.4a) | `0.0.0.0` / `--host 0.0.0.0` / var `0.0.0.0` → error |
 | ไฟล์ใน `data/profiles/` | link / hardlink ชี้ออกไปนอก home | `assertSafePath` + `lstat` regular file + ไม่ใช่ link | link → problem |
 | terminal / browser | ชื่อ / ข้อความจาก profile มี control char | CLI ผ่าน `sanitize`; API ส่ง JSON (dashboard escape — F-027) | id / language มี ESC → พิมพ์เป็น `?` |
 | ผู้ใช้ | profile ที่ได้มาจากคนอื่นรันคำสั่งทันที | F-005 ไม่รันอะไร; run approval = F-007 | — |
@@ -159,7 +168,7 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | 1 | built-in ทุกตัว parse + validate ผ่าน; id ไม่ซ้ำ | unit |
 | 2 | key แปลก / type ผิด / ค่าเกินช่วง → error มีไฟล์ + บรรทัด + path ของ field | unit |
 | 3 | ไฟล์ผู้ใช้เสีย 1 ไฟล์ → อยู่ใน problems, ที่เหลือโหลดได้ | unit |
-| 4 | ผู้ใช้ทับ built-in (Q3); id ซ้ำระหว่างไฟล์ผู้ใช้ → problem ทั้งคู่ | unit |
+| 4 | ผู้ใช้ทับ built-in (Q3); id ต้องตรงชื่อไฟล์ | unit |
 | 5 | YAML alias bomb, ไฟล์ > 256 KB, > 200 ไฟล์, `__proto__`, custom tag → problem, ไม่ค้าง, prototype ไม่เปลี่ยน | security |
 | 6 | link / hardlink ใน `data/profiles/` → problem | security |
 | 7 | pattern `..` / absolute / `C:` / `\` → error | security |

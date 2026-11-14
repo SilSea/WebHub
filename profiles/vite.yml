@@ -14,10 +14,9 @@ start:
   cmd: "vite --port {PORT} --host {HOST} --strictPort"
 port: { default: 5173, via: arg }
 host: { bind: "127.0.0.1" }
-devServer: { hostRewrite: false }
+# Host check in every maintained line (Vite 6, backported to 5.4.12 / 4.5.6 — CVE-2025-24010):
+# nginx sends Host localhost:<port> for every version (review-1 K5). Variants use the declared
+# lower bound (`^5.4.0` = 5.4.0), not the installed version, so they cannot tell 5.4.12 apart.
+devServer: { hostRewrite: true }
 health: { path: "/", timeout: 60 }
 container: { image: "node:22-slim", workdir: /app }
-variants:
-  # Vite 6 refuses unknown Host headers: nginx sends Host localhost:<port> (DESIGN §19.5)
-  - when: { dep: "vite", range: ">=6" }
-    devServer: { hostRewrite: true }

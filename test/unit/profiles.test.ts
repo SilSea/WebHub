@@ -2,9 +2,20 @@ import { linkSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebhubError } from "../../src/errors.js";
-import { CommandError, renderCommand, splitCommand } from "../../src/profiles/command.js";
+import {
+  CommandError,
+  namesNonLoopback,
+  renderCommand,
+  splitCommand,
+} from "../../src/profiles/command.js";
 import { loadProfiles, MAX_USER_PROFILES } from "../../src/profiles/loader.js";
-import { effectiveProfile, evaluateDetect, wildcardMatch } from "../../src/profiles/match.js";
+import {
+  effectiveProfile,
+  evaluateDetect,
+  MAX_READS_PER_PROFILE,
+  MAX_WILDCARD_MATCHES,
+  wildcardMatch,
+} from "../../src/profiles/match.js";
 import { lowestVersion, parseRange, satisfies, type Version } from "../../src/profiles/range.js";
 import { MAX_PROFILE_BYTES, type Profile, parseProfile } from "../../src/profiles/schema.js";
 import { tempHome } from "../helpers/home.js";
@@ -489,5 +500,137 @@ describe("loader (F-005 §3.3)", () => {
     const r = await loadProfiles(h.paths, { builtinDir: dir });
     expect(r.problems).toEqual([]);
     expect(r.profiles.map((p) => p.profile.id)).toEqual(["demo"]);
+  });
+});
+
+describe("review-1 / security-1 fixes", () => {
+  it("commands: printable ASCII only, quotes around whole arguments only (K7, S3)", () => {
+    for (const c of [
+      "npm run dev ‮ --port 1",
+      "npm \u0085 x",
+      "npm \u009b x",
+      "npm x",
+      "npm ＂ ＆ calc",
+      "npm ​ x",
+      "npm\tx",
+    ]) {
+      expect(() => splitCommand(c), JSON.stringify(c)).toThrow(/printable ASCII/);
+    }
+    for (const c of [`node '"' x`, `node a"b c"`, `node "a"b`, `node "a'b"`]) {
+      expect(() => splitCommand(c), c).toThrow(/whole argument/);
+    }
+    expect(splitCommand(`node "a b" 'c d' e`)).toEqual(["node", "a b", "c d", "e"]);
+  });
+
+  it("non-loopback bind addresses refused in commands and values (S4)", () => {
+    for (const t of [
+      "0.0.0.0",
+      "--host=0.0.0.0",
+      "192.168.1.5",
+      "[::]",
+      "::",
+      "--host=::",
+      "10.0.0.1:80",
+    ]) {
+      expect(namesNonLoopback(t), t).toBe(true);
+    }
+    for (const t of ["127.0.0.1", "::1", "[::1]", "localhost", "1.2.3", "{HOST}"]) {
+      expect(namesNonLoopback(t), t).toBe(false);
+    }
+    expect(details(MIN.replace("demo --port {PORT}", "vite --host 0.0.0.0 --port {PORT}"))).toMatch(
+      /binds outside loopback/,
+    );
+    expect(
+      details(
+        MIN.replace(
+          '"demo --port {PORT}"',
+          '"demo --host {h} --port {PORT}", vars: { h: "0.0.0.0" }',
+        ),
+      ),
+    ).toMatch(/start\.vars\.h/);
+    expect(() => renderCommand("x --host {HOST}", { HOST: "0.0.0.0" })).toThrow(/unsafe value/);
+  });
+
+  it("port.env is PORT or <NAME>_PORT only (S5)", () => {
+    const env = (name: string) =>
+      MIN.replace("demo --port {PORT}", "demo").replace("via: arg }", `via: env, env: ${name} }`);
+    for (const bad of ["PATHEXT", "PATH", "NODE_OPTIONS", "ComSpec", "LD_PRELOAD", "port"]) {
+      expect(details(env(bad)), bad).toMatch(/port\.env/);
+    }
+    for (const ok of ["PORT", "SERVER_PORT", "BACKEND_PORT"]) {
+      expect(parseProfile(env(ok), "x").port?.env).toBe(ok);
+    }
+  });
+
+  it("variants: checked together in order; null removes a key (K9)", () => {
+    const base = `${MIN.replace("demo --port {PORT}", "demo --port {PORT}").replace("via: arg }", "via: env, env: PORT }")}`;
+    // alone each is fine; together the second keeps via arg but the first removed {PORT}
+    const together = `${MIN}variants:\n  - when: { dep: demo, range: ">=2" }\n    start: { cmd: "demo2" }\n    port: { via: fixed }\n  - when: { dep: demo, range: ">=3" }\n    port: { via: arg }\n`;
+    expect(details(together)).toMatch(
+      /variants\.1: with variants 0–1 together: port\.via arg needs \{PORT\}/,
+    );
+    const switchVia = `${base}variants:\n  - when: { dep: demo, range: ">=2" }\n    port: { via: fixed, env: null }\n`;
+    const p = parseProfile(switchVia, "x");
+    const e = effectiveProfile(p, new Map([["demo", "2.0.0"]]));
+    expect(e.port).toEqual({ default: 3000, via: "fixed" });
+    expect(
+      details(
+        `${base}variants:\n  - when: { dep: demo, range: ">=2" }\n    port: { via: fixed }\n`,
+      ),
+    ).toMatch(/port\.env is used with via env only/);
+  });
+
+  it("wildcard matches are sorted before the limit; reads are budgeted (K8, S6)", () => {
+    const files: Record<string, string> = { "main.py": "fastapi" };
+    for (let i = 0; i < 40; i++) files[`a${String(i).padStart(2, "0")}.py`] = "";
+    const p = (pattern: string) =>
+      parseProfile(
+        MIN.replace('{ file: "package.json" }', `{ fileContains: ["${pattern}", "fastapi"] }`),
+        "x",
+      );
+    // main.py sorts after a00–a39: outside the first MAX_WILDCARD_MATCHES, every time
+    expect(MAX_WILDCARD_MATCHES).toBe(32);
+    const view = memView(files);
+    const shuffled = { ...view, list: (d: string) => [...view.list(d)].reverse() };
+    expect(evaluateDetect(p("*.py"), view).matched).toBe(false);
+    expect(evaluateDetect(p("*.py"), shuffled).matched).toBe(false);
+    expect(evaluateDetect(p("m*.py"), shuffled).matched).toBe(true);
+    // budget: 16 rules × 8 alternatives × wildcard → at most MAX_READS_PER_PROFILE reads
+    let reads = 0;
+    const counting = {
+      ...view,
+      read: (rel: string, max: number) => {
+        reads++;
+        return view.read(rel, max);
+      },
+    };
+    const rule = '{ fileContains: ["*.py|a*.py|b*.py|c*.py|d*.py|e*.py|f*.py|g*.py", "nothere"] }';
+    const many = parseProfile(
+      MIN.replace('all: [{ file: "package.json" }]', `any: [${Array(16).fill(rule).join(", ")}]`),
+      "x",
+    );
+    expect(evaluateDetect(many, counting).matched).toBe(false);
+    expect(reads).toBe(MAX_READS_PER_PROFILE);
+  });
+
+  it("a junction data/profiles: the problem has no absolute path (K3, S2)", async () => {
+    const h = await tempHome();
+    try {
+      const target = join(h.root, "elsewhere");
+      mkdirSync(join(h.paths.home, "data"), { recursive: true });
+      mkdirSync(target);
+      symlinkSync(target, h.paths.profiles, "junction");
+      const r = await loadProfiles(h.paths);
+      expect(r.problems).toEqual([
+        {
+          file: "data/profiles",
+          message: "data/profiles must be a real folder / file inside WEBHUB_HOME, not a link",
+          details: [],
+        },
+      ]);
+      expect(JSON.stringify(r)).not.toContain(h.root.replaceAll("\\", "\\\\"));
+    } finally {
+      await h.cleanup();
+    }
   });
 });

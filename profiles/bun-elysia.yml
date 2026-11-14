@@ -8,7 +8,8 @@ detect:
     - { file: "package.json" }
   any:
     - { dep: "elysia" }
-  score: 80
+  # below vite (80): an Elysia + Vite full-stack folder is a Vite site whose API F-006 splits
+  score: 78
 runtime: { lang: bun }
 start:
   cmd: "bun run --watch {entry}"

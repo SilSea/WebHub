@@ -77,20 +77,51 @@ describe("built-in profiles × fixtures", () => {
     });
   }
 
-  it("Next < 13 uses the old flags; Vite 5 keeps the Host header", () => {
-    const byId = (id: string) => {
-      const p = profiles.find((x) => x.profile.id === id);
-      if (p === undefined) throw new Error(id);
-      return p.profile;
-    };
+  const byId = (id: string) => {
+    const p = profiles.find((x) => x.profile.id === id);
+    if (p === undefined) throw new Error(id);
+    return p.profile;
+  };
+
+  it("Next 12 and 14 keep the Host header; Vite rewrites it for every version (K5)", () => {
     const next = byId("next");
-    expect(effectiveProfile(next, new Map([["next", "^12.3.0"]])).start?.cmd).toBe(
-      "next dev -p {PORT} -H {HOST}",
-    );
+    for (const v of ["^12.3.0", "14.2.0"]) {
+      const e = effectiveProfile(next, new Map([["next", v]]));
+      expect(e.start?.cmd).toBe("next dev --port {PORT} --hostname {HOST}");
+      expect(e.devServer?.hostRewrite).toBe(false);
+    }
     const vite = byId("vite");
-    expect(effectiveProfile(vite, new Map([["vite", "^5.4.0"]])).devServer?.hostRewrite).toBe(
-      false,
-    );
+    for (const v of ["^4.5.0", "^5.4.0", "^6.0.0"]) {
+      expect(effectiveProfile(vite, new Map([["vite", v]])).devServer?.hostRewrite).toBe(true);
+    }
+  });
+
+  it("static is not chosen for projects with a build tool / server (K6)", () => {
+    const st = byId("static");
+    for (const marker of [
+      "package.json",
+      "go.mod",
+      "Cargo.toml",
+      "requirements.txt",
+      "manage.py",
+    ]) {
+      expect(
+        evaluateDetect(st, memView({ "public/index.html": "", [marker]: "" })).matched,
+        marker,
+      ).toBe(false);
+    }
+    expect(evaluateDetect(st, memView({ "docs/index.html": "" })).matched).toBe(true);
+  });
+
+  it("Elysia + Vite in one folder: vite wins without a tie (K12)", () => {
+    const view = memView({ "package.json": "{}" }, { vite: "^7.0.0", elysia: "^1.2.0" });
+    const scores = profiles
+      .map((p) => evaluateDetect(p.profile, view))
+      .filter((r) => r.matched)
+      .map((r) => r.score)
+      .sort((a, b) => b - a);
+    expect(scores[0]).toBeGreaterThan(scores[1] ?? -1);
+    expect(evaluateDetect(byId("vite"), view).score).toBe(scores[0]);
   });
 
   it("fastapi: not for pyproject-only projects (K2) or Django with uvicorn (K4)", () => {

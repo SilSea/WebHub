@@ -17,8 +17,6 @@ devServer: { hostRewrite: false }
 health: { path: "/", timeout: 120 }
 container: { image: "node:22-slim", workdir: /app }
 variants:
-  - when: { dep: "next", range: "<13" }
-    start: { cmd: "next dev -p {PORT} -H {HOST}" }
   # allowedDevOrigins also checks Origin: spike before F-009 (DESIGN §16)
   - when: { dep: "next", range: ">=15" }
     devServer: { hostRewrite: true }

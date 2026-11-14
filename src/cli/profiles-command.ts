@@ -80,7 +80,12 @@ export const profilesCommand = {
     const { profiles, problems } = parsed.data;
     const failed = values.check === true && problems.length > 0;
     if (json) {
-      ctx.io.out(JSON.stringify({ profiles, problems }));
+      // daemon text may hold C1 / bidi characters JSON does not escape (security-1 S7)
+      ctx.io.out(
+        JSON.stringify({ profiles, problems }, (_k, v: unknown) =>
+          typeof v === "string" ? sanitize(v) : v,
+        ),
+      );
       return failed ? EXIT.usage : EXIT.ok;
     }
     const rows = [
