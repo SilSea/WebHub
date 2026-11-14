@@ -1,0 +1,181 @@
+# F-005 — Profile loader + schema + built-in profiles
+
+| | |
+|---|---|
+| Status | `planned` |
+| Phase | MVP-1 (PLAN.md) |
+| DESIGN.md | §6 Runtime Profiles, §19.5 variants, §21.5 profiles สำหรับทุกคน, §13 (`webhub profiles`), §12 (`profiles/`, `data/profiles/`, `src/profiles/`) |
+| Depends on | F-001 (home, `data/profiles/`, safe path, errors), F-003 (API route), F-004 (CLI command table) |
+| Owner อนุมัติ | ผู้ใช้ / 2026-11-14 (Q1–Q6 ตามแนะนำ) |
+
+## 1. เป้าหมาย / ขอบเขต
+**ทำ (in scope)**
+- รูปแบบ profile (schemaVersion 1) + validate (zod → error ชี้ field + ไฟล์ + บรรทัด) ตาม §6.1 / §19.5
+- loader: built-in จาก `profiles/*.yml` ของ package + ของผู้ใช้จาก `$WEBHUB_HOME/data/profiles/*.yml` (id ซ้ำกับ built-in → ของผู้ใช้ทับทั้งตัว, Q3)
+- ตัวประเมิน rule `detect` แบบ pure function บน "มุมมอง project" ที่ผู้เรียกส่งมา (`ProjectView`: มีไฟล์ไหม / อ่านไฟล์แบบจำกัดขนาด / รายชื่อ deps) → `{ matched, score, reasons }` — **ไม่เดินไฟล์เอง** (การเดิน scan root = F-006)
+- เลือก `variants` ตาม version ของ dep (§19.5) → profile ที่มีผลจริง
+- แปลง `start.cmd` / `runtime.install` เป็น argv (ไม่ผ่าน shell) + แทน placeholder `{PORT}` `{HOST}` และ `vars` (Q5)
+- built-in profiles ชุดแรก (Q2) + fixture test ต่อ profile
+- (Q4) `GET /api/v1/profiles` + `webhub profiles [--check]`: รายการ profile (id, ภาษา, ที่มา built-in / ผู้ใช้ / ทับ built-in) และปัญหาของไฟล์ที่โหลดไม่ผ่าน
+
+**ไม่ทำ (out of scope)**
+- เดินไฟล์ / ให้คะแนน project จริง / dedupe / monorepo / route prefix / port เดิม → F-006 (ใช้ `evaluateDetect` ของ F-005)
+- รันอะไรทั้งนั้น (install / start) → F-017; run approval → F-007
+- `webhub profiles import|export` (§21.5) → แยก item ภายหลัง (Q4)
+- Runtime Manager (`runtime.lang` → version) → F-015; `container` → F-018
+- กฎ "ไม่ใช่เว็บ" ระดับ global (§6.3) → F-006
+
+## 2. ระบบเดิมรองรับยังไง (R2)
+- F-001: `Paths.profiles` (`data/profiles/`) มีอยู่แล้วและ `ensureHome` สร้างให้; `assertSafePath` / ตรวจ link; `WebhubError` (`CONFIG_INVALID` + file / hint / details)
+- F-003: API + auth (route ใหม่ผ่าน token / session เหมือน route อื่น)
+- F-004: ตาราง `COMMANDS` ของ CLI, `--json`, exit code, `sanitize`
+- package.json `files` มี `profiles` แล้ว (F-000)
+- DESIGN §6.1 ใช้ YAML; §19.5 variants; §21.5 schemaVersion + fixtures — **ปรับ DESIGN** ตามคำตอบ (กติกา detect, รูป cmd, id ซ้ำ) + แถว §17
+
+## 3. Design
+
+### 3.1 Profile (schemaVersion 1)
+```yaml
+schemaVersion: 1
+id: python-fastapi            # ^[a-z][a-z0-9-]{1,39}$ ไม่ซ้ำ
+language: python              # ข้อความสั้น (แสดงผล)
+detect:
+  all:  [{ file: "requirements.txt|pyproject.toml" }]                 # ทุกข้อต้องจริง
+  any:  [{ fileContains: ["requirements.txt|pyproject.toml", "fastapi|uvicorn"] }, { dep: "fastapi" }]  # จริง ≥ 1 ข้อ (ถ้ามี)
+  none: [{ file: "manage.py" }]                                       # จริงข้อไหน = ไม่ match
+  score: 60                                                           # 0–100 เมื่อ match
+runtime: { lang: python, install: "pip install -r requirements.txt" }
+start:   { cmd: "uvicorn {module}:app --reload --host {HOST} --port {PORT}", vars: { module: "main" } }
+port:    { default: 8000, via: arg }          # env | arg | fixed ; env → port.env: "PORT"
+host:    { bind: "127.0.0.1" }                # เฉพาะ loopback (127.0.0.1 / ::1) — อย่างอื่น = error
+devServer: { hostRewrite: false }
+health:  { path: "/docs", timeout: 60 }       # path เริ่มด้วย "/", timeout 1–600 วิ
+container: { image: "python:3.12-slim", workdir: /app, setup: "pip install -r requirements.txt" }
+db:      { hints: ["psycopg", "sqlalchemy"] }
+routes:  { detectPrefix: ["APIRouter(prefix="] }
+variants:
+  - when: { dep: "vite", range: ">=6" }
+    devServer: { hostRewrite: true }          # merge ทับแบบ object ลึก; array แทนทั้งก้อน
+```
+- ทุก object เป็น strict (key แปลก = error ชี้ชื่อ key) — พิมพ์ผิดไม่เงียบ
+- กติกา detect (ไม่มี regex จาก profile — กัน ReDoS):
+  - `file: "a|b"`: path relative ใช้ `/`, ห้าม `..` / absolute / drive / `\`; `*` ได้ภายใน segment เดียว (เช่น `*.uproject`); ลงท้าย `/` = folder
+  - `fileContains: [files, "x|y"]`: substring (case-sensitive) ในไฟล์ที่อ่านได้ ≤ 256 KB ต่อไฟล์
+  - `dep: "name"` (+ `range` ได้): อยู่ใน deps ที่ผู้เรียกส่งมา (package.json / requirements / pyproject — F-006 รวบรวม)
+- variants: `when.dep` + `when.range` — range แบบ comparator (`>=6`, `<13`, `>=13 <15`, `^`/`~` ตีความเป็นช่วง) (Q6); ตรงหลายข้อ → apply ตามลำดับในไฟล์
+- `{PORT}` / `{HOST}` ใช้ได้ใน `start.cmd`, `runtime.install`, `container.setup`; `{name}` อื่นต้องมีใน `vars`; placeholder ไม่รู้จัก = error ตอนโหลด
+
+### 3.2 Interface (TypeScript, `src/profiles/`)
+```ts
+// schema.ts
+export const PROFILE_SCHEMA_VERSION = 1;
+export const ProfileSchema: z.ZodType<Profile>;          // strict
+export function parseProfile(text: string, file: string): Profile;   // throws WebhubError CONFIG_INVALID (file, line, field path)
+
+// loader.ts
+export interface LoadedProfile { profile: Profile; source: "builtin" | "user"; file: string; overrides?: string /* built-in file ที่ถูกทับ */ }
+export interface ProfileProblem { file: string; message: string; details: string[] }
+export function loadProfiles(paths: Paths, opts?: { builtinDir?: string }): Promise<{ profiles: LoadedProfile[]; problems: ProfileProblem[] }>;
+// ไฟล์เสีย 1 ไฟล์ไม่ทำให้ทั้งหมดล้ม: ข้ามไฟล์นั้น + อยู่ใน problems; built-in เสีย = bug → test จับ
+
+// match.ts
+export interface ProjectView {
+  exists(rel: string): boolean;                 // ไฟล์/folder (rel ผ่านการตรวจแล้ว)
+  list(relDir: string): string[];               // ชื่อใน folder (สำหรับ `*`)
+  read(rel: string, maxBytes: number): string | undefined;
+  deps(): ReadonlyMap<string, string>;          // ชื่อ → version / range ตามที่ project ประกาศ
+}
+export function evaluateDetect(p: Profile, view: ProjectView): { matched: boolean; score: number; reasons: string[] };
+export function effectiveProfile(p: Profile, deps: ReadonlyMap<string, string>): Profile;   // apply variants
+export function renderCommand(cmd: string, values: Record<string, string>): string[];        // argv, ไม่มี shell
+```
+- REST: `GET /api/v1/profiles` → `{ profiles: [{ id, language, source, overrides? }], problems: [...] }` (auth เหมือน route อื่น; ไม่ส่ง path เต็มของ home ออกไป browser — ส่งชื่อไฟล์ relative)
+- CLI: `webhub profiles` (ตาราง id / language / source), `--check` → exit 2 ถ้ามี problem (สำหรับคนเขียน profile เอง), `--json`
+
+### 3.3 Flow
+1. daemon start → `loadProfiles` ครั้งเดียว + โหลดใหม่เมื่อเรียก route (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี file watcher)
+2. อ่านไฟล์: `lstat` → ต้องเป็น regular file, ไม่ใช่ link, ≤ 256 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
+3. parse YAML แบบ safe (core schema, ไม่มี custom tag, `maxAliasCount` ต่ำ, ปฏิเสธ key `__proto__` / `constructor` / `prototype`) → zod → ตรวจ placeholder / path pattern / range
+4. id ซ้ำ: ระหว่างไฟล์ผู้ใช้ = problem ทั้งคู่; ผู้ใช้ทับ built-in → ตาม Q3
+
+### 3.4 Built-in ชุดแรก (Q2)
+`static`, `static-spa`, `vite`, `next`, `express`, `bun-elysia`, `fastapi` — แต่ละตัวมี fixture ใน `fixtures/<case>/` (ไฟล์ขั้นต่ำ) + ผลที่คาดหวัง; detect ของ `next` / `vite` อาศัย `dep`; `next` ใช้ variants (`<13`, `>=15` hostRewrite — Origin ยังเป็น spike ของ F-009)
+
+### 3.5 Platform
+- path pattern ใช้ `/` เสมอ; เทียบชื่อไฟล์แบบ case-insensitive บน Windows (ผ่าน `ProjectView` ของผู้เรียก)
+
+## 4. ผลดี / ผลเสีย (R3)
+| | รายละเอียด |
+|---|---|
+| ผลดี | เพิ่มภาษา / framework ด้วยไฟล์ ไม่แก้โค้ด; ผู้ใช้ทับ / เพิ่ม profile เองได้; error ชัด (ไฟล์ + บรรทัด + field); detect ไม่มี regex → ไม่มี ReDoS; คำสั่งเป็น argv ตั้งแต่ต้น → F-017 ไม่ต้องใช้ shell |
+| ผลเสีย | YAML parser = dependency ใหม่ (Q1); กติกา detect จำกัด (substring + `*`) อาจไม่พอบาง framework → ต้องเพิ่ม rule type ภายหลัง (CR); variants ใช้ range แบบย่อ |
+| ทางเลือกที่ไม่เลือก | profile เป็นโค้ด TS (ยืดหยุ่นสุด แต่ผู้ใช้เพิ่มเองไม่ได้ และ import = รันโค้ด); regex ใน detect (ReDoS + อ่านยาก); `cmd` ผ่าน shell (injection, ต่างกันระหว่าง cmd / sh) |
+
+## 5. Impact ต่อของเดิม
+| เรื่อง | กระทบไหม | รายละเอียด |
+|---|---|---|
+| feature ที่ done แล้ว | น้อย | F-003: เพิ่ม route ใน API (เพิ่ม ไม่เปลี่ยนพฤติกรรมเดิม — ถ้า route table ของ F-003 ต้องแก้โครง → CR); F-004: เพิ่ม command ในตาราง (โครงรองรับไว้แล้ว) |
+| Zero-touch | ไม่ | อ่าน `profiles/` + `data/profiles/` เท่านั้น; F-005 ไม่แตะ project |
+| Security | ใช่ | ดู §6 |
+| Performance / resource | น้อย | ไฟล์ ≤ 200 × 256 KB; parse ตอนเรียก |
+| Config / data เดิม | ไม่ | `data/profiles/` มีแล้ว (ว่าง) |
+| Dependency | ใช่ (Q1) | `yaml` (pin, ไม่มี dependency ต่อ, ไม่มี install script) |
+
+## 6. Threat model (R6)
+| Asset | ผู้โจมตี / ช่องทาง | ป้องกันด้วย | เทส |
+|---|---|---|---|
+| daemon (ถือ token) | YAML ที่ทำให้ใช้ memory / CPU มาก (alias bomb, ไฟล์ใหญ่, ไฟล์เยอะ) — จาก profile ที่ผู้ใช้ copy มาจากที่อื่น | ขนาด ≤ 256 KB, ≤ 200 ไฟล์, `maxAliasCount`, ความลึก / ความยาว array จำกัดใน schema | alias bomb / ไฟล์ใหญ่ → problem, daemon ไม่ค้าง |
+| daemon | prototype pollution จาก key `__proto__` | ปฏิเสธ key ต้องห้ามก่อน zod; strict object | YAML มี `__proto__` → problem; `Object.prototype` ไม่เปลี่ยน |
+| CPU | ReDoS จาก pattern ใน profile | ไม่มี regex จาก profile: substring + `*` แบบ segment เดียว (match แบบ linear) | pattern ยาว / `*` เยอะ → เวลาจำกัด |
+| ไฟล์นอก project | pattern `../` / absolute ใน `file` / `fileContains` | validate ตอนโหลด (ห้าม `..`, absolute, drive, `\`); `ProjectView` ของ F-006 จำกัด root อีกชั้น | pattern ต้องห้าม → problem |
+| เครื่องผู้ใช้ | command injection ผ่าน `cmd` / `vars` / ค่า placeholder | `renderCommand` → argv (ไม่มี shell), metachar ของ shell ใน cmd = error ตอนโหลด, ค่า vars / placeholder ต้องตรง allowlist อักขระ, แทนได้เฉพาะชื่อที่ประกาศ | cmd มี `&` / `|` / `;` / `` ` `` / `$(` → error; ค่ามีช่องว่าง / quote → error |
+| เครื่องผู้ใช้ | profile สั่ง bind นอก loopback | `host.bind` เฉพาะ `127.0.0.1` / `::1` | `0.0.0.0` → error |
+| ไฟล์ใน `data/profiles/` | link / hardlink ชี้ออกไปนอก home | `assertSafePath` + `lstat` regular file + ไม่ใช่ link | link → problem |
+| terminal / browser | ชื่อ / ข้อความจาก profile มี control char | CLI ผ่าน `sanitize`; API ส่ง JSON (dashboard escape — F-027) | id / language มี ESC → พิมพ์เป็น `?` |
+| ผู้ใช้ | profile ที่ได้มาจากคนอื่นรันคำสั่งทันที | F-005 ไม่รันอะไร; run approval = F-007 | — |
+| supply chain | `yaml` package | pin version, lockfile, `pnpm audit`, ไม่มี postinstall | audit ใน checks |
+
+Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation ทุก field ✓, ไม่มี shell ✓, อ่านเฉพาะใน home / package ✓, dependency ใหม่ → ตาม Q1
+
+## 7. คำถามถึงผู้ใช้ (ขั้น ②)
+| # | คำถาม | ทางเลือก | แนะนำ | คำตอบ |
+|---|---|---|---|---|
+| Q1 | รูปแบบไฟล์ profile | A YAML + package `yaml` (pin) / B JSON (ไม่มี dependency ใหม่, ไม่มี comment) / C JSON5-ish ทำเอง | **A** (ตรง DESIGN, เขียนมือง่าย, มี comment) | ตามแนะนำ (2026-11-14) |
+| Q2 | built-in ชุดแรกใน F-005 | A 7 ตัว (static, static-spa, vite, next, express, bun-elysia, fastapi) / B ทั้ง Node + Python ใน §6.2 (~16 ตัว) / C เฉพาะ 4 ตัวที่ fixture ในเครื่องผู้พัฒนาใช้ | **A** (ครบ fixture §9; เพิ่มทีหลังเป็นไฟล์ + fixture) | ตามแนะนำ (2026-11-14) |
+| Q3 | profile ผู้ใช้ id เดียวกับ built-in | A ทับทั้งตัว + แสดงว่า "overrides built-in" / B merge เฉพาะ field ที่เขียน / C ห้าม (ต้องใช้ id ใหม่) | **A** (คาดเดาได้, ไม่มี merge แปลก) | ตามแนะนำ (2026-11-14) |
+| Q4 | CLI / API ใน F-005 | A library + `GET /api/v1/profiles` + `webhub profiles [--check]` / B library อย่างเดียว / C A + `import/export` | **A** (import/export ทำพร้อม run approval) | ตามแนะนำ (2026-11-14) |
+| Q5 | รูป `start.cmd` | A string → แยกเป็น argv เอง (รองรับ `"..."`), metachar shell = error / B array of args / C รับทั้งสอง | **A** (ตรง DESIGN, อ่านง่าย, ไม่มี shell) | ตามแนะนำ (2026-11-14) |
+| Q6 | version range ใน variants | A ทำเอง (comparator `>= > <= < =`, `^`, `~`) / B package `semver` | **A** (ใช้แค่ช่วงง่าย; ไม่เพิ่ม dependency) | ตามแนะนำ (2026-11-14) |
+
+## 8. Test plan
+| # | กรณี | ประเภท |
+|---|---|---|
+| 1 | built-in ทุกตัว parse + validate ผ่าน; id ไม่ซ้ำ | unit |
+| 2 | key แปลก / type ผิด / ค่าเกินช่วง → error มีไฟล์ + บรรทัด + path ของ field | unit |
+| 3 | ไฟล์ผู้ใช้เสีย 1 ไฟล์ → อยู่ใน problems, ที่เหลือโหลดได้ | unit |
+| 4 | ผู้ใช้ทับ built-in (Q3); id ซ้ำระหว่างไฟล์ผู้ใช้ → problem ทั้งคู่ | unit |
+| 5 | YAML alias bomb, ไฟล์ > 256 KB, > 200 ไฟล์, `__proto__`, custom tag → problem, ไม่ค้าง, prototype ไม่เปลี่ยน | security |
+| 6 | link / hardlink ใน `data/profiles/` → problem | security |
+| 7 | pattern `..` / absolute / `C:` / `\` → error | security |
+| 8 | detect: all / any / none / score, `*` ใน segment, folder `x/`, fileContains จำกัด 256 KB, dep (+range) | unit |
+| 9 | pattern ยาว + `*` เยอะ → เวลา linear | security |
+| 10 | variants: เลือกตาม range, หลายข้อตามลำดับ, deep merge / array แทน | unit |
+| 11 | range parser: `>=6`, `<13`, `>=13 <15`, `^1.2.3`, `~1.2`, ค่าแปลก → error ตอนโหลด | unit |
+| 12 | `renderCommand`: quote, placeholder, vars; metachar / ค่าแปลก / placeholder ไม่รู้จัก → error | unit / security |
+| 13 | `host.bind: 0.0.0.0` → error | security |
+| 14 | fixture ต่อ built-in profile: match ถูกตัว, ไม่ match ตัวอื่นเกินคะแนน | fixture |
+| 15 | `GET /api/v1/profiles` ต้องมี auth; ไม่มี path เต็ม; `webhub profiles` / `--check` exit 2 เมื่อมี problem / `--json`; ข้อความ sanitize | integration |
+| 16 | Node 22.12 | compat |
+
+## 9. Reports (R5)
+| รอบ | test | review | security | ผล |
+|---|---|---|---|---|
+
+## 10. เอกสารที่อัปเดต (R4)
+- [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
+
+## 11. Log
+| วันที่ | ขั้น | หมายเหตุ |
+|---|---|---|
+| 2026-11-14 | W1 ① | ร่าง spec |
+| 2026-11-14 | W1 ②–④ | ผู้ใช้ตอบ Q1–Q6 ตามแนะนำ (YAML + `yaml`, 7 built-in, ผู้ใช้ทับทั้งตัว, lib + API + CLI, cmd string → argv, range ทำเอง) → `planned` |

@@ -15,6 +15,7 @@
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 | 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
+| 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `planned` | [spec](features/F-005-profiles.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -54,7 +55,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-002 | Platform layer (Windows): ports, process, elevate, notify | §21.1 | `elevate()` แสดงสิ่งที่จะทำ, ไม่ต่อ string เข้า shell | PowerShell ช้า / เปลี่ยนตาม version Windows |
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
 | F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; รอ `auth.pid` = PID ที่ spawn (H16); log ของ daemon จำกัดขนาด**เป็น byte** (CR-003 — F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (security-8 Y2); `webhub ui` ย้ายไป F-009 (F-004 Q2) | — |
-| F-005 | Profile loader + JSON Schema + built-in (static, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
+| F-005 | Profile loader (YAML + zod) + built-in (static, static-spa, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
 | F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
 | F-008 | `setup` wizard + `doctor` | §21.4 | — | — |
@@ -125,4 +126,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-003 และ F-004 `done` (2026-11-14) → W1 ของ F-005
+CR-003 และ F-004 `done` (2026-11-14); F-005 `planned` (2026-11-14) → W3 ของ F-005 เมื่อผู้ใช้สั่ง
