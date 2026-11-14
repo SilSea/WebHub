@@ -5,7 +5,12 @@ import { type ParseArgsOptionsConfig, parseArgs } from "node:util";
 import type { CommandContext } from "../cli.js";
 import { getPlatform } from "../platform/index.js";
 import { isServerError } from "../server/errors.js";
-import { daemonStatus, portOwners, startDaemonProcess, stopDaemon } from "./daemon-control.js";
+import {
+  daemonStatusChecked,
+  portOwners,
+  startDaemonProcess,
+  stopDaemon,
+} from "./daemon-control.js";
 import { followLogs, tailLogs } from "./daemon-logs.js";
 import { CliError, EXIT, sanitize, usageError } from "./output.js";
 
@@ -123,7 +128,7 @@ export const daemonCommand = {
     }
 
     if (sub === "status") {
-      const s = await daemonStatus(paths).catch((e: unknown) => explainImpostor(e, ctx));
+      const s = await daemonStatusChecked(paths).catch((e: unknown) => explainImpostor(e, ctx));
       if (s === undefined) {
         emit(ctx, json, { running: false }, "webhub daemon is not running");
         return EXIT.notRunning;

@@ -142,6 +142,8 @@ describe("webhub daemon (F-004)", { timeout: 120_000 }, () => {
     for (const r of rs) expect({ code: r.code, err: r.err }).toEqual({ code: 0, err: "" });
     expect(await getPlatform().process.info(pid)).toBeUndefined();
     expect(existsSync(h.paths.auth)).toBe(false);
+    // every stop returned only after the process left: a start right after works (review-2 E3)
+    expect((await cli(["daemon", "start"], env)).code).toBe(0);
   });
 
   it("API port taken by another program → exit 4 naming the port", async () => {

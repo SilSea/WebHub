@@ -166,8 +166,9 @@ if (isMain()) {
   });
   // `webhub daemon logs -f | head`: the reader went away — end quietly, not with a stack
   for (const stream of [process.stdout, process.stderr]) {
+    // any other write error (closed console …): stop too, `logs -f` must not poll forever
     stream.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EPIPE") process.exit(process.exitCode ?? 0);
+      process.exit(err.code === "EPIPE" ? (process.exitCode ?? 0) : 1);
     });
   }
   run(

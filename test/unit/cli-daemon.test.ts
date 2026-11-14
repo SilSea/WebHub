@@ -214,6 +214,18 @@ describe("daemon logs (F-004 §3.6)", () => {
     expect(readLastLines(file(), 10)).toEqual(["a", "b"]);
   });
 
+  it("tail with lines longer than half a chunk still returns N whole lines (review-2 E4c)", () => {
+    const big = (c: string) => c.repeat(40_000);
+    writeFileSync(file(), `${big("a")}\n${big("b")}\n${big("c")}\n`);
+    expect(readLastLines(file(), 2)).toEqual([big("b"), big("c")]);
+  });
+
+  it("tail does not join .1 when the current file was cut by the byte cap (review-2 E6)", () => {
+    writeFileSync(`${file()}.1`, "old\n");
+    writeFileSync(file(), `${"x".repeat(9 * 1024 * 1024)}\nlast\n`);
+    expect(tailLogs(h.paths, 5)).toEqual(["last"]);
+  });
+
   it("tail sanitises (paths from requests can hold escapes)", () => {
     writeFileSync(file(), `{"path":"/a${ch(0x1b)}[2J${ch(0x202e)}"}\n`);
     expect(tailLogs(h.paths, 1)[0]).toBe('{"path":"/a?[2J?"}');
@@ -246,6 +258,23 @@ describe("daemon logs (F-004 §3.6)", () => {
     abort.abort();
     await done;
     expect(got).toEqual([...[1, 2, 3, 4, 5].map(line), "6"]);
+  });
+
+  it("follow: the old file's last line without a newline is printed at rotation (review-2 E6)", async () => {
+    writeFileSync(file(), "");
+    const got: string[] = [];
+    const abort = new AbortController();
+    const done = followLogs(h.paths, (l) => got.push(l), abort.signal, 20);
+    await new Promise((r) => setTimeout(r, 60));
+    appendFileSync(file(), "cut-off");
+    await new Promise((r) => setTimeout(r, 80));
+    renameSync(file(), `${file()}.1`);
+    writeFileSync(file(), "next\n");
+    const end = Date.now() + 5_000;
+    while (got.length < 2 && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+    abort.abort();
+    await done;
+    expect(got).toEqual(["cut-off", "next"]);
   });
 
   it("follow: a multi-byte character split between two writes stays whole", async () => {

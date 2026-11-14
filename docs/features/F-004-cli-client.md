@@ -100,20 +100,23 @@ Ctrl+C: ออกทันที (exit 130) ยกเว้นระหว่า
    - ไม่มี auth.json หรือ PID ตาย / start time ไม่ตรง (daemon ออกไปแล้ว) → ถาม status อีกครั้ง: ไม่รัน / ไม่ตอบ → "stopped" exit 0 (ลบ auth.json ค้างถ้ายังชี้ PID นั้น); มี daemon ใหม่ตอบ → stop ตัวนั้น; ยังไม่ผ่าน proof → โปรแกรมอื่นบน port
    - อ่าน process table ไม่ได้ / lock กับ auth.json ไม่ตรงกัน → ไม่ถือว่าเป็นของเรา
    - โปรแกรมอื่นบน port → ไม่ส่ง token, ไม่ kill อะไร (แม้มี `--force`), exit 1 ทันที (ไม่รอ 10 วิ) + แสดง PID/ชื่อ process ที่ listen (F-002 `ports.listening`)
-3. ตอบปกติ → `POST /api/v1/shutdown` (bearer หลัง proof) → 202; connection ปิดกลางทาง / proof ไม่ผ่าน (เริ่มปิดแล้ว → 503) / ไม่รันแล้ว → ไปรอข้อ 4 เหมือนกัน (ทำให้ `stop` หลายตัวพร้อมกัน exit 0 ทุกตัว)
-4. รอจน PID ตาย (`process.info`; start time ไม่ตรง lock = PID ถูกใช้ซ้ำ = daemon ออกแล้ว; อ่าน process table ไม่ได้ = ไม่รู้ → รอต่อ ไม่ถือว่าตาย), poll 100 ms สูงสุด 10 วิ (daemon เอง force exit ที่ ~7 วิ) → ลบ auth.json ค้าง (daemon ที่ถูก kill แรงๆ ไม่ได้ลบ) **เฉพาะเมื่อยังชี้ PID นั้น**
+   - ไม่มี auth.json ตั้งแต่ต้น แต่ lock file ชี้ PID ที่ยังมีชีวิตและ start time ตรง (daemon กำลังปิด — `stop` อีกตัวชนะไปแล้ว — หรือกำลัง start) → รอจน PID ตาย → "stopped"; ระหว่างรอ auth.json ของ PID นั้นโผล่ (start เสร็จ) → stop ตัวนั้น (ครั้งเดียว); ไม่ตายใน 10 วิ → `DAEMON_STOP_TIMEOUT` (review-2 E3: `stop` ตัวที่แพ้ไม่คืนก่อน process ออกจริง → `start` ต่อทันทีใน script ไม่ชน lock)
+3. ตอบปกติ → `POST /api/v1/shutdown` (bearer หลัง proof) → 202; connection ปิดกลางทาง / proof ไม่ผ่าน (เริ่มปิดแล้ว → 503) / ผ่าน proof แล้วได้ 503 `SHUTTING_DOWN` / ไม่รันแล้ว / auth.json หายระหว่างอ่าน (`ENOENT` ระหว่าง `lstat` กับ read ของ F-001 = ไม่รัน, ไม่ใช่ internal error — review-2 E1) → ไปรอข้อ 4 เหมือนกัน (ทำให้ `stop` หลายตัวพร้อมกัน exit 0 ทุกตัว)
+4. รอจน PID ตาย (`process.info`; start time ไม่ตรง lock = PID ถูกใช้ซ้ำ = daemon ออกแล้ว; อ่าน process table ไม่ได้ = ไม่รู้ → รอต่อ ไม่ถือว่าตาย), poll 100 ms สูงสุด 10 วิ (daemon เอง force exit ที่ ~7 วิ) → ลบ auth.json ค้าง (daemon ที่ถูก kill แรงๆ ไม่ได้ลบ) **เฉพาะเมื่อยังเป็นไฟล์เดิม**: PID เดิม และ token เดิมที่อ่านไว้ตอนเริ่ม `stop` (review-2 E5; ไฟล์ที่ถูกเขียนระหว่างตรวจกับลบยังหายได้ — กระทบแค่ availability)
 5. ไม่ออกใน 10 วิ: ไม่มี `--force` → exit 1 + hint `webhub daemon stop --force`; มี `--force` → PID ต้องตรงกับ lock file → `killTree(pid, lock.startedAt)` (F-002 ตรวจ start time ซ้ำก่อน kill) → ลบ auth.json เฉพาะเมื่อยังชี้ PID ที่ kill (ไม่ลบของ daemon ใหม่ที่เพิ่ง start); start time ไม่ตรง / lock ไม่ตรง → ไม่ kill, exit 1 (`DAEMON_FORCE_REFUSED`); kill ไม่สำเร็จ (access denied ฯลฯ) → exit 1 (`DAEMON_KILL_FAILED`) + details
 
 ### 3.5 `daemon status`
 - `connectDaemon` + `status()` → `running` + pid/port/version/startedAt/uptime → exit 0; รูปร่างของ status ตรวจก่อนใช้ (pid เป็น int บวก, string ผ่าน `sanitize` ทั้งข้อความและ `--json`) — `DAEMON_BAD_STATUS` ถ้าไม่ตรง
 - `DAEMON_NOT_RUNNING` → "not running" → exit 3
 - `DAEMON_IMPOSTOR` → "port 7400 is used by another program (PID x name)" → exit 1
+- proof ไม่ผ่านแต่เป็น daemon ของเรา (auth.json + lock + start time ตรง — กำลังปิด / ค้าง) → `DAEMON_NOT_ANSWERING` "does not answer — it is stopping or hung" exit 1 (ไม่โทษโปรแกรมอื่น — review-2 E3); daemon ของเราตายไปแล้ว → ถามใหม่ (not running / ตัวใหม่)
+- `start` / `ensureDaemon` เจอ daemon ของเรากำลังปิด → รอให้ออก (≤ 10 วิ) แล้ว start ตัวใหม่; ไม่ออก → `DAEMON_NOT_ANSWERING`
 
 ### 3.6 Log ของ daemon (ตาม Q1, แนะนำ A)
 - ไฟล์ `logs/daemon.log` (JSON lines เดิมของ F-003) + `logs/daemon.log.1`
 - daemon เขียนเอง ผ่าน `--log-file <path>` ของ `dist/daemon.js` (**ต้องเปิด CR-003 กับ F-003** — เพิ่ม option, ไม่เปลี่ยนพฤติกรรมเดิมเมื่อไม่ส่ง): ก่อนเขียนบรรทัดที่ทำให้ไฟล์เกิน 5 MB → rename เป็น `.1` (ทับของเก่า) แล้วเปิดไฟล์ใหม่ → รวมไม่เกิน ~10 MB; เขียนแบบ append fd; เขียนพลาด (disk เต็ม) → ทิ้งบรรทัด ไม่ล้ม
 - path ต้องอยู่ใน `logs/` ของ home (`assertSafePath`), ไม่ตาม symlink (F-001)
-- `daemon logs`: อ่านย้อนจากท้ายไฟล์ปัจจุบันทีละ 64 KB จนได้ N บรรทัด (ไม่พอ → ต่อจากท้าย `.1`), อ่านไม่เกิน 8 MB ต่อไฟล์ (`.1` เก่าที่ใหญ่เกินไม่ถูกอ่านทั้งไฟล์; บรรทัดที่ถูกตัดที่ขอบไม่แสดง); `-f` = poll ไฟล์ทุก 500 ms (อ่านพลาดชั่วคราว เช่น antivirus ถือไฟล์ → ข้ามรอบนั้น ไม่จบ): file id (ino) เปลี่ยน = rotate → อ่านส่วนที่เหลือของ `.1` ก่อนแล้วเริ่มไฟล์ใหม่; size ลด = truncate → เริ่มที่ 0; ตัวอักษรหลาย byte ที่ถูกตัดระหว่างสองรอบอ่านไม่เพี้ยน (`StringDecoder`) — ข้อจำกัด: truncate แล้วเขียนกลับจนขนาด ≥ ตำแหน่งเดิมภายใน 500 ms ตรวจไม่เจอ (บรรทัดช่วงนั้นหาย — เกิดเฉพาะตอน rename ไม่ได้); ไม่ผ่าน daemon → ไม่มี route stream ใน F-004; ทุกบรรทัดผ่าน `sanitize` (path ใน log มาจาก client ภายนอก → กัน terminal escape injection)
+- `daemon logs`: อ่านย้อนจากท้ายไฟล์ปัจจุบันทีละ 64 KB จนได้ N บรรทัด (ไม่พอ → ต่อจากท้าย `.1`), อ่านไม่เกิน 8 MB ต่อไฟล์ (`.1` เก่าที่ใหญ่เกินไม่ถูกอ่านทั้งไฟล์; บรรทัดที่ถูกตัดที่ขอบไม่แสดง; ไฟล์ปัจจุบันถูกตัดที่ขอบ → ไม่ต่อ `.1` เพื่อไม่ให้มีช่องว่างกลาง output); rotate ระหว่าง `-f` แล้วบรรทัดสุดท้ายของไฟล์เก่าไม่มี newline → พิมพ์บรรทัดนั้นก่อนเริ่มไฟล์ใหม่; เขียน stdout ไม่ได้ (EPIPE → exit เดิม, error อื่น → 1) → จบทันที ไม่ poll ต่อ; `-f` = poll ไฟล์ทุก 500 ms (อ่านพลาดชั่วคราว เช่น antivirus ถือไฟล์ → ข้ามรอบนั้น ไม่จบ): file id (ino) เปลี่ยน = rotate → อ่านส่วนที่เหลือของ `.1` ก่อนแล้วเริ่มไฟล์ใหม่; size ลด = truncate → เริ่มที่ 0; ตัวอักษรหลาย byte ที่ถูกตัดระหว่างสองรอบอ่านไม่เพี้ยน (`StringDecoder`) — ข้อจำกัด: truncate แล้วเขียนกลับจนขนาด ≥ ตำแหน่งเดิมภายใน 500 ms ตรวจไม่เจอ (บรรทัดช่วงนั้นหาย — เกิดเฉพาะตอน rename ไม่ได้); ไม่ผ่าน daemon → ไม่มี route stream ใน F-004; ทุกบรรทัดผ่าน `sanitize` (path ใน log มาจาก client ภายนอก → กัน terminal escape injection)
 - `sanitize`: แทนด้วย `?` — C0 (ยกเว้น tab), DEL, C1 (รวม CSI 8-bit 0x9b), U+2028/2029, bidi U+202A–202E / U+2066–2069, bidi mark U+061C / U+200E / U+200F, zero-width U+200B / U+FEFF (ZWNJ / ZWJ คงไว้ — ใช้ในภาษา / emoji); ใช้กับทุกข้อความจาก daemon, log, error และ argument ที่ echo กลับ
 
 ### 3.7 `ensureDaemon()` (ตาม Q3, แนะนำ auto-start)
@@ -173,7 +176,7 @@ Security checklist (WORKFLOW §8): secrets ไม่อยู่ใน argv/log/
 |---|---|---|
 | 1 | `--help`, `--version`, unknown → exit 1 (เทส F-000 เดิม) + `daemon --help` | unit |
 | 2 | arg ผิด (`-n 0`, `-n abc`, flag แปลก) → exit 2 | unit |
-| 3 | `start` → `status` running (pid = auth.pid) → `stop` → `status` exit 3; auth.json หาย | integration |
+| 3 | `start` → `status` running (pid ของ status ที่ผ่าน proof = PID ที่ spawn) → `stop` → `status` exit 3; auth.json หาย | integration |
 | 4 | `start` ซ้ำ → exit 0 "already running", daemon ตัวเดิม | integration |
 | 5 | `start` ×2 พร้อมกัน → daemon 1 ตัว, ทั้งคู่ exit 0 | integration |
 | 6 | port 7400 ไม่ว่าง (server อื่น) → `start` exit 4 + ข้อความ PID | integration |
@@ -197,6 +200,7 @@ Security checklist (WORKFLOW §8): secrets ไม่อยู่ใน argv/log/
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-004/test-1.md) 346/6 | [review-1](../reports/F-004/review-1.md) FAIL (C1, C2 major) | [security-1](../reports/F-004/security-1.md) FAIL (D1 critical) | แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") |
+| 2 | [test-2](../reports/F-004/test-2.md) 365/6 | [review-2](../reports/F-004/review-2.md) code + security FAIL (E1 major) | (รวมใน review-2) | แก้ทั้งหมด (ผู้ใช้เลือก "แก้ทั้งหมด") |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §13 (+ `webhub daemon …`), §17  - [x] PLAN.md (status)  - [x] features/README.md (status)  - [ ] reports/README.md (ตอน done)  - [x] CR-003 (Q1 = A, done)
@@ -209,3 +213,4 @@ Security checklist (WORKFLOW §8): secrets ไม่อยู่ใน argv/log/
 | 2026-11-13 | W1 ③④⑤ | อนุมัติ spec + CR-003, เข้า Plan queue `planned` (CR-003 ก่อน), "ทำเลย" → W3 |
 | 2026-11-13 | W3 | implement + test-1 → `review`; review-1 FAIL (C1, C2), security-1 FAIL (D1) |
 | 2026-11-14 | W3 | ผู้ใช้เลือก "แก้ทั้งหมด": env denylist, stop idempotent + ไม่ใช่ของเรา = impostor, kill fallback, start errors, tail อ่านท้ายไฟล์, JSON error, sanitize bidi mark, Ctrl+C / EPIPE; เทส mock platform + stop พร้อมกัน |
+| 2026-11-14 | W3 | review-2 FAIL (E1); ผู้ใช้เลือก "แก้ทั้งหมด": ENOENT ของ auth.json = ไม่รัน, 503 `SHUTTING_DOWN` = กำลังปิด, `stop` รอ PID ใน lock, `status` / `start` / `ensureDaemon` แยก daemon ของเราที่กำลังปิดออกจากโปรแกรมอื่น, ลบ auth.json เทียบ token, log rotate / tail gap / stdout error; เทส fake daemon ที่ผ่าน proof |

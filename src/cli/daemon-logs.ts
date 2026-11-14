@@ -23,11 +23,20 @@ export const TAIL_MAX_BYTES = 8 * 1024 * 1024;
  * A line cut by the byte limit is dropped, not printed half.
  */
 export function readLastLines(file: string, n: number, maxBytes = TAIL_MAX_BYTES): string[] {
+  return readTail(file, n, maxBytes).lines;
+}
+
+/** `readLastLines` + whether everything before the first returned line is read too. */
+function readTail(
+  file: string,
+  n: number,
+  maxBytes = TAIL_MAX_BYTES,
+): { lines: string[]; reachedStart: boolean } {
   let fd: number;
   try {
     fd = openSync(file, "r");
   } catch {
-    return [];
+    return { lines: [], reachedStart: true };
   }
   try {
     const size = fstatSync(fd).size;
@@ -46,9 +55,9 @@ export function readLastLines(file: string, n: number, maxBytes = TAIL_MAX_BYTES
     const lines = Buffer.concat(chunks).toString("utf8").split("\n");
     if (start > 0) lines.shift(); // partial first line
     const full = lines.filter((l) => l !== "");
-    return full.slice(Math.max(0, full.length - n));
+    return { lines: full.slice(Math.max(0, full.length - n)), reachedStart: start === 0 };
   } catch {
-    return [];
+    return { lines: [], reachedStart: false };
   } finally {
     closeSync(fd);
   }
@@ -57,9 +66,13 @@ export function readLastLines(file: string, n: number, maxBytes = TAIL_MAX_BYTES
 /** The last `n` lines over `daemon.log.1` + `daemon.log`, oldest first. */
 export function tailLogs(paths: Paths, n: number): string[] {
   const file = join(paths.logs, DAEMON_LOG);
-  const current = readLastLines(file, n);
-  const older = current.length < n ? readLastLines(`${file}.1`, n - current.length) : [];
-  return [...older, ...current].map(clean);
+  const current = readTail(file, n);
+  // `.1` only when the current file was read to its start: no gap between the two (E6)
+  const older =
+    current.lines.length < n && current.reachedStart
+      ? readLastLines(`${file}.1`, n - current.lines.length)
+      : [];
+  return [...older, ...current.lines].map(clean);
 }
 
 interface Pos {
@@ -139,6 +152,9 @@ export async function followLogs(
         if (old !== undefined && old.ino === pos.ino) emit(`${file}.1`, pos, Number(old.size));
       }
       if (pos === undefined || st.ino !== pos.ino || Number(st.size) < pos.offset) {
+        // the old file's last line had no newline: print it, do not drop it (review-2 E6)
+        const rest = partial + decoder.end();
+        if (rest !== "") out(clean(rest));
         pos = { ino: st.ino, offset: 0 };
         partial = "";
         decoder = new StringDecoder("utf8");

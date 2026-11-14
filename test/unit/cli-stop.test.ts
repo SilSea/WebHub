@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { stopDaemon } from "../../src/cli/daemon-control.js";
+import { authVanished, isStopping, stopDaemon } from "../../src/cli/daemon-control.js";
 import { CliError } from "../../src/cli/output.js";
 import type { Paths } from "../../src/config/home.js";
 import { type Platform, PlatformError, type ProcInfo } from "../../src/platform/index.js";
-import { isServerError } from "../../src/server/errors.js";
+import { helloProof } from "../../src/server/auth.js";
+import { isServerError, ServerError } from "../../src/server/errors.js";
 import { tempHome } from "../helpers/home.js";
 
 const PID = 4242;
@@ -243,5 +244,207 @@ describe("stop with an impostor (F-004 §3.4 step 2)", () => {
     expect(impostor(err)).toBe(true);
     expect(f.kills).toEqual([]);
     expect(err).not.toBeInstanceOf(CliError);
+  });
+});
+
+describe("missing branches (review-2 E4 a / e)", () => {
+  it("process table fails while waiting → not taken as dead: timeout, auth.json kept", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    setTimeout(() => f.failInfo(), 150);
+    const err = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 600 }).catch(
+      (e: unknown) => e,
+    );
+    expect((err as CliError).code).toBe("DAEMON_STOP_TIMEOUT");
+    expect(existsSync(h.paths.auth)).toBe(true);
+    expect(f.kills).toEqual([]);
+  });
+
+  it("PID alive without a known start time → not ours: DAEMON_IMPOSTOR, nothing killed", async () => {
+    const f = fakePlatform();
+    f.add(PID, undefined);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    const err = await stopDaemon(h.paths, {
+      platform: f.platform,
+      timeoutMs: 300,
+      force: true,
+    }).catch((e: unknown) => e);
+    expect(isServerError(err, "DAEMON_IMPOSTOR")).toBe(true);
+    expect(f.kills).toEqual([]);
+  });
+});
+
+describe("a stopping daemon without auth.json (review-2 E3)", () => {
+  it("the lock names a live PID with its start time → waited for until it is gone", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeLock(h.paths, PID, STARTED);
+    setTimeout(() => f.procs.delete(PID), 300);
+    const t0 = Date.now();
+    const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+    expect(r).toEqual({ wasRunning: true, forced: false });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
+    expect(f.kills).toEqual([]);
+  });
+
+  it("stale lock (dead PID / other start time) → not running at once", async () => {
+    const f = fakePlatform();
+    writeLock(h.paths, PID, STARTED);
+    expect(await stopDaemon(h.paths, { platform: f.platform })).toEqual({
+      wasRunning: false,
+      forced: false,
+    });
+    f.add(PID, "2026-11-14T09:09:09.0000000Z");
+    expect(await stopDaemon(h.paths, { platform: f.platform })).toEqual({
+      wasRunning: false,
+      forced: false,
+    });
+  });
+});
+
+describe("auth.json of another run is kept (review-2 E5)", () => {
+  it("same PID, new token written while waiting → not removed", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    writeAuth(h.paths, PID, sq.port);
+    writeLock(h.paths, PID, STARTED);
+    setTimeout(() => {
+      writeJson(h.paths.auth, {
+        schemaVersion: 1,
+        token: "B".repeat(43),
+        pid: PID,
+        port: sq.port,
+        startedAt: STARTED,
+      });
+      f.procs.delete(PID);
+    }, 300);
+    await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+    expect(existsSync(h.paths.auth)).toBe(true);
+  });
+});
+
+/** A daemon that proves itself (hello HMAC) — behaviour switched by the tests. */
+async function fakeDaemon(opts: {
+  statusPid: number;
+  helloFailsFirst?: boolean;
+  shutdown?: "ok" | "stopping";
+  onShutdown?: () => void;
+}): Promise<{ server: Server; port: number; shutdowns: () => number }> {
+  let hellos = 0;
+  let shutdowns = 0;
+  const json = (res: import("node:http").ServerResponse, status: number, body: unknown) =>
+    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname === "/api/v1/hello") {
+      hellos++;
+      if (opts.helloFailsFirst === true && hellos === 1) {
+        json(res, 503, { error: { code: "SHUTTING_DOWN", message: "webhub is stopping" } });
+        return;
+      }
+      json(res, 200, { proof: helloProof(TOKEN, url.searchParams.get("n") ?? "") });
+      return;
+    }
+    if (url.pathname === "/api/v1/status") {
+      json(res, 200, { pid: opts.statusPid, version: "t", startedAt: STARTED, home: "h" });
+      return;
+    }
+    if (url.pathname === "/api/v1/shutdown") {
+      shutdowns++;
+      if (opts.shutdown === "stopping") {
+        json(res, 503, { error: { code: "SHUTTING_DOWN", message: "webhub is stopping" } });
+      } else {
+        json(res, 202, { stopping: true });
+      }
+      opts.onShutdown?.();
+      return;
+    }
+    json(res, 404, {});
+  });
+  await new Promise<void>((r) => server.listen({ host: "127.0.0.1", port: 0 }, r));
+  const a = server.address();
+  return {
+    server,
+    port: typeof a === "object" && a !== null ? a.port : 0,
+    shutdowns: () => shutdowns,
+  };
+}
+
+describe("a proven daemon (review-2 E1 / E4 b / d)", () => {
+  it("shutdown answered 503 SHUTTING_DOWN after the proof → waited for, stopped", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    const d = await fakeDaemon({
+      statusPid: PID,
+      shutdown: "stopping",
+      onShutdown: () => setTimeout(() => f.procs.delete(PID), 200),
+    });
+    try {
+      writeAuth(h.paths, PID, d.port);
+      writeLock(h.paths, PID, STARTED);
+      const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+      expect(r).toEqual({ wasRunning: true, forced: false });
+      expect(d.shutdowns()).toBe(1);
+    } finally {
+      d.server.close();
+    }
+  });
+
+  it("our daemon gone, a new one answers meanwhile → the new one is stopped", async () => {
+    const NEW = PID + 7;
+    const f = fakePlatform(); // PID (auth.json) dead
+    f.add(NEW, STARTED);
+    const d = await fakeDaemon({
+      statusPid: NEW,
+      helloFailsFirst: true,
+      onShutdown: () => setTimeout(() => f.procs.delete(NEW), 100),
+    });
+    try {
+      writeAuth(h.paths, PID, d.port);
+      writeLock(h.paths, NEW, STARTED);
+      const r = await stopDaemon(h.paths, { platform: f.platform, timeoutMs: 5_000 });
+      expect(r).toEqual({ wasRunning: true, forced: false });
+      expect(d.shutdowns()).toBe(1);
+      expect(f.kills).toEqual([]);
+    } finally {
+      d.server.close();
+    }
+  });
+
+  it("--force when the lock names another PID than the proven daemon → refused, nothing killed", async () => {
+    const f = fakePlatform();
+    f.add(PID, STARTED);
+    f.add(PID + 1, STARTED);
+    const d = await fakeDaemon({ statusPid: PID });
+    try {
+      writeAuth(h.paths, PID, d.port);
+      writeLock(h.paths, PID + 1, STARTED);
+      const err = await stopDaemon(h.paths, {
+        platform: f.platform,
+        timeoutMs: 300,
+        force: true,
+      }).catch((e: unknown) => e);
+      expect((err as CliError).code).toBe("DAEMON_FORCE_REFUSED");
+      expect(f.kills).toEqual([]);
+    } finally {
+      d.server.close();
+    }
+  });
+});
+
+describe("error mapping (review-2 E1 / E2)", () => {
+  it("ENOENT (auth.json removed mid-read) = not running; 503 SHUTTING_DOWN = stopping", () => {
+    const enoent = Object.assign(new Error("gone"), { code: "ENOENT" });
+    expect(authVanished(enoent)).toBe(true);
+    expect(authVanished(Object.assign(new Error("x"), { code: "EACCES" }))).toBe(false);
+    expect(
+      isStopping(new ServerError("API_ERROR", "x", { status: 503, apiCode: "SHUTTING_DOWN" })),
+    ).toBe(true);
+    expect(isStopping(new ServerError("API_ERROR", "x", { status: 500, apiCode: "X" }))).toBe(
+      false,
+    );
   });
 });

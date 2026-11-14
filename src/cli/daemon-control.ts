@@ -80,7 +80,53 @@ export async function daemonStatus(paths: Paths): Promise<DaemonStatus | undefin
       port: client.port,
     };
   } catch (err) {
-    if (isServerError(err, "DAEMON_NOT_RUNNING")) return undefined;
+    if (isServerError(err, "DAEMON_NOT_RUNNING") || authVanished(err)) return undefined;
+    if (isStopping(err)) {
+      // proved itself, then started closing: like a daemon that does not answer any more
+      throw new ServerError("DAEMON_UNREACHABLE", "the webhub daemon is stopping");
+    }
+    throw err;
+  }
+}
+
+/**
+ * auth.json removed between F-001's `lstat` and its read (the daemon is stopping) — the raw
+ * `ENOENT` means "not running", not an internal error (review-2 E1 / E2). Only auth.json is
+ * read by `connectDaemon` / a client reload.
+ */
+export function authVanished(err: unknown): boolean {
+  return err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+/** The proven daemon answered 503 `SHUTTING_DOWN`: it is closing (review-2 E1). */
+export function isStopping(err: unknown): boolean {
+  return isServerError(err, "API_ERROR") && err.status === 503 && err.apiCode === "SHUTTING_DOWN";
+}
+
+const notAnswering = (pid: number | undefined) =>
+  new CliError(
+    EXIT.error,
+    "DAEMON_NOT_ANSWERING",
+    `the webhub daemon${pid === undefined ? "" : ` (PID ${pid})`} does not answer — it is stopping or hung`,
+    { hint: "Wait a moment, or run `webhub daemon stop --force`." },
+  );
+
+/**
+ * `daemonStatus`, but a daemon that does not prove itself is told apart (review-2 E3): our own
+ * daemon stopping / hung → `DAEMON_NOT_ANSWERING`; our daemon already gone → asked again
+ * (not running, or a new one); anything else stays `DAEMON_IMPOSTOR` / `DAEMON_UNREACHABLE`.
+ */
+export async function daemonStatusChecked(
+  paths: Paths,
+  platform: Platform = getPlatform(),
+): Promise<DaemonStatus | undefined> {
+  try {
+    return await daemonStatus(paths);
+  } catch (err) {
+    if (!noProof(err)) throw err;
+    const o = await ownerOfAuth(platform, paths);
+    if (o.owner === "ours") throw notAnswering(o.pid);
+    if (o.owner === "gone") return await daemonStatus(paths);
     throw err;
   }
 }
@@ -215,7 +261,18 @@ export async function startDaemonProcess(
   const platform = opts.platform ?? getPlatform();
   const timeoutMs = opts.timeoutMs ?? START_TIMEOUT_MS;
   await ensureHome(paths);
-  const running = await daemonStatus(paths);
+  let running: DaemonStatus | undefined;
+  try {
+    running = await daemonStatusChecked(paths, platform);
+  } catch (err) {
+    if (!(err instanceof CliError && err.code === "DAEMON_NOT_ANSWERING")) throw err;
+    // our daemon is stopping (`stop` then `start` in a script): let it leave, then start
+    const o = await ownerOfAuth(platform, paths);
+    if (o.owner === "ours" && o.pid !== undefined) {
+      if (!(await waitDead(platform, o.pid, o.lock, STOP_TIMEOUT_MS))) throw err;
+    }
+    running = await daemonStatusChecked(paths, platform);
+  }
   if (running !== undefined) return { pid: running.pid, port: running.port, alreadyRunning: true };
 
   cleanStartErrors(paths);
@@ -238,6 +295,8 @@ export async function startDaemonProcess(
   let spawnError: Error | undefined;
   child.once("exit", (code) => {
     exited = { code };
+    // its stderr file is no longer any daemon's: Ctrl+C must not make it daemon.err (E6)
+    pendingStartError = undefined;
   });
   child.once("error", (err) => {
     spawnError = err;
@@ -318,6 +377,7 @@ export async function startDaemonProcess(
 /** Errors that only mean "not ready yet" while a start is in progress (review C8). */
 function transientAsUndefined(err: unknown): undefined {
   if (
+    authVanished(err) ||
     isServerError(err, "DAEMON_NOT_RUNNING") ||
     isServerError(err, "DAEMON_IMPOSTOR") ||
     isServerError(err, "DAEMON_UNREACHABLE")
@@ -365,14 +425,23 @@ function readLockFile(paths: Paths): LockFile | undefined {
   return undefined;
 }
 
-function readAuthPid(paths: Paths): number | undefined {
+interface AuthIdentity {
+  pid: number;
+  token: string;
+}
+
+/** pid + token of auth.json, without the F-001 checks (only compared, never sent or printed). */
+function readAuthIdentity(paths: Paths): AuthIdentity | undefined {
   try {
-    const v = JSON.parse(readFileSync(paths.auth, "utf8")) as { pid?: unknown };
-    return typeof v.pid === "number" ? v.pid : undefined;
+    const v = JSON.parse(readFileSync(paths.auth, "utf8")) as { pid?: unknown; token?: unknown };
+    if (typeof v.pid !== "number" || typeof v.token !== "string") return undefined;
+    return { pid: v.pid, token: v.token };
   } catch {
     return undefined;
   }
 }
+
+const readAuthPid = (paths: Paths) => readAuthIdentity(paths)?.pid;
 
 /** Who listens on `port` (for an impostor message). */
 export async function portOwners(platform: Platform, port: number): Promise<string[]> {
@@ -441,24 +510,55 @@ async function ownerOfAuth(
 const noProof = (err: unknown) =>
   isServerError(err, "DAEMON_UNREACHABLE") || isServerError(err, "DAEMON_IMPOSTOR");
 
-/** Removes auth.json only while it still names `pid` (never a newer daemon's — review C6). */
-function removeAuthOf(paths: Paths, pid: number): void {
-  if (readAuthPid(paths) === pid) rmSync(paths.auth, { force: true });
+/**
+ * Removes auth.json only while it is still the one we saw: same PID and, when we read it
+ * before, the same token — never a newer daemon's (review C6, review-2 E5). A file written
+ * between this check and the removal can still be lost (availability only).
+ */
+function removeAuthOf(paths: Paths, pid: number, seen: AuthIdentity | undefined): void {
+  const cur = readAuthIdentity(paths);
+  if (cur === undefined || cur.pid !== pid) return;
+  if (seen !== undefined && seen.pid === pid && seen.token !== cur.token) return;
+  rmSync(paths.auth, { force: true });
+}
+
+/** Waits until `pid` is dead (or reused); false at the deadline. "unknown" keeps waiting. */
+async function waitDead(
+  platform: Platform,
+  pid: number,
+  lock: LockFile | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await procState(platform, pid, lock)).state === "dead") return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(POLL_MS);
+  }
 }
 
 /**
  * Stops the daemon: shutdown request, then waits until the process is gone. Idempotent: a
  * daemon that is already stopping (another `stop`) is waited for, not reported as an error
- * (review C1). `force` kills it when it does not stop (or does not answer) — only the PID
- * named by both auth.json and the lock file, and only if it still has the lock's start time.
- * Nothing is ever sent to (or killed because of) a program that did not prove itself.
+ * (review C1, review-2 E1 / E3). `force` kills it when it does not stop (or does not answer) —
+ * only the PID named by both auth.json and the lock file, and only if it still has the lock's
+ * start time. Nothing is ever sent to (or killed because of) a program that did not prove itself.
  */
-export async function stopDaemon(
+export function stopDaemon(
   paths: Paths,
   opts: ControlOptions & { force?: boolean } = {},
 ): Promise<{ wasRunning: boolean; forced: boolean }> {
+  return stopImpl(paths, opts, 0);
+}
+
+async function stopImpl(
+  paths: Paths,
+  opts: ControlOptions & { force?: boolean },
+  depth: number,
+): Promise<{ wasRunning: boolean; forced: boolean }> {
   const platform = opts.platform ?? getPlatform();
   const timeoutMs = opts.timeoutMs ?? STOP_TIMEOUT_MS;
+  const seen = readAuthIdentity(paths);
   let status: DaemonStatus | undefined;
   let silent = false;
   let pid: number | undefined;
@@ -475,7 +575,7 @@ export async function stopDaemon(
         throw e;
       });
       if (again === undefined) {
-        if (o.pid !== undefined) removeAuthOf(paths, o.pid);
+        if (o.pid !== undefined) removeAuthOf(paths, o.pid, seen);
         return { wasRunning: true, forced: false };
       }
       status = again; // a new daemon started meanwhile: stop that one
@@ -487,7 +587,32 @@ export async function stopDaemon(
       pid = o.pid;
     }
   }
-  if (status === undefined && !silent) return { wasRunning: false, forced: false };
+
+  if (status === undefined && !silent) {
+    // no auth.json, but a daemon may still hold the lock: one that is stopping (a concurrent
+    // `stop` won — wait until it is gone, review-2 E3) or one that is starting (stop it)
+    const lock = readLockFile(paths);
+    if (lock === undefined) return { wasRunning: false, forced: false };
+    const p = await procState(platform, lock.pid, lock);
+    if (p.state !== "alive" || p.startedAt !== lock.startedAt) {
+      return { wasRunning: false, forced: false };
+    }
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if ((await procState(platform, lock.pid, lock)).state === "dead") {
+        return { wasRunning: true, forced: false };
+      }
+      if (depth === 0 && readAuthPid(paths) === lock.pid) return stopImpl(paths, opts, 1);
+      if (Date.now() >= deadline) break;
+      await sleep(POLL_MS);
+    }
+    throw new CliError(
+      EXIT.error,
+      "DAEMON_STOP_TIMEOUT",
+      `a webhub daemon (PID ${lock.pid}) holds the lock but did not stop`,
+      { hint: "Run `webhub daemon status`, then `webhub daemon stop --force`." },
+    );
+  }
   if (pid === undefined) return { wasRunning: false, forced: false };
   const lock = readLockFile(paths);
 
@@ -496,21 +621,22 @@ export async function stopDaemon(
       const client = await connectDaemon(paths);
       await client.request("POST", "/api/v1/shutdown");
     } catch (err) {
-      // closed the connection while answering (F-003 H10), already gone, or already
-      // stopping (503 → no proof, token not sent): wait for it either way
-      if (!noProof(err) && !isServerError(err, "DAEMON_NOT_RUNNING")) throw err;
+      // closed the connection while answering (F-003 H10), already gone (auth.json removed —
+      // E1), or already stopping (503 before / after the proof): wait for it either way
+      if (
+        !noProof(err) &&
+        !isServerError(err, "DAEMON_NOT_RUNNING") &&
+        !isStopping(err) &&
+        !authVanished(err)
+      ) {
+        throw err;
+      }
     }
   }
 
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const p = await procState(platform, pid, lock);
-    if (p.state === "dead") {
-      removeAuthOf(paths, pid); // a hard-killed daemon leaves its auth.json (review C7)
-      return { wasRunning: true, forced: false };
-    }
-    if (Date.now() >= deadline) break;
-    await sleep(POLL_MS);
+  if (await waitDead(platform, pid, lock, timeoutMs)) {
+    removeAuthOf(paths, pid, seen); // a hard-killed daemon leaves its auth.json (review C7)
+    return { wasRunning: true, forced: false };
   }
   if (opts.force !== true) {
     throw new CliError(EXIT.error, "DAEMON_STOP_TIMEOUT", "the daemon did not stop", {
@@ -540,7 +666,7 @@ export async function stopDaemon(
       hint: "End it in Task Manager, or run the command as the user that started it.",
     });
   }
-  removeAuthOf(paths, pid);
+  removeAuthOf(paths, pid, seen);
   return { wasRunning: true, forced: true };
 }
 
@@ -552,7 +678,19 @@ export async function ensureDaemon(
   paths: Paths,
   opts: ControlOptions & { noStart?: boolean; onStart?: () => void } = {},
 ): Promise<DaemonClient> {
-  const status = await daemonStatus(paths);
+  const platform = opts.platform ?? getPlatform();
+  let status: DaemonStatus | undefined;
+  try {
+    status = await daemonStatusChecked(paths, platform);
+  } catch (err) {
+    // our daemon is stopping: `startDaemonProcess` waits for it, then starts a new one
+    if (
+      !(err instanceof CliError && err.code === "DAEMON_NOT_ANSWERING") ||
+      opts.noStart === true
+    ) {
+      throw err;
+    }
+  }
   if (status === undefined) {
     if (opts.noStart === true) {
       throw new CliError(
