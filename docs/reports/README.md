@@ -19,6 +19,8 @@ Report แยกไฟล์ append-only (WORKFLOW R5). Template: [`../templates
 | CR-002 | 2 | [test-2](CR-002/test-2.md) | [review-1](CR-002/review-1.md) — PASS | [security-1](CR-002/security-1.md) — PASS | done — minor แก้ครบตามผู้ใช้สั่ง |
 | F-004 | 5 | [test-5](F-004/test-5.md) | [review-4](F-004/review-4.md) — PASS | [security-1](F-004/security-1.md) FAIL → รอบ 2–4 รวมใน review — PASS | done — review-1 C1/C2 major + security-1 D1 critical, review-2 E1 major แก้แล้ว; minor/nit ทุกรอบแก้ครบตามผู้ใช้สั่ง; ไม่มี review รอบ 5 ตามผู้ใช้ |
 | CR-003 | 3 | [test-3](CR-003/test-3.md) | [review-2](CR-003/review-2.md) — PASS | [security-1](CR-003/security-1.md) — PASS; รอบ 2 รวมใน review-2 — PASS | done — review-1 Z1 major แก้แล้ว; minor/nit/info ทั้งสองรอบแก้ครบตามผู้ใช้สั่ง; ไม่มี review รอบ 3 ตามผู้ใช้ |
+| CR-004 | 2 | [test-2](CR-004/test-2.md) | [review-1](CR-004/review-1.md) — PASS | (รวมใน review-1) — PASS | done — test เท่านั้น; M1 + N1 แก้ตามผู้ใช้สั่ง, N2 = follow-up ใน PLAN |
+| F-005 | 3 | [test-3](F-005/test-3.md) | [review-2](F-005/review-2.md) — PASS | [security-1](F-005/security-1.md) FAIL → รอบ 2 รวมใน review-2 — PASS | done — review-1 K1/K2 major + security-1 S1 major แก้แล้ว; minor/nit ทั้งสองรอบแก้ครบตามผู้ใช้สั่ง; ไม่มี review รอบ 3 ตามผู้ใช้ |
 
 ## Regression
 | วันที่ | ผล |

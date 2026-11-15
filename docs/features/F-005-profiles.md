@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (2026-11-15) |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §6 Runtime Profiles, §19.5 variants, §21.5 profiles สำหรับทุกคน, §13 (`webhub profiles`), §12 (`profiles/`, `data/profiles/`, `src/profiles/`) |
 | Depends on | F-001 (home, `data/profiles/`, safe path, errors), F-003 (API route), F-004 (CLI command table) |
@@ -190,7 +190,7 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | 3 | [test-3](../reports/F-005/test-3.md) 452/6 (+1 F-004 flaky → CR-004) | — | — | L1–L6 แก้ทั้งหมด (ผู้ใช้เลือก "แก้แล้ว merge") |
 
 ## 10. เอกสารที่อัปเดต (R4)
-- [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
+- [x] DESIGN.md §6.1 (กติกา detect / cmd / id ซ้ำ), §17  - [x] PLAN.md  - [x] features/README.md  - [x] reports/README.md
 
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
@@ -198,3 +198,4 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | 2026-11-14 | W1 ① | ร่าง spec |
 | 2026-11-14 | W1 ②–④ | ผู้ใช้ตอบ Q1–Q6 ตามแนะนำ (YAML + `yaml`, 7 built-in, ผู้ใช้ทับทั้งตัว, lib + API + CLI, cmd string → argv, range ทำเอง) → `planned` |
 | 2026-11-14 | W3 | ผู้ใช้สั่ง "เริ่มเลย" → implement `src/profiles/*`, `profiles/*.yml` ×7, fixtures ×6, `webhub profiles`, `GET /api/v1/profiles`; `yaml@2.9.1` (ไม่มี dependency / install script); test-1 → `review` |
+| 2026-11-15 | W3 | review-2 PASS; ผู้ใช้เลือก "แก้แล้ว merge" → L1–L6 แก้ (test-3); เทส F-004 ล่มตอนโหลด → CR-004 (test เท่านั้น) merge ก่อน → `done`, merge เข้า `develop` |

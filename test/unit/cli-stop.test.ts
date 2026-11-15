@@ -609,12 +609,12 @@ describe("status / start / ensureDaemon tell our stopping daemon apart (review-3
       platform: f.platform,
       env: { ...process.env, WEBHUB_HOME: h.paths.home, WEBHUB_TEST_ENTRY: "fail-2" },
       daemonJs: ENTRY,
-      timeoutMs: 5_000,
+      timeoutMs: 15_000, // a spawn under full-suite load (CR-004)
     }).catch((e: unknown) => e)) as CliError;
     // it waited (third look) and then got as far as spawning (the fixture exits 2)
     expect(calls).toBeGreaterThanOrEqual(3);
     expect(err.code).toBe("DAEMON_START_FAILED");
-  });
+  }, 30_000); // ~3 s alone (ensureHome + spawn); the 5 s default failed under load (CR-004)
 
   it("re-asking a starting daemon: a non-transient status error is reported (review-4 H3)", async () => {
     const f = fakePlatform();
