@@ -7,7 +7,7 @@
 import { join } from "node:path";
 import type { ProjectView } from "../profiles/match.js";
 import { jsonObject, packageJsonDeps, pyprojectDeps, requirementsDeps } from "./deps.js";
-import { type Budget, type DirEntry, listDir, readSmall } from "./fsread.js";
+import { type Budget, badName, type DirEntry, listDir, readSmall } from "./fsread.js";
 
 /** Evaluate → fill rounds at most (each round resolves one more path level). */
 export const MAX_FILL_ROUNDS = 8;
@@ -110,7 +110,13 @@ export class DiskView implements ProjectView {
       if (this.#dirs.has(k)) continue;
       const abs = rel === "" ? this.root : join(this.root, ...rel.split("/"));
       const r = await listDir(abs, this.root, this.budget);
-      this.#dirs.set(k, "entries" in r ? new Map(r.entries.map((e) => [key(e.name), e])) : null);
+      // odd names never reach rules / reasons, as in the walk (review-1 C9)
+      this.#dirs.set(
+        k,
+        "entries" in r
+          ? new Map(r.entries.filter((e) => !badName(e.name)).map((e) => [key(e.name), e]))
+          : null,
+      );
     }
     for (const [rel, max] of files) {
       const abs = join(this.root, ...rel.split("/"));

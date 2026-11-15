@@ -144,10 +144,16 @@ export async function portHint(
   return e === undefined ? undefined : { value: e, via: "fixed", source: "Dockerfile EXPOSE" };
 }
 
-/** A version-ish string that is safe to show: printable ASCII, short. */
+/**
+ * A version-ish string (`22`, `>=3.11,<4`, `^1.2 || ~2`, `lts/iron`): no shell characters
+ * (`;`, `$`, quotes, backticks, `&`, …). Hints are untrusted text for F-015, never a command
+ * (security-1 S6).
+ */
 const versionText = (s: string | undefined, max = 60): string | undefined => {
   const t = s?.trim();
-  return t !== undefined && t !== "" && t.length <= max && /^[\x20-\x7e]+$/.test(t) ? t : undefined;
+  return t !== undefined && t.length <= max && /^[0-9A-Za-z.^~<>=*|, @+/_-]+$/.test(t)
+    ? t
+    : undefined;
 };
 
 /** `.nvmrc`, `.node-version`, `engines.node`, `packageManager`, Python, Bun, Dockerfile FROM. */
@@ -174,17 +180,20 @@ export async function runtimeHints(view: DiskView, cwd: string): Promise<Runtime
     }
   }
   const pm =
-    typeof pkg?.packageManager === "string" ? versionText(pkg.packageManager, 120) : undefined;
-  const pmName = pm === undefined ? undefined : /^(npm|pnpm|yarn|bun)@/.exec(pm)?.[1];
-  if (pm !== undefined && pmName !== undefined) {
-    out.push({ lang: pmName, hint: pm.split("+")[0] ?? pm, source: "package.json packageManager" });
+    typeof pkg?.packageManager === "string"
+      ? /^(npm|pnpm|yarn|bun)@(\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,40})?)(?:\+[0-9A-Za-z.]{1,200})?$/.exec(
+          pkg.packageManager.trim(),
+        )
+      : null;
+  if (pm?.[1] !== undefined && pm[2] !== undefined) {
+    out.push({ lang: pm[1], hint: `${pm[1]}@${pm[2]}`, source: "package.json packageManager" });
   }
   const rp = versionText(requiresPython(await view.text(at("pyproject.toml"))));
   if (rp !== undefined)
     out.push({ lang: "python", hint: rp, source: "pyproject.toml requires-python" });
   const docker = await view.text(at("Dockerfile"), DOCKERFILE_BYTES);
   const from = docker === undefined ? undefined : fromImage(docker);
-  const image = versionText(from, 120);
+  const image = from !== undefined && from.length <= 120 ? from : undefined;
   if (image !== undefined && /^[a-z0-9][a-z0-9._/:@-]*$/.test(image)) {
     out.push({ lang: "docker", hint: `${image} (hint)`, source: "Dockerfile FROM" });
   }

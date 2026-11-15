@@ -58,15 +58,22 @@ export function scanRoutes(paths: Paths, lock: Lock, opts: ScanRouteOptions): Ro
   let lastError: LastError | undefined;
   let closing = false;
 
-  const loadLast = async (): Promise<void> => {
-    if (lastLoaded) return;
-    lastLoaded = true;
-    try {
-      last = (await readDoc(scanFile(paths), scanSpec, { home: paths.home }))?.value;
-    } catch {
-      last = undefined; // a broken / newer file: shown as no result; the next scan replaces it
-    }
-  };
+  let loading: Promise<void> | undefined;
+  const loadLast = (): Promise<void> =>
+    (loading ??= (async () => {
+      if (lastLoaded) return;
+      let read: ScanResult | undefined;
+      try {
+        read = (await readDoc(scanFile(paths), scanSpec, { home: paths.home }))?.value;
+      } catch {
+        read = undefined; // a broken / newer file: shown as no result; the next scan replaces it
+      }
+      // a scan that finished during the read wins over the older file (review-1 C12)
+      if (!lastLoaded) {
+        last = read;
+        lastLoaded = true;
+      }
+    })());
 
   const start = (): Running => {
     const controller = new AbortController();
@@ -138,8 +145,10 @@ export function scanRoutes(paths: Paths, lock: Lock, opts: ScanRouteOptions): Ro
       return reply.code(202).send({ scanId: running.scanId });
     });
 
-    app.get("/api/v1/scan", async () => {
+    app.get("/api/v1/scan", async (req) => {
       await loadLast();
+      // `?result=0`: polling while a scan runs needs no copy of the last result (review-1 C14)
+      const lean = (req.query as Record<string, unknown>).result === "0" && running !== undefined;
       return {
         running:
           running === undefined
@@ -150,14 +159,18 @@ export function scanRoutes(paths: Paths, lock: Lock, opts: ScanRouteOptions): Ro
                 folders: running.folders,
                 candidates: running.candidates,
               },
-        last: last ?? null,
+        last: lean ? null : (last ?? null),
         lastError: lastError ?? null,
       };
     });
 
-    app.delete("/api/v1/scan", async () => {
+    app.delete("/api/v1/scan", async (req) => {
       const job = running;
-      if (job === undefined) return { cancelled: false };
+      // `?scanId=`: cancel only that scan, never one another client started since (review-1 C13)
+      const want = (req.query as Record<string, unknown>).scanId;
+      if (job === undefined || (want !== undefined && want !== job.scanId)) {
+        return { cancelled: false };
+      }
       job.controller.abort();
       await job.done;
       return { cancelled: true };

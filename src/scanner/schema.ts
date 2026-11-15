@@ -64,11 +64,7 @@ export const ScanResult = z.strictObject({
   finishedAt: z.string().max(40),
   truncated: z.union([
     z.literal(false),
-    z.strictObject({
-      reason: z.enum(["time", "folders", "bytes", "candidates"]),
-      /** Scan root whose walk was cut (folders: the others were still walked). */
-      root: str(4096).optional(),
-    }),
+    z.strictObject({ reason: z.enum(["time", "folders", "bytes", "candidates"]) }),
   ]),
   roots: z
     .array(

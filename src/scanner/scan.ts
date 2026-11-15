@@ -5,7 +5,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import type { Paths } from "../config/home.js";
 import { isInside } from "../fs/safe-path.js";
 import { type LoadedProfile, loadProfiles } from "../profiles/loader.js";
@@ -32,6 +32,9 @@ import { Candidate, SCAN_SCHEMA_VERSION, type ScanResult } from "./schema.js";
 import { DiskView } from "./view.js";
 
 export const WEB_SCORE = 50;
+
+/** Serialized result size kept below the store limit (5 MB, F-001). */
+export const RESULT_MAX_BYTES = 4 * 1024 * 1024;
 
 /** Folders never walked into (build output, dependencies, VCS, caches). */
 export const SKIP_DIRS = new Set(
@@ -82,13 +85,13 @@ const MARKERS = new Set(
 );
 const MARKER_PATTERNS = [/\.rbxlx?$/i, /\.uproject$/i, /\.csproj$/i];
 
-/** Manifest files whose content makes the fingerprint (duplicate detection). */
+/**
+ * Manifest files whose content makes the fingerprint (duplicate detection). No lockfiles: they
+ * are big and would use up the byte limit (review-2 R2); the files here are read by detection
+ * anyway (cached).
+ */
 const FINGERPRINT_FILES = [
   "package.json",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "bun.lock",
   "go.mod",
   "Cargo.toml",
   "pyproject.toml",
@@ -118,6 +121,8 @@ export interface ScanOptions {
 interface Found {
   abs: string;
   root: string;
+  /** Index of its root's walk. */
+  walk: number;
   entries: DirEntry[];
 }
 
@@ -145,50 +150,66 @@ const keyOf = (abs: string) =>
     .digest("hex")
     .slice(0, 16);
 
+/** BFS state of one scan root. */
+interface Walk {
+  index: number;
+  root: string;
+  queue: { abs: string; depth: number }[];
+}
+
 /**
- * Read-only walk of one root (BFS, depth-limited). At most `share` folders: one wide root cannot
- * use up the folder limit of the others (security-1 S3).
+ * Lists the next folder of one root (read-only, depth-limited). Roots are walked round robin,
+ * one folder each in turn: a wide or hostile root cannot use up the folder / candidate limits
+ * before the others are looked at (security-1 S3, review-2 R1 / R2).
  */
-async function walk(
-  root: string,
-  share: number,
+async function step(
+  w: Walk,
   budget: Budget,
   skipDirs: ReadonlySet<string>,
   found: Found[],
   skipped: ScanResult["skipped"],
-  onFolder: () => void,
 ): Promise<void> {
-  const queue: { abs: string; depth: number }[] = [{ abs: root, depth: 0 }];
   const skip = (path: string, reason: ScanResult["skipped"][number]["reason"]) => {
     if (skipped.length < budget.limits.skipped) skipped.push({ path, reason });
   };
-  let walked = 0;
-  while (queue.length > 0) {
-    if (++walked > share) throw new Truncated("folders");
-    const { abs, depth } = queue.shift() as { abs: string; depth: number };
-    const r = await listDir(abs, root, budget);
-    onFolder();
-    if ("skip" in r) {
-      skip(abs, r.skip);
-      continue;
-    }
-    const entries = r.entries.filter((e) => {
-      if (!badName(e.name)) return true;
-      skip(abs, "bad-name");
-      return false;
-    });
-    if (entries.some(isMarker) || entries.some(isUnityDir)) {
-      if (found.length >= budget.limits.candidates) throw new Truncated("candidates");
-      found.push({ abs, root, entries });
-    }
-    if (depth >= budget.limits.depth) continue;
-    for (const e of entries) {
-      if (e.type === "link") skip(join(abs, e.name), "link");
-      if (e.type !== "dir") continue;
-      if (skipDirs.has(e.name.toLowerCase()) || e.name.startsWith(".")) continue;
-      queue.push({ abs: join(abs, e.name), depth: depth + 1 });
+  const next = w.queue.shift();
+  if (next === undefined) return;
+  const { abs, depth } = next;
+  const r = await listDir(abs, w.root, budget);
+  if ("skip" in r) {
+    skip(abs, r.skip);
+    return;
+  }
+  const entries = r.entries.filter((e) => {
+    if (!badName(e.name)) return true;
+    skip(abs, "bad-name");
+    return false;
+  });
+  if (entries.some(isMarker) || entries.some(isUnityDir)) {
+    if (found.length >= budget.limits.candidates) throw new Truncated("candidates");
+    found.push({ abs, root: w.root, walk: w.index, entries });
+  }
+  if (depth >= budget.limits.depth) return;
+  for (const e of entries) {
+    if (e.type === "link") skip(join(abs, e.name), "link");
+    if (e.type !== "dir") continue;
+    if (skipDirs.has(e.name.toLowerCase()) || e.name.startsWith(".")) continue;
+    w.queue.push({ abs: join(abs, e.name), depth: depth + 1 });
+  }
+}
+
+/** `found` in round-robin order of their roots (detection shares time / bytes fairly). */
+function interleave(found: readonly Found[], roots: number): Found[] {
+  const lists: Found[][] = Array.from({ length: roots }, () => []);
+  for (const f of found) lists[f.walk]?.push(f);
+  const out: Found[] = [];
+  for (let i = 0; out.length < found.length; i++) {
+    for (const l of lists) {
+      const f = l[i];
+      if (f !== undefined) out.push(f);
     }
   }
+  return out;
 }
 
 async function fingerprint(view: DiskView): Promise<string> {
@@ -205,6 +226,8 @@ async function fingerprint(view: DiskView): Promise<string> {
 
 type Draft = Omit<Candidate, "name"> & {
   base: string;
+  /** Real path of its scan root. */
+  root: string;
   /** Compose files of the folder itself, whatever its kind (a compose-only monorepo parent). */
   ownCompose?: { files: string[]; services: ComposeService[] };
 };
@@ -269,6 +292,7 @@ async function detect(
   const draft: Draft = {
     key: keyOf(f.abs),
     base: slug(f.abs.slice(f.abs.lastIndexOf(sep) + 1)),
+    root: f.root,
     path: f.abs,
     kind,
     score,
@@ -319,6 +343,7 @@ async function detect(
 const unread = (f: Found): Draft => ({
   key: keyOf(f.abs),
   base: slug(f.abs.slice(f.abs.lastIndexOf(sep) + 1)),
+  root: f.root,
   path: f.abs,
   kind: "unknown",
   score: 0,
@@ -339,7 +364,9 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
   const byParent = new Map<string, Draft[]>();
   for (const d of drafts) {
     if (d.kind !== "site") continue;
-    const parent = d.path.slice(0, d.path.lastIndexOf(sep));
+    // the merged site must stay inside the scan root (security-1 S4)
+    const parent = dirname(d.path);
+    if (parent === d.path || !isInside(d.root, parent)) continue;
     byParent.set(parent, [...(byParent.get(parent) ?? []), d]);
   }
   const removed = new Set<Draft>();
@@ -394,7 +421,8 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
     if (own !== undefined) removed.add(own);
     added.push({
       key: keyOf(parent),
-      base: slug(parent.slice(parent.lastIndexOf(sep) + 1)),
+      base: slug(basename(parent)),
+      root: parts[0]?.root ?? parent,
       path: parent,
       kind: "site",
       score: Math.max(...parts.map((d) => d.score)),
@@ -435,7 +463,11 @@ function nested(drafts: Draft[]): Draft[] {
   const out: Draft[] = [];
   const inner: Draft[] = [];
   for (const d of sorted) {
-    const parent = out.find((p) => p.path !== d.path && isInside(p.path, d.path));
+    // only a web project owns what is inside it: a stray requirements.txt / tooling
+    // package.json higher up does not hide the projects below (review-1 C6)
+    const parent = out.find(
+      (p) => p.kind === "site" && p.path !== d.path && isInside(p.path, d.path),
+    );
     (parent === undefined ? out : inner).push(d);
   }
   for (const d of inner) {
@@ -466,7 +498,7 @@ function name(drafts: Draft[]): Candidate[] {
   const rank = (d: Draft) => (d.kind === "site" ? 0 : 1);
   return drafts
     .sort((a, b) => rank(a) - rank(b) || a.path.localeCompare(b.path))
-    .map(({ base, ownCompose: _, ...d }) => {
+    .map(({ base, root: _r, ownCompose: _c, ...d }) => {
       let n = base;
       for (let i = 2; used.has(n); i++) {
         // ≤ 40 with any suffix length (security-1 S2: `-1000` made 41)
@@ -528,32 +560,37 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
   const found: Found[] = [];
   const drafts: Draft[] = [];
   const progress = () => opts.onProgress?.({ folders: budget.folders, candidates: found.length });
-  const cut = (err: unknown, root?: string) => {
+  const cut = (err: unknown) => {
     if (!(err instanceof Truncated)) throw err;
-    if (result.truncated === false) {
-      result.truncated = { reason: err.reason, ...(root === undefined ? {} : { root }) };
-    }
+    if (result.truncated === false) result.truncated = { reason: err.reason };
   };
-  // walk: each root gets an equal share of what is left of the folder limit; a limit ends the
-  // walk of that root (folders) or of all roots (time / candidates) — what was found is kept
-  const roots = opts.scanRoots.slice(0, 100);
-  let walking = true;
-  for (const [i, root] of roots.entries()) {
+  const walks: Walk[] = [];
+  for (const root of opts.scanRoots.slice(0, 100)) {
     const r = await rootStatus(root, paths.home);
     result.roots.push({ path: root, status: r.status });
-    if (r.real === undefined || !walking) continue;
-    const share = Math.max(1, Math.floor((limits.folders - budget.folders) / (roots.length - i)));
-    try {
-      await walk(r.real, share, budget, skipDirs, found, result.skipped, progress);
-    } catch (err) {
-      cut(err, root);
-      if ((err as Truncated).reason !== "folders") walking = false;
+    if (r.real !== undefined) {
+      walks.push({ index: walks.length, root: r.real, queue: [{ abs: r.real, depth: 0 }] });
     }
   }
-  // detect what was found, with a reserve when the walk was cut short (review-1 C1)
+  // walk round robin; a limit ends the walk, what was found is kept
+  try {
+    for (let busy = true; busy; ) {
+      busy = false;
+      for (const w of walks) {
+        if (w.queue.length === 0) continue;
+        busy = true;
+        await step(w, budget, skipDirs, found, result.skipped);
+        progress();
+      }
+    }
+  } catch (err) {
+    cut(err);
+  }
+  // detect what was found (round robin over roots), with a reserve when the walk was cut
+  // short (review-1 C1)
   if (result.truncated !== false) budget.reserve();
   let detecting = true;
-  for (const f of found) {
+  for (const f of interleave(found, walks.length)) {
     if (detecting) {
       try {
         drafts.push(await detect(f, loaded.profiles, budget, result.problems));
@@ -576,6 +613,15 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
     return false;
   });
   result.finishedAt = new Date().toISOString();
+  // the store refuses files > 5 MB: keep the first candidates instead of losing the scan
+  // (review-1 C11)
+  while (
+    result.candidates.length > 0 &&
+    Buffer.byteLength(JSON.stringify(result)) > RESULT_MAX_BYTES
+  ) {
+    result.candidates.length = Math.floor(result.candidates.length * 0.9);
+    result.truncated = { reason: "candidates" };
+  }
   return result;
 }
 

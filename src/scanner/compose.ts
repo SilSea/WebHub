@@ -56,11 +56,10 @@ const resolveVar = (s: string): string =>
 function parsePort(v: unknown): ComposeService["ports"][number] | undefined {
   if (typeof v === "number") {
     const t = portNum(String(v));
-    return t === undefined ? undefined : { target: t, text: String(v) };
+    return t === undefined ? undefined : { target: t, text: String(t) };
   }
   if (typeof v === "string") {
-    const text = v.slice(0, 100);
-    const clean = resolveVar(text).replace(/\/(tcp|udp)$/, "");
+    const clean = resolveVar(v.slice(0, 100)).replace(/\/(tcp|udp)$/, "");
     // [ip:]published:target  |  target ; ranges are skipped
     const parts = clean.startsWith("[")
       ? clean.slice(clean.indexOf("]") + 2).split(":")
@@ -68,6 +67,9 @@ function parsePort(v: unknown): ComposeService["ports"][number] | undefined {
     const target = portNum(parts[parts.length - 1] ?? "");
     if (target === undefined) return undefined;
     const published = parts.length >= 2 ? portNum(parts[parts.length - 2] ?? "") : undefined;
+    // text rebuilt from the numbers: the raw string may hold env defaults or control
+    // characters (security-1 S5)
+    const text = published === undefined ? String(target) : `${published}:${target}`;
     return { target, ...(published === undefined ? {} : { published }), text };
   }
   if (typeof v === "object" && v !== null) {
@@ -78,7 +80,7 @@ function parsePort(v: unknown): ComposeService["ports"][number] | undefined {
     return {
       target,
       ...(published === undefined ? {} : { published }),
-      text: `${published ?? ""}:${target}`,
+      text: published === undefined ? String(target) : `${published}:${target}`,
     };
   }
   return undefined;

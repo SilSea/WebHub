@@ -59,7 +59,7 @@ describe("/api/v1/scan (F-006)", { timeout: 60_000 }, () => {
   afterEach(() => lock.release());
 
   /** API whose scans wait for `gate` before reading the config (deterministic "running"). */
-  const make = (gate: Promise<void>) =>
+  const make = (gate: () => Promise<void>) =>
     createApi(
       {
         token: TOKEN,
@@ -73,7 +73,7 @@ describe("/api/v1/scan (F-006)", { timeout: 60_000 }, () => {
       [
         scanRoutes(h.paths, lock, {
           config: async () => {
-            await gate;
+            await gate();
             return { scanRoots: [project] };
           },
         }),
@@ -82,7 +82,8 @@ describe("/api/v1/scan (F-006)", { timeout: 60_000 }, () => {
 
   it("needs auth; start → 202, second start → 409, progress, result saved", async () => {
     let open: () => void = () => {};
-    const app = await make(new Promise<void>((r) => (open = r)));
+    let gate = new Promise<void>((r) => (open = r));
+    const app = await make(() => gate);
     try {
       for (const method of ["GET", "POST", "DELETE"] as const) {
         const anon = await app.inject({
@@ -106,6 +107,13 @@ describe("/api/v1/scan (F-006)", { timeout: 60_000 }, () => {
 
       const during = await app.inject({ method: "GET", url: "/api/v1/scan", headers: auth });
       expect((during.json() as { running: { scanId: string } }).running.scanId).toBe(scanId);
+      // review-1 C13: DELETE of another scanId cancels nothing
+      const other = await app.inject({
+        method: "DELETE",
+        url: "/api/v1/scan?scanId=0000000000000000",
+        headers: auth,
+      });
+      expect(other.json()).toEqual({ cancelled: false });
 
       open();
       let body: { running: unknown; last: { scanId: string; candidates: { name: string }[] } };
@@ -117,13 +125,26 @@ describe("/api/v1/scan (F-006)", { timeout: 60_000 }, () => {
       expect(body.last.candidates.map((c) => c.name)).toEqual(["vite-basic"]);
       expect(existsSync(scanFile(h.paths))).toBe(true);
       expect(start.headers["access-control-allow-origin"]).toBeUndefined();
+      // review-1 C14: `?result=0` while a scan runs leaves out the last result
+      gate = new Promise<void>(() => {});
+      const second = await app.inject({ method: "POST", url: "/api/v1/scan", headers: auth });
+      expect(second.statusCode).toBe(202);
+      const lean = (
+        await app.inject({ method: "GET", url: "/api/v1/scan?result=0", headers: auth })
+      ).json() as { running: unknown; last: unknown };
+      expect(lean.running).not.toBeNull();
+      expect(lean.last).toBeNull();
+      const full = (
+        await app.inject({ method: "GET", url: "/api/v1/scan", headers: auth })
+      ).json() as { last: { scanId: string } };
+      expect(full.last.scanId).toBe(scanId);
     } finally {
       await app.close();
     }
   });
 
   it("DELETE cancels: nothing saved; closing the API aborts a running scan", async () => {
-    const app = await make(new Promise<void>(() => {})); // never opens
+    const app = await make(() => new Promise<void>(() => {})); // never opens
     try {
       await app.inject({ method: "POST", url: "/api/v1/scan", headers: auth });
       const del = await app.inject({ method: "DELETE", url: "/api/v1/scan", headers: auth });

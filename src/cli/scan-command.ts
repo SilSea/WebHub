@@ -89,9 +89,7 @@ function print(result: ScanResult, json: boolean, ctx: CommandContext): number {
   }
   if (result.truncated !== false) {
     ctx.io.err(
-      `webhub: the scan stopped early (limit: ${result.truncated.reason}${
-        result.truncated.root === undefined ? "" : ` in ${sanitize(result.truncated.root)}`
-      }); results are partial`,
+      `webhub: the scan stopped early (limit: ${result.truncated.reason}); results are partial`,
     );
   }
   for (const p of result.problems) ctx.io.err(`  ${sanitize(p.file)}: ${sanitize(p.message)}`);
@@ -130,8 +128,10 @@ export const scanCommand = {
       noStart: ctx.noStart,
       onStart: () => ctx.io.err("webhub: starting the daemon…"),
     }).catch((e: unknown) => explainImpostor(e, ctx));
-    const state = async (): Promise<State> => {
-      const parsed = State.safeParse(await client.request("GET", "/api/v1/scan"));
+    const state = async (lean = false): Promise<State> => {
+      const parsed = State.safeParse(
+        await client.request("GET", lean ? "/api/v1/scan?result=0" : "/api/v1/scan"),
+      );
       if (!parsed.success) throw bad();
       return parsed.data;
     };
@@ -144,27 +144,35 @@ export const scanCommand = {
       }
       return print(s.last, json, ctx);
     }
-    let scanId: string;
-    try {
-      const started = Started.safeParse(await client.request("POST", "/api/v1/scan"));
-      if (!started.success) throw bad();
-      scanId = started.data.scanId;
-    } catch (err) {
-      if (!(isServerError(err, "API_ERROR") && err.apiCode === "SCAN_RUNNING")) throw err;
-      const s = await state();
-      if (s.running === null) throw err;
-      scanId = s.running.scanId; // join the scan that is running
-      ctx.io.err("webhub: a scan is already running; waiting for it");
+    let scanId: string | undefined;
+    // 409 → join the running scan; if it ended meanwhile, start again (review-1 C13)
+    for (let attempt = 0; scanId === undefined; attempt++) {
+      try {
+        const started = Started.safeParse(await client.request("POST", "/api/v1/scan"));
+        if (!started.success) throw bad();
+        scanId = started.data.scanId;
+      } catch (err) {
+        if (!(isServerError(err, "API_ERROR") && err.apiCode === "SCAN_RUNNING")) throw err;
+        const s = await state(true);
+        if (s.running !== null) {
+          scanId = s.running.scanId;
+          ctx.io.err("webhub: a scan is already running; waiting for it");
+        } else if (attempt >= 2) {
+          throw err;
+        }
+      }
     }
     ctx.following();
     let shown = 0;
     for (;;) {
       if (ctx.signal.aborted) {
-        await client.request("DELETE", "/api/v1/scan").catch(() => {});
+        await client
+          .request("DELETE", `/api/v1/scan?scanId=${encodeURIComponent(scanId)}`)
+          .catch(() => {});
         ctx.io.err("webhub: scan cancelled");
         return EXIT.error;
       }
-      const s = await state();
+      const s = await state(true);
       if (s.running?.scanId === scanId) {
         if (!json && Date.now() - shown >= 2_000) {
           shown = Date.now();
