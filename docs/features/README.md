@@ -4,7 +4,7 @@
 
 | ID | Function | Phase | Status | Spec | CR ที่เกี่ยว | Report ล่าสุด |
 |---|---|---|---|---|---|---|
-| F-000 | Repo scaffolding | MVP-0 | `done` | [spec](F-000-scaffolding.md) | — | — |
+| F-000 | Repo scaffolding | MVP-0 | `done` | [spec](F-000-scaffolding.md) | CR-001, CR-005 | — |
 | F-001 | Config + `$WEBHUB_HOME` + migration | MVP-1 | `done` | [spec](F-001-config.md) | CR-002 | [CR-002 test-2](../reports/CR-002/test-2.md) |
 | F-002 | Platform layer (Windows) | MVP-1 | `done` | [spec](F-002-platform.md) | CR-001 | [test-5](../reports/F-002/test-5.md) |
 | F-003 | Daemon + API + auth | MVP-1 | `done` | [spec](F-003-daemon-api-auth.md) | CR-003 | [test-9](../reports/F-003/test-9.md) |
@@ -24,3 +24,5 @@ Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-r
 | [CR-001](../changes/CR-001-pack-mjs.md) | F-000 pack test ยอม `.mts` → `.mjs` | `done` |
 | [CR-002](../changes/CR-002-lock-race-test.md) | F-001 test lock race: ตรวจ "ไม่ถือซ้อน" + fail fast แทน "ชนะตัวเดียว" (test เท่านั้น) | `done` |
 | [CR-003](../changes/CR-003-daemon-log-file.md) | F-003 daemon รับ `--log-file` + จำกัดขนาด log 5 MB × 2 | `done` |
+| [CR-004](../changes/CR-004-flaky-f004-tests.md) | F-004 เทส 2 ตัวล่มตอนเครื่องโหลด: timeout ของเทส + ขอบเวลาเทียบ baseline (test เท่านั้น) | `done` |
+| [CR-005](../changes/CR-005-fixture-tempdir-race.md) | F-000 เทส "rejects a missing fixture" ใช้ temp dir ส่วนตัว แทนนับ temp dir กลาง (test เท่านั้น) | `review` |

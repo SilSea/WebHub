@@ -136,6 +136,7 @@ Checklist ที่เกี่ยว: Dependencies, Zero-touch, Secrets
 ## 11. Log
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
+| 2026-11-15 | CR-005 | เทส "rejects a missing fixture" นับ temp dir กลาง → ชนกับเทส F-005 ที่ copy fixture พร้อมกัน; ใช้ temp dir ส่วนตัวของ worker — แก้เฉพาะเทส ผู้ใช้อนุญาต — [CR-005](../changes/CR-005-fixture-tempdir-race.md) |
 | 2026-11-07 | W1 ① | ร่าง spec |
 | 2026-11-07 | CR-001 | pack test ยอม `src/*.mts` → `dist/*.mjs(.map)` (ผู้ใช้อนุญาต; เหตุ: F-002 elevated entry) — [CR-001](../changes/CR-001-pack-mjs.md) |
 | 2026-11-07 | W3 E5 | review/security 3 รอบ, แก้ครบ, DoD ผ่าน (รอ merge PR + CI Node 22) |
