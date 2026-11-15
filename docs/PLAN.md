@@ -17,6 +17,7 @@
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
 | 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-004-flaky-f004-tests.md) |
 | 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `done` | [spec](features/F-005-profiles.md) |
+| 7a | CR-005 เทส F-000 นับ temp dir กลาง ชนกับเทสขนาน (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-005-fixture-tempdir-race.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -131,4 +132,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-004 และ F-005 `done` (2026-11-15) → W1 ของ F-006 (scanner + detector)
+CR-004, F-005, CR-005 `done` (2026-11-15) → W1 ของ F-006 (scanner + detector)

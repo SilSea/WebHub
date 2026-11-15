@@ -116,11 +116,33 @@ describe("fixture harness — security", () => {
   );
 
   it("rejects a missing fixture before creating any temp dir", async () => {
-    const count = async () =>
-      (await readdir(tmpdir())).filter((n) => n.startsWith("webhub-fx-")).length;
-    const before = await count();
-    await expect(copyFixture("does-not-exist")).rejects.toThrow(/fixture not found/);
-    expect(await count()).toBe(before);
+    // a private temp dir for this worker: other test files copy fixtures at the same time, so
+    // counting `webhub-fx-*` in the shared temp dir raced with them (CR-005). Changing
+    // process.env relies on per-file process isolation (forks pool): keep this file's tests
+    // sequential, not `concurrent` (CR-005 review-1 n1). Checks "no leftover dir" only: a dir
+    // made and removed again on error is not seen (review-1 m2).
+    const own = await mkdtemp(join(tmpdir(), "webhub-fxtmp-"));
+    const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+    try {
+      process.env.TEMP = own;
+      process.env.TMP = own;
+      process.env.TMPDIR = own;
+      expect(tmpdir()).toBe(own);
+      await expect(copyFixture("does-not-exist")).rejects.toThrow(/fixture not found/);
+      expect(await readdir(own)).toEqual([]);
+      // positive control: a real copy lands in `own`, so the empty check above means something
+      // (it would pass vacuously if the helper cached the temp dir — review-1 m1)
+      const copy = await copyFixture("vite-basic");
+      expect(copy.startsWith(own)).toBe(true);
+      await removeFixtureCopy(copy);
+      expect(await readdir(own)).toEqual([]);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      await rm(own, { recursive: true, force: true });
+    }
   });
 
   it("rejects a fixture dir that is itself a symlink/junction", async (ctx) => {
