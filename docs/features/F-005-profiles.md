@@ -102,7 +102,7 @@ export function renderCommand(cmd: string, values: Record<string, string>): stri
 - CLI: `webhub profiles` (ตาราง id / language / source), `--check` → exit 2 ถ้ามี problem (สำหรับคนเขียน profile เอง), `--json`
 
 ### 3.3 Flow
-1. โหลดเมื่อเรียก route ทุกครั้ง (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี cache / file watcher; เรียกซ้อนกัน = ใช้ผลเดียวกัน) — ผู้ใช้อื่น (F-006/F-007) เรียก `loadProfiles` เอง
+1. โหลดเมื่อเรียก route ทุกครั้ง (ไฟล์ผู้ใช้เปลี่ยนแล้วเห็นทันที; ไม่มี file watcher; ตรวจไฟล์ทุกครั้ง แต่ cache ผล parse ตาม (ino, size, mtime, ชื่อ) — review-2 L4; เรียกซ้อนกัน = ใช้ผลเดียวกัน) — ผู้ใช้อื่น (F-006/F-007) เรียก `loadProfiles` เอง
 2. อ่านไฟล์: `lstat` (bigint) → ต้องเป็น regular file, ไม่ใช่ link, ไม่ใช่ hard link (`nlink` 1, ไฟล์ผู้ใช้เท่านั้น), ≤ 64 KB → `open` → `fstat` ต้องเป็น `ino` เดียวกัน (ไม่เทียบ `dev`: Node 22 บน Windows ให้ 0 จาก lstat) → อ่าน ≤ 64 KB; จำนวนไฟล์ใน `data/profiles/` ≤ 200 (เกิน = problem, โหลด 200 ตัวแรกตามชื่อ)
 3. parse YAML แบบ safe (YAML 1.2 core schema, ไม่มี custom tag, **ไม่รับ alias เลย** (ไม่มี alias bomb), key ซ้ำ / หลาย document / warning ของ YAML (เช่น tag ไม่รู้จัก) = error, ปฏิเสธ key `__proto__` / `constructor` / `prototype`, ข้อความ error ใช้แค่ code + บรรทัด ไม่ยกเนื้อไฟล์) → zod → ตรวจ placeholder / path pattern / range
 4. id ซ้ำ: id ต้องตรงชื่อไฟล์ → ไฟล์ผู้ใช้ id ซ้ำกันเองไม่ได้; ผู้ใช้ทับ built-in → ตาม Q3; built-in ไม่ตรวจ hard link (pnpm / bun ติดตั้งเป็น hard link — K1); YAML ≤ 5000 node (นับทุกชนิดรวม map — L4), ไฟล์ ≤ 64 KB (L4), ตรวจ key ซ้ำเองแบบ O(n) (ของ `yaml` เป็น quadratic — S1); ผล parse cache ตาม (ino, size, mtime, ชื่อ) — เรียก route ซ้ำไม่ parse ไฟล์เดิมใหม่ (L4)
@@ -199,3 +199,4 @@ Security checklist (WORKFLOW §8): ไม่มี secret ✓, input validation 
 | 2026-11-14 | W1 ②–④ | ผู้ใช้ตอบ Q1–Q6 ตามแนะนำ (YAML + `yaml`, 7 built-in, ผู้ใช้ทับทั้งตัว, lib + API + CLI, cmd string → argv, range ทำเอง) → `planned` |
 | 2026-11-14 | W3 | ผู้ใช้สั่ง "เริ่มเลย" → implement `src/profiles/*`, `profiles/*.yml` ×7, fixtures ×6, `webhub profiles`, `GET /api/v1/profiles`; `yaml@2.9.1` (ไม่มี dependency / install script); test-1 → `review` |
 | 2026-11-15 | W3 | review-2 PASS; ผู้ใช้เลือก "แก้แล้ว merge" → L1–L6 แก้ (test-3); เทส F-004 ล่มตอนโหลด → CR-004 (test เท่านั้น) merge ก่อน → `done`, merge เข้า `develop` |
+| 2026-11-15 | docs | §3.3 ข้อ 1 แก้ให้ตรงโค้ดที่ merge แล้ว (cache ผล parse จาก L4 — เอกสารค้าง ไม่เปลี่ยนพฤติกรรม) |
