@@ -25,4 +25,4 @@ Change Requests: `docs/changes/CR-xxx-<name>.md` (template: [`templates/change-r
 | [CR-002](../changes/CR-002-lock-race-test.md) | F-001 test lock race: ตรวจ "ไม่ถือซ้อน" + fail fast แทน "ชนะตัวเดียว" (test เท่านั้น) | `done` |
 | [CR-003](../changes/CR-003-daemon-log-file.md) | F-003 daemon รับ `--log-file` + จำกัดขนาด log 5 MB × 2 | `done` |
 | [CR-004](../changes/CR-004-flaky-f004-tests.md) | F-004 เทส 2 ตัวล่มตอนเครื่องโหลด: timeout ของเทส + ขอบเวลาเทียบ baseline (test เท่านั้น) | `done` |
-| [CR-005](../changes/CR-005-fixture-tempdir-race.md) | F-000 เทส "rejects a missing fixture" ใช้ temp dir ส่วนตัว แทนนับ temp dir กลาง (test เท่านั้น) | `review` |
+| [CR-005](../changes/CR-005-fixture-tempdir-race.md) | F-000 เทส "rejects a missing fixture" ใช้ temp dir ส่วนตัว แทนนับ temp dir กลาง (test เท่านั้น) | `done` |

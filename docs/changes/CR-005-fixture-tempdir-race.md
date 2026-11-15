@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `review` |
+| Status | `done` (2026-11-15) |
 | Feature ที่แก้ | F-000 (locked) |
 | ประเภท | bugfix — test เท่านั้น (ไม่เปลี่ยน spec, ไม่แตะ `src/`, ไม่แตะ `test/helpers/`) |
 | **อนุญาตโดย (R1)** | ผู้ใช้ / 2026-11-15 ("อนุญาต CR-005 ก่อน push") |
@@ -11,7 +11,7 @@
 ## 1. ของเดิม → ของใหม่
 | ของเดิม | ของใหม่ | ทำไม |
 |---|---|---|
-| นับ `webhub-fx-*` ใน `os.tmpdir()` กลาง ก่อน/หลัง `copyFixture("does-not-exist")` | ชี้ `TEMP` / `TMP` / `TMPDIR` ของ worker นี้ไปที่ temp dir ส่วนตัว (ยืนยัน `tmpdir()` เปลี่ยนจริง) → `copyFixture` ต้อง throw "fixture not found" และ dir ส่วนตัวต้องว่าง → คืน env + ลบ dir | ไม่มีเทสอื่นเขียนลง dir ส่วนตัว → ไม่ชน; ยังพิสูจน์ "ไม่สร้าง temp dir ก่อนตรวจว่า fixture มีจริง" (mutation: `mkdtemp` ก่อนตรวจ → เทสล่ม) |
+| นับ `webhub-fx-*` ใน `os.tmpdir()` กลาง ก่อน/หลัง `copyFixture("does-not-exist")` | ชี้ `TEMP` / `TMP` / `TMPDIR` ของ worker นี้ไปที่ temp dir ส่วนตัว (ยืนยัน `tmpdir()` เปลี่ยนจริง) → `copyFixture` ต้อง throw "fixture not found" และ dir ส่วนตัวต้องว่าง; ตัวควบคุมบวก: copy `vite-basic` จริงต้องลงใน dir ส่วนตัว (review-1 m1) → คืน env + ลบ dir | ไม่มีเทสอื่นเขียนลง dir ส่วนตัว → ไม่ชน; ยังพิสูจน์ "ไม่สร้าง temp dir ก่อนตรวจว่า fixture มีจริง" (mutation: `mkdtemp` ก่อนตรวจ → เทสล่ม) |
 
 ## 2. Impact matrix
 | feature / config / data | โดนอะไร | ต้อง migrate ไหม |
@@ -24,7 +24,7 @@
 | | รายละเอียด |
 |---|---|
 | ผลดี | ไม่ล่มผิด; เข้มขึ้น (dir ต้องว่างทั้งหมด ไม่ใช่แค่จำนวนเท่าเดิม); ไม่ขึ้นกับเวลา |
-| ผลเสีย | แก้ `process.env` ของ worker ชั่วคราว — เทสอื่นใน**ไฟล์เดียวกัน**รันต่อกัน (ไม่ขนาน) และ env คืนใน `finally` จึงไม่กระทบ; พึ่งว่า `os.tmpdir()` อ่าน env ทุกครั้ง (Node ทำแบบนี้ทุก platform; มี `expect(tmpdir()).toBe(own)` กันไว้) |
+| ผลเสีย | แก้ `process.env` ของ worker ชั่วคราว — เทสอื่นใน**ไฟล์เดียวกัน**รันต่อกัน (ไม่ขนาน) และ env คืนใน `finally` จึงไม่กระทบ; พึ่งว่า `os.tmpdir()` อ่าน env ทุกครั้ง (Node ทำแบบนี้ทุก platform; มี `expect(tmpdir()).toBe(own)` + copy จริงลง dir ส่วนตัวกันไว้); ตรวจได้แค่ "ไม่มี dir ค้าง" — ถ้าโค้ดสร้าง dir ก่อนแล้วลบตอน error เทสจับไม่ได้ (จุดบอดเดิมของเทสเก่า, review-1 m2); พึ่งการแยก process ต่อไฟล์ (forks pool) — มี comment ห้าม concurrent (n1) |
 | ทางเลือกที่ไม่เลือก | (1) ให้ `copyFixture` รับ temp root — แตะ helper ที่ทุกเทสใช้; (2) ให้เทส F-005 ไม่ copy fixture — ขัด DESIGN §21.5 (เทสบน copy + ยืนยัน Zero-touch); (3) ปิดการรันขนาน — ช้าทั้งชุด |
 
 ## 4. Migration + Rollback
@@ -46,7 +46,8 @@
 ## 8. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/CR-005/test-1.md) | [review-1](../reports/CR-005/review-1.md) | (รวมใน review-1) | |
+| 1 | [test-1](../reports/CR-005/test-1.md) | [review-1](../reports/CR-005/review-1.md) PASS (m1–m2 minor, n1 nit) | (รวมใน review-1) | ผู้ใช้: แก้ทั้งหมด |
+| 2 | [test-2](../reports/CR-005/test-2.md) | — | — | → `done` |
 
 ## 9. เอกสารที่อัปเดต (R4)
-- [x] spec F-000 (log)  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md (ตอน done)
+- [x] spec F-000 (log)  - [x] PLAN.md  - [x] features/README.md  - [x] reports/README.md
