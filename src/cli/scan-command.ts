@@ -89,7 +89,9 @@ function print(result: ScanResult, json: boolean, ctx: CommandContext): number {
   }
   if (result.truncated !== false) {
     ctx.io.err(
-      `webhub: the scan stopped early (limit: ${result.truncated.reason}); results are partial`,
+      `webhub: the scan stopped early (limit: ${result.truncated.reason}${
+        result.truncated.root === undefined ? "" : ` in ${sanitize(result.truncated.root)}`
+      }); results are partial`,
     );
   }
   for (const p of result.problems) ctx.io.err(`  ${sanitize(p.file)}: ${sanitize(p.message)}`);

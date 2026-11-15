@@ -46,7 +46,8 @@
 - กัน TOCTOU (folder ถูกสลับเป็น junction ระหว่าง `lstat` กับ `opendir`): หลังเปิด `realpath` ต้องเท่ากับ path ที่คาด และอยู่ใน root → ไม่ตรง = ข้าม + `skipped: changed`
 - ไม่ลง: ชื่อใน config `ignore` (ไม่สนตัวพิมพ์) และ `node_modules`, `.git`, `.hg`, `.svn`, `vendor`, `.venv`, `venv`, `env`, `__pycache__`, `target`, `dist`, `build`, `.next`, `.nuxt`, `.output`, `.svelte-kit`, `coverage`, `.cache`, `.turbo`, `bin`, `obj`, `Library`, folder ที่ขึ้นต้นด้วย `.` (ยกเว้นอ่านไฟล์ marker ระดับ project), `$RECYCLE.BIN`, `System Volume Information`
 - folder เป็น candidate เมื่อมี marker ของ profile ใด ๆ หรือ marker ทั่วไป (`package.json`, `index.html`, `compose*.y(a)ml` / `docker-compose*.y(a)ml`, `Dockerfile`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, `manage.py`, `composer.json`, `Gemfile`, marker ไม่ใช่เว็บ §6.3) → ยังเดินลงต่อเพื่อหา monorepo / project ซ้อน (ภายในความลึกรวม); Unity: folder `ProjectSettings/` ก็นับเป็น marker
-- ขีดจำกัดรวมต่อ scan: folder ≤ 20 000, อ่านไฟล์รวม ≤ 64 MB, ไฟล์เดียว ≤ 256 KB (manifest), เวลา ≤ 60 วิ → เกิน = หยุด, `truncated: true` + เหตุผล (ผลที่ได้ถึงตอนนั้นยังใช้ได้)
+- ขีดจำกัดรวมต่อ scan: folder ≤ 20 000, อ่านไฟล์รวม ≤ 64 MB, ไฟล์เดียว ≤ 256 KB (manifest), เวลา ≤ 60 วิ → เกิน = หยุด, `truncated` + เหตุผล (+ `root` ที่ถูกตัด) — ผลที่ได้ถึงตอนนั้นยังใช้ได้: folder ที่เจอแล้วถูก detect ต่อด้วยโควตาสำรอง (เวลา 1/6, byte / folder 1/8) ครั้งเดียว; หมดโควตาสำรอง → ที่เหลือเป็น `unknown` (review-1 C1)
+- แต่ละ root ได้ส่วนแบ่ง folder เท่ากันจากที่เหลือ (`เหลือ / root ที่ยังไม่เดิน`) — root กว้างหนึ่งอันไม่กิน root อื่น; เกินส่วนแบ่ง = หยุด root นั้น เดิน root ถัดไป (security-1 S3)
 - ชื่อ entry ที่มี control char / ไม่ใช่ UTF-16 ที่ถูกต้อง → ข้าม + `skipped: bad-name` (กัน log / terminal injection)
 
 ### 3.2 ProjectView บน disk (`src/scanner/view.ts`)
@@ -63,8 +64,8 @@
 4. `effectiveProfile` (variants ตาม deps) → `start` / `static` / `port` / `devServer` ของ service
 5. compose: หาไฟล์ `compose.y(a)ml`, `docker-compose.y(a)ml` (+ `*.override.*`) ที่ root ของ candidate → parse (YAML safe ของ F-005: ยอม anchor / merge `<<` ตาม Q6: alias ≤ 100, `maxAliasCount` 100, node cap เดียวกับ F-005; ข้อความ error ไม่ยกเนื้อไฟล์) → service ที่มี `build` = app, ที่มี `image` ของ DB/cache ที่รู้จัก = infra; volume ที่ mount `.` / `./…` เข้า app = mount source
 6. runner ตาม §9 (ดู §1)
-7. monorepo: candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
-8. ซ้อน: fingerprint (§1) ของ candidate ซ้อนเท่ากับ candidate อื่น (ที่ไม่อยู่ใต้ตัวมัน) → `duplicate`; ไม่ตรง: `site` ที่ไม่ใช่ static → candidate ปกติ; `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่)
+7. monorepo (compose ที่ folder แม่ — `build: ./frontend` — เป็นตัวกำหนด runner / `compose` ก่อน, review-1 C4): candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
+8. ซ้อน: `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่) — เช็คก่อน duplicate (review-1 C3); `site` ที่ไม่ใช่ static: fingerprint (§1) เท่ากับ candidate ที่แสดงอยู่และไม่ใช่ duplicate (ไม่ซ้อนกัน) → `duplicate`, ไม่ตรง → candidate ปกติ
 9. port / via / publicDir / runtime hint ตาม §1 (ไม่เจอ port → `port` ของ profile, source `profile <id>`)
 10. ชื่อ: site ได้ชื่อเปล่าก่อน, duplicate / อื่น ๆ ได้ `-2`, `-3` (เรียงตาม path)
 
@@ -74,7 +75,7 @@ interface ScanResult {
   schemaVersion: 1;
   scanId: string;               // random 16 hex
   startedAt: string; finishedAt: string;
-  truncated: false | { reason: "time" | "folders" | "bytes" | "candidates" };
+  truncated: false | { reason: "time" | "folders" | "bytes" | "candidates"; root?: string };
   roots: { path: string; status: "ok" | "missing" | "not-a-folder" | "link" | "no-access" | "inside-home" }[];
   candidates: Candidate[];      // เรียงตาม path
   skipped: { path: string; reason: "link" | "too-many-entries" | "changed" | "bad-name" | "no-access" }[]; // ≤ 500 (bad-name: path ของ folder แม่ ไม่ใช่ชื่อแปลก)
@@ -104,6 +105,8 @@ interface Candidate {
 - ค่า string ทุกตัวที่มาจาก project (ชื่อ, เหตุผล, path) ถูก sanitize ตอนแสดงใน CLI (F-004) และ escape ใน dashboard; ใน JSON เก็บตามจริง
 - **ไม่เก็บค่า `.env`** นอกจากเลข port ของ key `PORT` / `*_PORT` (Q5); `.env*` อ่านครั้งเดียวไม่เข้า cache ของ view (`readOnce`) — ไฟล์: `.env`, `.env.local`, `.env.development`, `.env.development.local`
 - ขนาดไฟล์ ≤ 5 MB (ขีดของ store) → candidate ≤ 2 000, เกิน = `truncated`
+- ข้อความจาก project ถูกตัดตามขีดของ schema ตอนสร้าง (ชื่อไฟล์ในข้อความ ≤ 60, reason ≤ 400, notWeb ≤ 200, ชื่อ + `-N` ≤ 40); candidate ที่ยังผิด schema → ตัดทิ้ง + problem; ผลทั้งก้อนผ่าน `ScanResult.parse` ก่อนบันทึก / ส่ง (security-1 S2)
+- Dockerfile อ่าน ≤ 64 KB, จับ `EXPOSE` / `FROM` ทีละบรรทัด (`[ \t]` ไม่ใช่ `\s`, ไม่มี flag `m`) — regex หลายบรรทัดเป็น O(n²) (security-1 S1)
 
 ### 3.5 Interface
 - lib: `scan(paths, { scanRoots, maxDepth?, ignore?, scanId?, signal?, limits?, onProgress? }): Promise<ScanResult>` — limit → ผลบางส่วน + `truncated`; abort → throw
@@ -177,7 +180,8 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
-| 1 | [test-1](../reports/F-006/test-1.md) 35/35 (+ ชุดเต็ม: เทสเดิมล่มเพราะโหลดเครื่อง — develop ล่มแบบเดียวกัน) | | | |
+| 1 | [test-1](../reports/F-006/test-1.md) 35/35 (+ ชุดเต็ม: เทสเดิมล่มเพราะโหลดเครื่อง — develop ล่มแบบเดียวกัน) | [review-1](../reports/F-006/review-1.md) FAIL 4 major | [security-1](../reports/F-006/security-1.md) FAIL 1 critical + 2 major | แก้ S1, C1/S3, C2/S2, C3, C4 |
+| 2 | [test-2](../reports/F-006/test-2.md) 40/40 | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §9, §12, §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md

@@ -15,7 +15,7 @@ import {
   requiresPython,
 } from "../../src/scanner/deps.js";
 import { Budget, badName, DEFAULT_LIMITS, listDir, readSmall } from "../../src/scanner/fsread.js";
-import { envPorts, exposePort, scriptPort, vitePort } from "../../src/scanner/hints.js";
+import { envPorts, exposePort, fromImage, scriptPort, vitePort } from "../../src/scanner/hints.js";
 import { scan, slug } from "../../src/scanner/scan.js";
 import { ScanResult } from "../../src/scanner/schema.js";
 import { tempHome } from "../helpers/home.js";
@@ -119,6 +119,19 @@ describe("hints", () => {
     expect(vitePort("export default { server: { port: env.PORT } }")).toBeUndefined();
     expect(vitePort("export default { preview: { port: 1 } }")).toBeUndefined();
     expect(exposePort("FROM node\nEXPOSE 8080/tcp\n")).toBe(8080);
+    expect(exposePort("FROM node\r\n  EXPOSE 3000\r\n")).toBe(3000);
+    expect(fromImage("# c\nFROM --platform=linux/amd64 node:22-alpine AS b\n")).toBe(
+      "node:22-alpine",
+    );
+  });
+
+  it("Dockerfile regexes stay linear on a file of newlines (security-1 S1)", () => {
+    for (const text of ["\n".repeat(262_144), " \n".repeat(131_072), "\t".repeat(262_144)]) {
+      const t0 = performance.now();
+      exposePort(text);
+      fromImage(text);
+      expect(performance.now() - t0).toBeLessThan(200);
+    }
   });
 
   it("vite regex stays linear on hostile input", () => {
@@ -291,8 +304,21 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       expect(ign.candidates.map((c) => c.path)).toEqual([join(dir, "a", "b")]);
 
       const tr = await scan(h.paths, { scanRoots: [dir], limits: { folders: 2 } });
-      expect(tr.truncated).toEqual({ reason: "folders" });
+      expect(tr.truncated).toEqual({ reason: "folders", root: dir });
       expect(ScanResult.safeParse(tr).success).toBe(true);
+      // what was found before the limit is still detected (review-1 C1)
+      const part = await scan(h.paths, { scanRoots: [dir], limits: { folders: 4 } });
+      expect(part.truncated).toEqual({ reason: "folders", root: dir });
+      expect(part.candidates.map((c) => [c.path, c.kind])).toEqual([[join(dir, "a", "b"), "site"]]);
+      // out of time while walking: found folders are still detected with the reserve
+      let t = 0;
+      const timed = await scan(h.paths, {
+        scanRoots: [dir],
+        limits: { timeMs: 600 },
+        now: () => (t += 100),
+      });
+      expect(timed.truncated).toMatchObject({ reason: "time" });
+      expect(ScanResult.safeParse(timed).success).toBe(true);
 
       const ac = new AbortController();
       ac.abort();
@@ -320,6 +346,62 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
         "inside-home",
       ]);
       expect(r.candidates).toEqual([]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("one wide root does not starve the others (security-1 S3)", async () => {
+    const h = await tempHome();
+    try {
+      const wide = join(dir, "wide");
+      for (let i = 0; i < 40; i++) mkdirSync(join(wide, `d${i}`), { recursive: true });
+      const good = join(dir, "good");
+      mkdirSync(good);
+      writeFileSync(join(good, "index.html"), "<p>hi</p>");
+      const r = await scan(h.paths, { scanRoots: [wide, good], limits: { folders: 20 } });
+      expect(r.truncated).toEqual({ reason: "folders", root: wide });
+      expect(r.candidates.map((c) => c.path)).toEqual([good]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("hostile content: long names, newline Dockerfile — result stays valid and fast", async () => {
+    const h = await tempHome();
+    try {
+      const p = join(dir, "p");
+      mkdirSync(p);
+      writeFileSync(join(p, `${"a".repeat(200)}.csproj`), "<Project/>");
+      const q = join(dir, "q");
+      mkdirSync(q);
+      writeFileSync(join(q, "package.json"), '{"dependencies":{"express":"4"}}');
+      writeFileSync(join(q, "Dockerfile"), "\n".repeat(262_144));
+      const t0 = performance.now();
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      expect(performance.now() - t0).toBeLessThan(10_000);
+      expect(ScanResult.safeParse(r).success).toBe(true);
+      expect(r.candidates.map((c) => c.kind)).toEqual(["not-web", "site"]);
+      expect(r.candidates[0]?.notWeb[0]?.length).toBeLessThanOrEqual(200);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("public/ folders with the same boilerplate are not duplicates (review-1 C3)", async () => {
+    const h = await tempHome();
+    try {
+      for (const n of ["shop", "blog"]) {
+        mkdirSync(join(dir, n, "public"), { recursive: true });
+        writeFileSync(join(dir, n, "package.json"), `{"name":"${n}","dependencies":{"vite":"7"}}`);
+        writeFileSync(join(dir, n, "public", "index.html"), "<div id=root></div>");
+        writeFileSync(join(dir, n, "public", "manifest.json"), '{"name":"app"}');
+      }
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      expect(r.candidates.map((c) => [c.name, c.kind])).toEqual([
+        ["blog", "site"],
+        ["shop", "site"],
+      ]);
     } finally {
       await h.cleanup();
     }

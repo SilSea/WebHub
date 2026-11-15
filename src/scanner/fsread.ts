@@ -55,7 +55,10 @@ export class Truncated extends Error {
 export class Budget {
   folders = 0;
   bytes = 0;
-  readonly #deadline: number;
+  #deadline: number;
+  #maxBytes: number;
+  #maxFolders: number;
+  #reserved = false;
 
   constructor(
     readonly limits: ScanLimits,
@@ -63,6 +66,21 @@ export class Budget {
     readonly now: () => number = Date.now,
   ) {
     this.#deadline = now() + limits.timeMs;
+    this.#maxBytes = limits.bytes;
+    this.#maxFolders = limits.folders;
+  }
+
+  /**
+   * Once per scan, after the walk was cut short: extra time (1/6), bytes and folders (1/8) so the folders
+   * already found are still detected (review-1 C1 / security-1 S3).
+   */
+  reserve(): void {
+    if (this.#reserved) return;
+    this.#reserved = true;
+    this.#deadline = Math.max(this.#deadline, this.now()) + Math.ceil(this.limits.timeMs / 6);
+    this.#maxBytes = Math.max(this.#maxBytes, this.bytes) + Math.ceil(this.limits.bytes / 8);
+    this.#maxFolders =
+      Math.max(this.#maxFolders, this.folders) + Math.ceil(this.limits.folders / 8);
   }
 
   check(): void {
@@ -72,13 +90,13 @@ export class Budget {
 
   folder(): void {
     this.check();
-    if (++this.folders > this.limits.folders) throw new Truncated("folders");
+    if (++this.folders > this.#maxFolders) throw new Truncated("folders");
   }
 
   /** Bytes that may still be read by one file (≤ fileBytes). */
   allowance(max: number): number {
     this.check();
-    const left = this.limits.bytes - this.bytes;
+    const left = this.#maxBytes - this.bytes;
     if (left <= 0) throw new Truncated("bytes");
     return Math.min(max, this.limits.fileBytes, left);
   }

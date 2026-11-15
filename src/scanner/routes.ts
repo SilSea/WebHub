@@ -12,7 +12,7 @@ import type { RouteRegistrar } from "../server/api.js";
 import { readDoc, writeDoc } from "../store/json-store.js";
 import type { Lock } from "../store/lock.js";
 import { type ScanOptions, scan } from "./scan.js";
-import { type ScanResult, scanSpec } from "./schema.js";
+import { ScanResult, scanSpec } from "./schema.js";
 
 export const scanFile = (paths: Paths) => join(paths.data, "scan.json");
 
@@ -91,8 +91,10 @@ export function scanRoutes(paths: Paths, lock: Lock, opts: ScanRouteOptions): Ro
           },
         });
         controller.signal.throwIfAborted();
-        await writeDoc(lock, scanFile(paths), result, { keepBackup: false });
-        last = result;
+        // never save or serve a result the readers (CLI, F-007) would refuse (security-1 S2)
+        const checked = ScanResult.parse(result);
+        await writeDoc(lock, scanFile(paths), checked, { keepBackup: false });
+        last = checked;
         lastLoaded = true;
         lastError = undefined;
       } catch (err) {

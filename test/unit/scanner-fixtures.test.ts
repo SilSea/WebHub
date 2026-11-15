@@ -120,6 +120,20 @@ describe("multi-folder fixtures", { timeout: 30_000 }, () => {
     expect(c?.services.backend).toMatchObject({ cwd: "backend", profile: "express" });
   });
 
+  it("compose at the monorepo root → runner compose, files from the parent (review-1 C4)", async () => {
+    const { rows } = await scanFixture("monorepo-compose");
+    expect(rows.map((c) => c.rel)).toEqual(["."]);
+    const c = rows[0];
+    expect(c?.runner).toBe("compose");
+    expect(c?.compose).toEqual({
+      files: ["docker-compose.yml"],
+      app: ["web", "api"],
+      infra: ["db"],
+      mountsSource: false,
+    });
+    expect(Object.keys(c?.services ?? {}).sort()).toEqual(["backend", "frontend"]);
+  });
+
   it("a copy inside another project → duplicate of the original; names prefer sites", async () => {
     const { rows } = await scanFixture("nested-duplicate");
     const by = Object.fromEntries(rows.map((c) => [c.rel, c]));

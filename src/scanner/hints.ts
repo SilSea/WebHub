@@ -62,10 +62,38 @@ export function vitePort(text: string): number | undefined {
   return portNum(m?.[1]);
 }
 
+/** Max Dockerfile text read for hints. */
+export const DOCKERFILE_BYTES = 64 * 1024;
+
+/**
+ * First match of `re` on one line of `text`. Line by line on purpose: a multiline `^\s*` regex
+ * re-scans the rest of the text from every line start — quadratic on a file of newlines
+ * (security-1 S1). `re` must use `[ \t]`, never `\s`, and have no `m` flag.
+ */
+function firstLineMatch(text: string, re: RegExp): RegExpExecArray | undefined {
+  for (const line of text.slice(0, DOCKERFILE_BYTES).split("\n", 20_000)) {
+    const m = re.exec(line.length > 1000 ? line.slice(0, 1000) : line);
+    if (m !== null) return m;
+  }
+  return undefined;
+}
+
 /** First `EXPOSE n` of a Dockerfile. */
 export function exposePort(text: string): number | undefined {
-  return portNum(/^\s*EXPOSE\s+(\d{2,5})\b/im.exec(text.slice(0, 256 * 1024))?.[1]);
+  return portNum(firstLineMatch(text, /^[ \t]*EXPOSE[ \t]+(\d{2,5})\b/i)?.[1]);
 }
+
+/** Image of the first `FROM` of a Dockerfile. */
+export function fromImage(text: string): string | undefined {
+  return firstLineMatch(
+    text,
+    /^[ \t]*FROM[ \t]+(?:--platform=[^ \t]{1,60}[ \t]+)?([^ \t\r]{1,120})/i,
+  )?.[1];
+}
+
+/** `s` cut to `max` characters (strings built from project content, security-1 S2). */
+export const clip = (s: string, max: number): string =>
+  s.length <= max ? s : `${s.slice(0, Math.max(0, max - 1))}…`;
 
 const VITE_CONFIGS = ["ts", "js", "mjs", "mts", "cjs", "cts"].map((e) => `vite.config.${e}`);
 
@@ -111,7 +139,7 @@ export async function portHint(
       return { value: p.target, via: "fixed", source: `compose ${s.name} ${p.text}` };
     }
   }
-  const docker = await view.text(at("Dockerfile"));
+  const docker = await view.text(at("Dockerfile"), DOCKERFILE_BYTES);
   const e = docker === undefined ? undefined : exposePort(docker);
   return e === undefined ? undefined : { value: e, via: "fixed", source: "Dockerfile EXPOSE" };
 }
@@ -154,11 +182,8 @@ export async function runtimeHints(view: DiskView, cwd: string): Promise<Runtime
   const rp = versionText(requiresPython(await view.text(at("pyproject.toml"))));
   if (rp !== undefined)
     out.push({ lang: "python", hint: rp, source: "pyproject.toml requires-python" });
-  const docker = await view.text(at("Dockerfile"));
-  const from =
-    docker === undefined
-      ? undefined
-      : /^\s*FROM\s+(?:--platform=\S{1,60}\s+)?(\S{1,120})/im.exec(docker)?.[1];
+  const docker = await view.text(at("Dockerfile"), DOCKERFILE_BYTES);
+  const from = docker === undefined ? undefined : fromImage(docker);
   const image = versionText(from, 120);
   if (image !== undefined && /^[a-z0-9][a-z0-9._/:@-]*$/.test(image)) {
     out.push({ lang: "docker", hint: `${image} (hint)`, source: "Dockerfile FROM" });
@@ -193,7 +218,7 @@ export async function notWebReasons(view: DiskView): Promise<string[]> {
   for (const n of names.filter((x) => /\.csproj$/i.test(x)).slice(0, 4)) {
     const t = await view.text(n, 64 * 1024);
     if (t !== undefined && !/Microsoft\.AspNetCore|Microsoft\.NET\.Sdk\.Web/.test(t)) {
-      out.push(`.NET project without ASP.NET Core (${n})`);
+      out.push(`.NET project without ASP.NET Core (${clip(n, 60)})`);
       break;
     }
   }

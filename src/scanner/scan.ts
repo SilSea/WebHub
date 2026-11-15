@@ -27,8 +27,8 @@ import {
   samePath,
   Truncated,
 } from "./fsread.js";
-import { notWebReasons, portHint, publicDir, runtimeHints } from "./hints.js";
-import { type Candidate, SCAN_SCHEMA_VERSION, type ScanResult } from "./schema.js";
+import { clip, notWebReasons, portHint, publicDir, runtimeHints } from "./hints.js";
+import { Candidate, SCAN_SCHEMA_VERSION, type ScanResult } from "./schema.js";
 import { DiskView } from "./view.js";
 
 export const WEB_SCORE = 50;
@@ -145,9 +145,13 @@ const keyOf = (abs: string) =>
     .digest("hex")
     .slice(0, 16);
 
-/** Read-only walk of one root (BFS, depth-limited). */
+/**
+ * Read-only walk of one root (BFS, depth-limited). At most `share` folders: one wide root cannot
+ * use up the folder limit of the others (security-1 S3).
+ */
 async function walk(
   root: string,
+  share: number,
   budget: Budget,
   skipDirs: ReadonlySet<string>,
   found: Found[],
@@ -158,7 +162,9 @@ async function walk(
   const skip = (path: string, reason: ScanResult["skipped"][number]["reason"]) => {
     if (skipped.length < budget.limits.skipped) skipped.push({ path, reason });
   };
+  let walked = 0;
   while (queue.length > 0) {
+    if (++walked > share) throw new Truncated("folders");
     const { abs, depth } = queue.shift() as { abs: string; depth: number };
     const r = await listDir(abs, root, budget);
     onFolder();
@@ -197,7 +203,11 @@ async function fingerprint(view: DiskView): Promise<string> {
   return any ? h.digest("hex") : "";
 }
 
-type Draft = Omit<Candidate, "name"> & { base: string };
+type Draft = Omit<Candidate, "name"> & {
+  base: string;
+  /** Compose files of the folder itself, whatever its kind (a compose-only monorepo parent). */
+  ownCompose?: { files: string[]; services: ComposeService[] };
+};
 
 async function composeOf(
   view: DiskView,
@@ -263,10 +273,11 @@ async function detect(
     kind,
     score,
     alternatives: results.slice(1, 6).map((x) => ({ profile: x.p.profile.id, score: x.r.score })),
-    reasons: best?.r.reasons.slice(0, 100) ?? [],
-    notWeb,
+    reasons: (best?.r.reasons.slice(0, 100) ?? []).map((r) => clip(r, 400)),
+    notWeb: notWeb.slice(0, 20).map((r) => clip(r, 200)),
     services: {},
     fingerprint: await fingerprint(view),
+    ...(compose.files.length > 0 ? { ownCompose: compose } : {}),
   };
   if (best === undefined) return draft;
   draft.profile = best.p.profile.id;
@@ -304,6 +315,20 @@ async function detect(
   return draft;
 }
 
+/** A found folder that was not looked at (the scan ran out of time / bytes first). */
+const unread = (f: Found): Draft => ({
+  key: keyOf(f.abs),
+  base: slug(f.abs.slice(f.abs.lastIndexOf(sep) + 1)),
+  path: f.abs,
+  kind: "unknown",
+  score: 0,
+  alternatives: [],
+  reasons: [],
+  notWeb: [],
+  services: {},
+  fingerprint: "",
+});
+
 const RUNNER_RANK = { static: 0, native: 1, hybrid: 2, compose: 3 } as const;
 
 /**
@@ -339,10 +364,33 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
       if (s !== undefined) services[svcName] = { ...s, cwd: name(d) };
       removed.add(d);
     }
-    const runner = parts
-      .map((d) => d.runner ?? "native")
-      .reduce((a, b) => (RUNNER_RANK[b] > RUNNER_RANK[a] ? b : a));
+    // compose at the parent (`build: ./frontend`, …) runs the whole thing (review-1 C4)
+    const parentCompose = own?.ownCompose;
+    const parentRunner =
+      parentCompose === undefined ? undefined : composeRunner(parentCompose.services);
+    const runner = [
+      ...parts.map((d) => d.runner ?? "native"),
+      ...(parentRunner ? [parentRunner] : []),
+    ].reduce((a, b) => (RUNNER_RANK[b] > RUNNER_RANK[a] ? b : a));
     const compose = parts.filter((d) => d.compose !== undefined);
+    const composeParts = [
+      ...(parentCompose === undefined
+        ? []
+        : [
+            {
+              files: parentCompose.files,
+              app: parentCompose.services.filter((s) => !s.infra).map((s) => s.name),
+              infra: parentCompose.services.filter((s) => s.infra).map((s) => s.name),
+              mountsSource: parentCompose.services.some((s) => !s.infra && s.mountsSource),
+            },
+          ]),
+      ...compose.map((d) => ({
+        files: (d.compose?.files ?? []).map((f) => `${name(d)}/${f}`),
+        app: d.compose?.app ?? [],
+        infra: d.compose?.infra ?? [],
+        mountsSource: d.compose?.mountsSource === true,
+      })),
+    ];
     if (own !== undefined) removed.add(own);
     added.push({
       key: keyOf(parent),
@@ -352,17 +400,22 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
       score: Math.max(...parts.map((d) => d.score)),
       profile: parts[0]?.profile,
       alternatives: [],
-      reasons: parts.flatMap((d) => d.reasons.map((r) => `${name(d)}: ${r}`)).slice(0, 100),
+      reasons: parts
+        .flatMap((d) => d.reasons.map((r) => clip(`${clip(name(d), 60)}: ${r}`, 400)))
+        .slice(0, 100),
       notWeb: [],
       runner,
-      ...(compose.length === 0
+      ...(composeParts.length === 0
         ? {}
         : {
             compose: {
-              files: compose.flatMap((d) => (d.compose?.files ?? []).map((f) => `${name(d)}/${f}`)),
-              app: compose.flatMap((d) => d.compose?.app ?? []),
-              infra: compose.flatMap((d) => d.compose?.infra ?? []),
-              mountsSource: compose.some((d) => d.compose?.mountsSource === true),
+              files: composeParts
+                .flatMap((c) => c.files)
+                .slice(0, 32)
+                .map((f) => clip(f, 400)),
+              app: composeParts.flatMap((c) => c.app).slice(0, 200),
+              infra: composeParts.flatMap((c) => c.infra).slice(0, 200),
+              mountsSource: composeParts.some((c) => c.mountsSource),
             },
           }),
       services,
@@ -380,25 +433,28 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
 function nested(drafts: Draft[]): Draft[] {
   const sorted = [...drafts].sort((a, b) => a.path.length - b.path.length);
   const out: Draft[] = [];
+  const inner: Draft[] = [];
   for (const d of sorted) {
     const parent = out.find((p) => p.path !== d.path && isInside(p.path, d.path));
-    if (parent === undefined) {
-      out.push(d);
-      continue;
-    }
+    (parent === undefined ? out : inner).push(d);
+  }
+  for (const d of inner) {
+    // only a nested folder that would be shown on its own can be a copy: a `public/` with the
+    // same boilerplate index.html in two projects is part of each, not a duplicate (review-1 C3)
+    if (d.kind !== "site") continue;
+    if (d.profile === "static" || d.profile === "static-spa") continue;
+    // the original is a shown, non-duplicate candidate outside this folder (review-1 C5)
     const original =
       d.fingerprint === ""
         ? undefined
-        : sorted.find(
-            (o) => o !== d && o.fingerprint === d.fingerprint && !isInside(d.path, o.path),
+        : out.find(
+            (o) =>
+              o.kind !== "duplicate" &&
+              o.fingerprint === d.fingerprint &&
+              !isInside(d.path, o.path) &&
+              !isInside(o.path, d.path),
           );
-    if (original !== undefined) {
-      out.push({ ...d, kind: "duplicate", duplicateOf: original.key });
-      continue;
-    }
-    if (d.kind !== "site") continue;
-    if (d.profile === "static" || d.profile === "static-spa") continue;
-    out.push(d);
+    out.push(original === undefined ? d : { ...d, kind: "duplicate", duplicateOf: original.key });
   }
   return out;
 }
@@ -410,9 +466,13 @@ function name(drafts: Draft[]): Candidate[] {
   const rank = (d: Draft) => (d.kind === "site" ? 0 : 1);
   return drafts
     .sort((a, b) => rank(a) - rank(b) || a.path.localeCompare(b.path))
-    .map(({ base, ...d }) => {
+    .map(({ base, ownCompose: _, ...d }) => {
       let n = base;
-      for (let i = 2; used.has(n); i++) n = `${base.slice(0, 36).replace(/-+$/, "")}-${i}`;
+      for (let i = 2; used.has(n); i++) {
+        // ≤ 40 with any suffix length (security-1 S2: `-1000` made 41)
+        const suffix = `-${i}`;
+        n = `${base.slice(0, 40 - suffix.length).replace(/-+$/, "") || "site"}${suffix}`;
+      }
       used.add(n);
       return { ...d, name: n };
     })
@@ -468,23 +528,53 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
   const found: Found[] = [];
   const drafts: Draft[] = [];
   const progress = () => opts.onProgress?.({ folders: budget.folders, candidates: found.length });
-  try {
-    for (const root of opts.scanRoots.slice(0, 100)) {
-      const r = await rootStatus(root, paths.home);
-      result.roots.push({ path: root, status: r.status });
-      if (r.real !== undefined) {
-        await walk(r.real, budget, skipDirs, found, result.skipped, progress);
+  const cut = (err: unknown, root?: string) => {
+    if (!(err instanceof Truncated)) throw err;
+    if (result.truncated === false) {
+      result.truncated = { reason: err.reason, ...(root === undefined ? {} : { root }) };
+    }
+  };
+  // walk: each root gets an equal share of what is left of the folder limit; a limit ends the
+  // walk of that root (folders) or of all roots (time / candidates) — what was found is kept
+  const roots = opts.scanRoots.slice(0, 100);
+  let walking = true;
+  for (const [i, root] of roots.entries()) {
+    const r = await rootStatus(root, paths.home);
+    result.roots.push({ path: root, status: r.status });
+    if (r.real === undefined || !walking) continue;
+    const share = Math.max(1, Math.floor((limits.folders - budget.folders) / (roots.length - i)));
+    try {
+      await walk(r.real, share, budget, skipDirs, found, result.skipped, progress);
+    } catch (err) {
+      cut(err, root);
+      if ((err as Truncated).reason !== "folders") walking = false;
+    }
+  }
+  // detect what was found, with a reserve when the walk was cut short (review-1 C1)
+  if (result.truncated !== false) budget.reserve();
+  let detecting = true;
+  for (const f of found) {
+    if (detecting) {
+      try {
+        drafts.push(await detect(f, loaded.profiles, budget, result.problems));
+        progress();
+        continue;
+      } catch (err) {
+        cut(err);
+        detecting = false;
       }
     }
-    for (const f of found) {
-      drafts.push(await detect(f, loaded.profiles, budget, result.problems));
-      progress();
-    }
-  } catch (err) {
-    if (!(err instanceof Truncated)) throw err;
-    result.truncated = { reason: err.reason };
+    // out of time / bytes: still listed, as not looked at
+    drafts.push(unread(f));
   }
-  result.candidates = name(nested(mergeMonorepos(drafts)));
+  // one candidate with data out of bounds never fails the whole scan (security-1 S2)
+  result.candidates = name(nested(mergeMonorepos(drafts))).filter((c) => {
+    if (Candidate.safeParse(c).success) return true;
+    if (result.problems.length < 500) {
+      result.problems.push({ file: clip(c.path, 4096), message: "left out: unexpected data" });
+    }
+    return false;
+  });
   result.finishedAt = new Date().toISOString();
   return result;
 }
