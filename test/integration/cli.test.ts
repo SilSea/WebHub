@@ -177,14 +177,24 @@ describe("webhub daemon (F-004)", { timeout: 120_000 }, () => {
     }).listen({ host: "127.0.0.1", port });
     await new Promise((r) => squatter.once("listening", r));
     try {
+      const s0 = Date.now();
       const status = await cli(["daemon", "status"], env);
+      const statusMs = Date.now() - s0;
       expect(status.code).toBe(1);
       expect(status.err).toContain("not the webhub daemon");
       const t0 = Date.now();
       const stop = await cli(["daemon", "stop", "--force"], env);
+      const stopMs = Date.now() - t0;
       expect(stop.code).toBe(1);
       expect(stop.err).toContain("not the webhub daemon");
-      expect(Date.now() - t0).toBeLessThan(8_000); // no 10 s stop wait
+      const s1 = Date.now();
+      expect((await cli(["daemon", "status"], env)).code).toBe(1);
+      const statusAfterMs = Date.now() - s1;
+      // no 10 s stop wait: `status` does the same work (spawn, proof, port owners) without any
+      // stop, so it is the baseline under whatever load the machine has; measured before and
+      // after `stop`, 4 s of headroom against the 10 s wait (CR-004, review-1 M1). The
+      // load-independent guard is the unit test "daemon dead, program on the port" (cli-stop).
+      expect(stopMs).toBeLessThan(Math.max(statusMs, statusAfterMs) + 6_000);
       expect(seen.length).toBeGreaterThan(0);
       for (const hd of seen) expect(hd.authorization).toBeUndefined();
     } finally {

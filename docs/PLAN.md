@@ -15,12 +15,15 @@
 | 4a | CR-002 test lock race ของ F-001 (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-002-lock-race-test.md) |
 | 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
+| 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-004-flaky-f004-tests.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
 **ติดตามต่อ:** F-001 lock race test (พบระหว่าง W3 ของ F-003) → ปิดแล้วด้วย [CR-002](changes/CR-002-lock-race-test.md): โค้ด lock ถูก, test ตั้งสมมติฐานผิด (ผู้ชนะต่อกัน = ถูกต้อง)
 
 **ติดตามต่อ (CR-003 security-1 AA3):** audit ของ F-001 (`ensureHome` บน Windows) อาจข้าม entry ชื่อแปลก (`CON`, ชื่อลงท้าย `.`/ช่องว่าง, ADS) โดยไม่รายงาน → สืบแบบ read-only ก่อน แล้วเสนอ CR ถ้าจริง (F-001 `done`, R1)
+
+**ติดตามต่อ (CR-004 review-1 N2):** `test/unit/cli-stop.test.ts` "daemon dead, program on the port" ใช้ขอบเวลา `< 3_000` ms — อาจล่มตอนเครื่องโหลดแบบเดียวกับ CR-004 → ถ้าเกิด: เปลี่ยนเป็นนับจำนวน `process.info` ผ่าน `f.setOnInfo` (ต้องมี CR, F-004 `done`)
 
 ---
 
@@ -125,4 +128,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-003 และ F-004 `done` (2026-11-14) → W1 ของ F-005
+CR-003 และ F-004 `done` (2026-11-14); F-005 `review` (review-2 PASS, L1–L6 แก้แล้ว) → CR-004 (เทส F-004) → merge F-005 → W1 ของ F-006
