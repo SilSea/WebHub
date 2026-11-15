@@ -18,7 +18,7 @@
 | 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-004-flaky-f004-tests.md) |
 | 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `done` | [spec](features/F-005-profiles.md) |
 | 7a | CR-005 เทส F-000 นับ temp dir กลาง ชนกับเทสขนาน (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-005-fixture-tempdir-race.md) |
-| 8 | F-006 Scanner + detector (แกน: walk, profile, score, not-web, runner, monorepo, duplicate, port/via, publicDir, runtime hint, `data/scan.json`, `/api/v1/scan`, `webhub scan`) | `planned` | [spec](features/F-006-scanner.md) |
+| 8 | F-006 Scanner + detector (แกน: walk, profile, score, not-web, runner, monorepo, duplicate, port/via, publicDir, runtime hint, `data/scan.json`, `/api/v1/scan`, `webhub scan`) | `done` | [spec](features/F-006-scanner.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -27,6 +27,8 @@
 **ติดตามต่อ (CR-003 security-1 AA3):** audit ของ F-001 (`ensureHome` บน Windows) อาจข้าม entry ชื่อแปลก (`CON`, ชื่อลงท้าย `.`/ช่องว่าง, ADS) โดยไม่รายงาน → สืบแบบ read-only ก่อน แล้วเสนอ CR ถ้าจริง (F-001 `done`, R1)
 
 **ติดตามต่อ (F-005):** (1) profile Python สำหรับ project pyproject-only (uv / poetry) — `fastapi` ตอนนี้ `requirements.txt` เท่านั้น (review-1 K2) → W1 item ใหม่; (2) เทส F-004 ล่มตอนเครื่องโหลด → ปิดแล้วด้วย [CR-004](changes/CR-004-flaky-f004-tests.md)
+
+**ติดตามต่อ (F-006, ผู้ใช้เลือก "แก้กลุ่มสำคัญ" 2026-11-15 — ที่เหลือ):** C8 rule เกิน 8 รอบ fill → ให้ไม่ match + problem; C10 / S7b junction สลับ folder กลางทาง + hard link (`nlink > 1`); C16 OneDrive placeholder (reparse point) ถูกนับเป็น link — ต้องทดสอบเครื่องจริง; C17 repo ที่มีแค่ `docs/index.html` → site ที่ repo + `publicDir: docs`; C18 เทสที่ขาด (CLI sanitize ESC บน Linux CI, exit 2, `.env` ผ่าน API / `--json`, 100k deps, junction swap, grep "ไม่มี write API / child_process"); S7c `realpath(home)` ก่อนเทียบ inside-home; C7 ส่วน fingerprint ที่ยังอ่านไฟล์ซ้ำ (lockfile ตัดออกแล้ว)
 
 **ติดตามต่อ (CR-004 review-1 N2):** `test/unit/cli-stop.test.ts` "daemon dead, program on the port" ใช้ขอบเวลา `< 3_000` ms — อาจล่มตอนเครื่องโหลดแบบเดียวกับ CR-004 → ถ้าเกิด: เปลี่ยนเป็นนับจำนวน `process.info` ผ่าน `f.setOnInfo` (ต้องมี CR, F-004 `done`)
 
@@ -82,7 +84,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
 | F-014 | Port Manager (ports.json, probe 3 ชั้น, apply/rollback) | §4.1–4.3 | expose default host | Windows excluded range |
-| F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น | ต้องมี internet |
+| F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น; runtime hint จาก F-006 เป็นข้อความไม่น่าไว้ใจ (มี `|` `<` `>` ได้) — ห้ามใส่ใน command line / shell, parse เป็น semver เอง (review-3 Q4) | ต้องมี internet |
 | F-016 | Env resolver + env sets + URL rewrite | §11.1–11.2 | secret ไม่ลง log | precedence ผิด |
 | F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; resolve executable เอง ไม่หาใน cwd ของ project, ห้าม `shell: true` บน POSIX, ตรวจ listener หลัง start ว่าอยู่ใน loopback (app ที่ไม่สน HOST — F-005 K11/S4/S8); route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
 | F-018 | Container runner พื้นฐาน | §7 | ไม่ privileged, mount ตามจำเป็น | — |

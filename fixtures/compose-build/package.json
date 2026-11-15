@@ -1,0 +1,6 @@
+{
+  "name": "compose-build",
+  "private": true,
+  "scripts": { "dev": "bun run --watch src/index.ts" },
+  "dependencies": { "elysia": "^1.2.0" }
+}

@@ -1,0 +1,12 @@
+# webhub fixture: compose at the monorepo root builds both folders (F-006 review-1 C4)
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "5174:5174"
+  api:
+    build: ./backend
+    ports:
+      - "3000:3000"
+  db:
+    image: postgres:17

@@ -1,0 +1,1 @@
+{ "manifest_version": 3, "name": "fixture extension", "version": "1.0", "action": { "default_popup": "index.html" } }
