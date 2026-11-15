@@ -9,7 +9,7 @@
 | F-002 | Platform layer (Windows) | MVP-1 | `done` | [spec](F-002-platform.md) | CR-001 | [test-5](../reports/F-002/test-5.md) |
 | F-003 | Daemon + API + auth | MVP-1 | `done` | [spec](F-003-daemon-api-auth.md) | CR-003 | [test-9](../reports/F-003/test-9.md) |
 | F-004 | CLI client | MVP-1 | `done` | [spec](F-004-cli-client.md) | CR-003, CR-004 | — |
-| F-005 | Profile loader + built-in profiles | MVP-1 | `todo` | — | — | — |
+| F-005 | Profile loader + built-in profiles | MVP-1 | `done` | [spec](F-005-profiles.md) | — | [test-3](../reports/F-005/test-3.md) |
 | F-006 | Scanner + detector | MVP-1 | `todo` | — | — | — |
 | F-007 | Site registry + approve/add | MVP-1 | `todo` | — | — | — |
 | F-008 | setup + doctor | MVP-1 | `todo` | — | — | — |

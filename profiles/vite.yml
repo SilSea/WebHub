@@ -1,0 +1,22 @@
+# Vite dev server; the binary is called directly with webhub's port (package.json untouched).
+schemaVersion: 1
+id: vite
+language: node
+detect:
+  all:
+    - { file: "package.json" }
+  any:
+    - { dep: "vite" }
+    - { file: "vite.config.*" }
+  score: 80
+runtime: { lang: node }
+start:
+  cmd: "vite --port {PORT} --host {HOST} --strictPort"
+port: { default: 5173, via: arg }
+host: { bind: "127.0.0.1" }
+# Host check in every maintained line (Vite 6, backported to 5.4.12 / 4.5.6 — CVE-2025-24010):
+# nginx sends Host localhost:<port> for every version (review-1 K5). Variants use the declared
+# lower bound (`^5.4.0` = 5.4.0), not the installed version, so they cannot tell 5.4.12 apart.
+devServer: { hostRewrite: true }
+health: { path: "/", timeout: 60 }
+container: { image: "node:22-slim", workdir: /app }

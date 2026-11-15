@@ -16,12 +16,15 @@
 | 5 | CR-003 daemon `--log-file` + จำกัดขนาด log (แก้ F-003) | `done` | [CR](changes/CR-003-daemon-log-file.md) |
 | 6 | F-004 CLI client + `webhub daemon start/stop/status/logs` | `done` | [spec](features/F-004-cli-client.md) |
 | 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-004-flaky-f004-tests.md) |
+| 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `done` | [spec](features/F-005-profiles.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
 **ติดตามต่อ:** F-001 lock race test (พบระหว่าง W3 ของ F-003) → ปิดแล้วด้วย [CR-002](changes/CR-002-lock-race-test.md): โค้ด lock ถูก, test ตั้งสมมติฐานผิด (ผู้ชนะต่อกัน = ถูกต้อง)
 
 **ติดตามต่อ (CR-003 security-1 AA3):** audit ของ F-001 (`ensureHome` บน Windows) อาจข้าม entry ชื่อแปลก (`CON`, ชื่อลงท้าย `.`/ช่องว่าง, ADS) โดยไม่รายงาน → สืบแบบ read-only ก่อน แล้วเสนอ CR ถ้าจริง (F-001 `done`, R1)
+
+**ติดตามต่อ (F-005):** (1) profile Python สำหรับ project pyproject-only (uv / poetry) — `fastapi` ตอนนี้ `requirements.txt` เท่านั้น (review-1 K2) → W1 item ใหม่; (2) เทส F-004 ล่มตอนเครื่องโหลด → ปิดแล้วด้วย [CR-004](changes/CR-004-flaky-f004-tests.md)
 
 **ติดตามต่อ (CR-004 review-1 N2):** `test/unit/cli-stop.test.ts` "daemon dead, program on the port" ใช้ขอบเวลา `< 3_000` ms — อาจล่มตอนเครื่องโหลดแบบเดียวกับ CR-004 → ถ้าเกิด: เปลี่ยนเป็นนับจำนวน `process.info` ผ่าน `f.setOnInfo` (ต้องมี CR, F-004 `done`)
 
@@ -57,9 +60,9 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-002 | Platform layer (Windows): ports, process, elevate, notify | §21.1 | `elevate()` แสดงสิ่งที่จะทำ, ไม่ต่อ string เข้า shell | PowerShell ช้า / เปลี่ยนตาม version Windows |
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
 | F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; รอ `auth.pid` = PID ที่ spawn (H16); log ของ daemon จำกัดขนาด**เป็น byte** (CR-003 — F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (security-8 Y2); `webhub ui` ย้ายไป F-009 (F-004 Q2) | — |
-| F-005 | Profile loader + JSON Schema + built-in (static, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
+| F-005 | Profile loader (YAML + zod) + built-in (static, static-spa, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
 | F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
-| F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval | — |
+| F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval: แสดง argv ที่ render แล้ว + executable ที่ resolve แล้ว, ผูกกับเนื้อหา profile ไม่ใช่แค่ id (F-005 S8) | — |
 | F-008 | `setup` wizard + `doctor` | §21.4 | — | — |
 
 ### MVP-2 — Routing
@@ -77,7 +80,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-014 | Port Manager (ports.json, probe 3 ชั้น, apply/rollback) | §4.1–4.3 | expose default host | Windows excluded range |
 | F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น | ต้องมี internet |
 | F-016 | Env resolver + env sets + URL rewrite | §11.1–11.2 | secret ไม่ลง log | precedence ผิด |
-| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
+| F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; resolve executable เอง ไม่หาใน cwd ของ project, ห้าม `shell: true` บน POSIX, ตรวจ listener หลัง start ว่าอยู่ใน loopback (app ที่ไม่สน HOST — F-005 K11/S4/S8); route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
 | F-018 | Container runner พื้นฐาน | §7 | ไม่ privileged, mount ตามจำเป็น | — |
 
 ### MVP-4 — Compose
@@ -128,4 +131,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-003 และ F-004 `done` (2026-11-14); F-005 `review` (review-2 PASS, L1–L6 แก้แล้ว) → CR-004 (เทส F-004) → merge F-005 → W1 ของ F-006
+CR-004 และ F-005 `done` (2026-11-15) → W1 ของ F-006 (scanner + detector)

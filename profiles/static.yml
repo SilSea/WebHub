@@ -1,0 +1,15 @@
+# Plain static site: nginx (or the Lite proxy) serves the files, no process (DESIGN §6.2, §7).
+schemaVersion: 1
+id: static
+language: static
+detect:
+  all:
+    - { file: "index.html|public/index.html|docs/index.html" }
+  # a project with a build tool / server is not served as raw files (review-1 K6): no profile
+  # → "unknown" (Add site manual), not a static site of its sources
+  none:
+    - {
+        file: "package.json|go.mod|Cargo.toml|pyproject.toml|requirements.txt|manage.py|composer.json|Gemfile",
+      }
+  score: 50
+static: { spa: false }

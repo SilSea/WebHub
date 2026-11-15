@@ -13,6 +13,7 @@ import { parseArgs } from "node:util";
 import { daemonCommand } from "./cli/daemon-command.js";
 import { abandonStart } from "./cli/daemon-control.js";
 import { errorJson, errorLines, exitCodeOf, sanitize } from "./cli/output.js";
+import { profilesCommand } from "./cli/profiles-command.js";
 import { type Paths, pathsFor, resolveHome } from "./config/home.js";
 import { readVersion } from "./version.js";
 
@@ -49,6 +50,7 @@ interface Command {
 
 const COMMANDS: Record<string, Command> = {
   daemon: daemonCommand,
+  profiles: profilesCommand,
 };
 
 const HELP = `webhub — local hub for web projects

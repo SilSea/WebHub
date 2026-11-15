@@ -1,0 +1,20 @@
+# Express server; the entry file is a per-site var (the scanner may set it from package.json).
+schemaVersion: 1
+id: express
+language: node
+detect:
+  all:
+    - { file: "package.json" }
+  any:
+    - { dep: "express" }
+  score: 70
+runtime: { lang: node }
+start:
+  cmd: "node {entry}"
+  vars: { entry: "index.js" }
+port: { default: 3000, via: env, env: PORT }
+host: { bind: "127.0.0.1" }
+health: { path: "/", timeout: 60 }
+container: { image: "node:22-slim", workdir: /app }
+routes:
+  detectPrefix: ["app.use('/", 'app.use("/', "router.use('/"]

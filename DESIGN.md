@@ -388,7 +388,9 @@ webhub รัน container + เพิ่ม connection ทุก site ให้
 
 ### 6.1 Profile format
 
-`profiles/<id>.yml` (built-in) + `data/profiles/*.yml` (ผู้ใช้เพิ่ม/ทับ)
+`profiles/<id>.yml` (built-in) + `data/profiles/*.yml` (ผู้ใช้เพิ่ม/ทับ — id เดียวกับ built-in = ทับทั้งตัว ไม่ merge)
+
+กติกา (F-005): มี `schemaVersion`; ทุก object strict (key แปลก = error); `detect` มี `all` / `any` / `none` + `score` — ไม่มี regex (substring + `*` ใน segment เดียว, กัน ReDoS); path ใน rule เป็น relative `/` ห้าม `..`; `start.cmd` เป็น string ที่แยกเป็น argv เอง **ไม่ผ่าน shell** (printable ASCII, metachar ของ shell = error, ห้ามที่อยู่นอก loopback); `host.bind` เฉพาะ loopback; `port.env` = `PORT` / `<NAME>_PORT`; variants เทียบ version ต่ำสุดที่ประกาศ, `null` = ลบ key; ไฟล์ ≤ 64 KB, ≤ 5000 node, ≤ 8 variants, ≤ 200 ไฟล์ผู้ใช้
 
 ```yaml
 id: python-fastapi
@@ -937,6 +939,7 @@ webhub daemon start | stop [--force] | status | logs [-n N] [-f]   # คำส�
 | 16 | ยิง API | **API Studio ในตัว** + **Hoppscotch** เสริม (ไม่ทำ Data API / PostgREST) | §22 |
 | 17 | review v7 (goal เดิม) | nginx: `@wake` แบบ rewrite + proxy.conf header ชุดเต็มทุก location; Host `webhub.internal` สำหรับ `/_wake`/`/_auth`; cookie host-only + login handoff ต่อ tool host; nginx/infra bind 127.0.0.1; install frozen lockfile + `COREPACK_ENABLE_AUTO_PIN=0`; sandbox isolated-vm; generated config ใน `$WEBHUB_HOME` (absolute mount); compose group ต่อ dir + project name จาก `compose config`; disable dependents; vite `via: arg`; roadmap (container runner → MVP-3, start modes → MVP-4, backup → MVP-5); HTTP port ≠ 80 ต่อ `:port`; mariadb 3307 + pinned major `15000–15999`; redis ACL แทน rename-command; `<site>.localhost` ใน container = nginx alias; reserved/CLI/ignore/deny-list | §3, §4, §5, §7, §10, §11, §13, §15, §19, §22 |
 | 18 | review v8 (goal เดิม) | session cookie ต่อ tool host + ลบ cookie ก่อนส่งเข้า tool; daemon resolver `*.localhost`; เลิก `proxy_intercept_errors`; redis shared เฉพาะ app ที่มี URL/username; mongo-express → phase 8; native `target` = `port`; override path absolute; `next dev` เป็นข้อจำกัดที่แจ้งใน run approval; git status `--no-optional-locks` | §3, §4, §5, §7, §10, §20, §22 |
+| 20 | F-005 profiles (2026-11-14) | YAML (`yaml`, parse แบบ safe) + zod strict; 7 built-in แรก (static, static-spa, vite, next, express, bun-elysia, fastapi); ผู้ใช้ทับ built-in ทั้งตัว; detect ไม่มี regex; cmd string → argv ไม่ผ่าน shell; range ใน variants ทำเอง; `GET /api/v1/profiles` + `webhub profiles [--check]`; import/export ทำทีหลังพร้อม run approval | §6.1, §13 |
 | 19 | F-004 CLI (2026-11-13) | `webhub daemon start/stop/status/logs`; auto-start daemon เมื่อคำสั่งต้องใช้; log daemon 5 MB × 2 (CR-003); `webhub ui` ทำใน F-009 | §12, §13 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 

@@ -55,7 +55,7 @@ function emit(ctx: CommandContext, json: boolean, value: Record<string, unknown>
 }
 
 /** An impostor on the API port: say who listens there; the token was never sent. */
-async function explainImpostor(err: unknown, ctx: CommandContext): Promise<never> {
+export async function explainImpostor(err: unknown, ctx: CommandContext): Promise<never> {
   if (isServerError(err, "DAEMON_IMPOSTOR")) {
     let port: number | undefined;
     try {

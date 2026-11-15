@@ -1,0 +1,15 @@
+# Built single-page app (no package.json): unknown paths fall back to index.html.
+schemaVersion: 1
+id: static-spa
+language: static
+detect:
+  all:
+    - { file: "index.html" }
+  any:
+    - { fileContains: ["index.html", 'id="root"|id="app"|<app-root'] }
+  none:
+    - {
+        file: "package.json|go.mod|Cargo.toml|pyproject.toml|requirements.txt|manage.py|composer.json|Gemfile",
+      }
+  score: 55
+static: { spa: true }

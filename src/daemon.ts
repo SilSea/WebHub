@@ -20,6 +20,7 @@ import { loadConfig } from "./config/config.js";
 import { ensureHome, type Paths, pathsFor, resolveHome } from "./config/home.js";
 import { WebhubError } from "./errors.js";
 import { getPlatform } from "./platform/index.js";
+import { profileRoutes } from "./profiles/routes.js";
 import { createApi, type RouteRegistrar } from "./server/api.js";
 import { SessionStore } from "./server/auth.js";
 import { AUTH_FILE_VERSION, type AuthFile } from "./server/auth-file.js";
@@ -208,7 +209,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<RunningDaem
         onShutdown: requestStop,
         log,
       },
-      opts.registrars ?? [],
+      // feature routes (F-005 profiles) + extra ones from tests
+      [profileRoutes(paths), ...(opts.registrars ?? [])],
     );
     // auth.json BEFORE listen: an old file of a crashed daemon is never next to a live
     // port (client would report an impostor — H16); a failed listen removes it again
