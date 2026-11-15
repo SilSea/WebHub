@@ -16,7 +16,7 @@ import {
 } from "../../src/scanner/deps.js";
 import { Budget, badName, DEFAULT_LIMITS, listDir, readSmall } from "../../src/scanner/fsread.js";
 import { envPorts, exposePort, fromImage, scriptPort, vitePort } from "../../src/scanner/hints.js";
-import { scan, slug } from "../../src/scanner/scan.js";
+import { fitToStore, scan, slug } from "../../src/scanner/scan.js";
 import { ScanResult } from "../../src/scanner/schema.js";
 import { tempHome } from "../helpers/home.js";
 
@@ -471,6 +471,97 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       expect(two.candidates.map((c) => c.path).sort()).toEqual(
         [join(w, "backend"), join(w, "frontend")].sort(),
       );
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("same / nested scan roots are walked once (review-2 R4)", async () => {
+    const h = await tempHome();
+    try {
+      mkdirSync(join(dir, "a"));
+      writeFileSync(join(dir, "a", "index.html"), "<p>hi</p>");
+      const r = await scan(h.paths, { scanRoots: [dir, dir, join(dir, "a")] });
+      expect(r.roots.map((x) => x.status)).toEqual(["ok", "inside-root", "inside-root"]);
+      expect(r.candidates.map((c) => c.name)).toEqual(["a"]);
+      // an inner root listed first is still covered by the outer one
+      const rev = await scan(h.paths, { scanRoots: [join(dir, "a"), dir] });
+      expect(rev.roots.map((x) => x.status)).toEqual(["inside-root", "ok"]);
+      expect(rev.candidates).toHaveLength(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("parent + child compose: one service once; unreadable compose not listed (review-2 R3)", async () => {
+    const h = await tempHome();
+    try {
+      const m = join(dir, "m");
+      mkdirSync(join(m, "frontend"), { recursive: true });
+      mkdirSync(join(m, "backend"), { recursive: true });
+      writeFileSync(join(m, "frontend", "package.json"), '{"devDependencies":{"vite":"7"}}');
+      writeFileSync(join(m, "backend", "package.json"), '{"dependencies":{"express":"4"}}');
+      writeFileSync(join(m, "docker-compose.yml"), "services:\n  api:\n    build: ./backend\n");
+      writeFileSync(join(m, "backend", "compose.yaml"), "services:\n  api:\n    build: .\n");
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      expect(r.candidates[0]?.compose?.app).toEqual(["api"]);
+
+      writeFileSync(join(m, "docker-compose.yml"), "services: [: broken");
+      rmSync(join(m, "backend", "compose.yaml"));
+      const bad = await scan(h.paths, { scanRoots: [dir] });
+      expect(bad.candidates[0]?.compose).toBeUndefined();
+      expect(bad.candidates[0]?.runner).toBe("native");
+      expect(bad.problems.map((p) => p.file)).toContain(join(m, "docker-compose.yml"));
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("fitToStore measures what the store writes (pretty JSON) (review-3 Q1)", async () => {
+    const h = await tempHome();
+    try {
+      const r = await scan(h.paths, { scanRoots: [] });
+      const c = {
+        key: "0123456789abcdef",
+        name: "x",
+        path: "p",
+        kind: "site" as const,
+        score: 50,
+        alternatives: [],
+        reasons: [],
+        notWeb: [],
+        compose: {
+          files: ["c.yml"],
+          app: Array.from({ length: 200 }, (_, i) => `s${i}`),
+          infra: [],
+          mountsSource: false,
+        },
+        services: {},
+        fingerprint: "",
+      };
+      r.candidates = Array.from({ length: 100 }, () => structuredClone(c));
+      const compact = Buffer.byteLength(JSON.stringify(r));
+      const pretty = Buffer.byteLength(`${JSON.stringify(r, null, 2)}\n`);
+      const max = Math.floor((compact + pretty) / 2); // compact fits, pretty does not
+      fitToStore(r, max);
+      expect(r.truncated).toEqual({ reason: "candidates" });
+      expect(Buffer.byteLength(`${JSON.stringify(r, null, 2)}\n`)).toBeLessThanOrEqual(max);
+      expect(r.candidates.length).toBeGreaterThan(0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("non-web projects hide the non-web folders inside them (review-3 Q3)", async () => {
+    const h = await tempHome();
+    try {
+      const game = join(dir, "game");
+      mkdirSync(join(game, "ProjectSettings"), { recursive: true });
+      mkdirSync(join(game, "Packages", "com.me.tool"), { recursive: true });
+      writeFileSync(join(game, "Packages", "manifest.json"), '{"dependencies":{}}');
+      writeFileSync(join(game, "Packages", "com.me.tool", "package.json"), '{"name":"t"}');
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      expect(r.candidates.map((c) => [c.name, c.kind])).toEqual([["game", "not-web"]]);
     } finally {
       await h.cleanup();
     }

@@ -84,7 +84,7 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | ID | Function | DESIGN | Security focus | ความเสี่ยงหลัก |
 |---|---|---|---|---|
 | F-014 | Port Manager (ports.json, probe 3 ชั้น, apply/rollback) | §4.1–4.3 | expose default host | Windows excluded range |
-| F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น | ต้องมี internet |
+| F-015 | Runtime Manager (Node/Bun/Python portable, checksum) | §19.1 | verify checksum ทุกครั้ง, HTTPS เท่านั้น; runtime hint จาก F-006 เป็นข้อความไม่น่าไว้ใจ (มี `|` `<` `>` ได้) — ห้ามใส่ใน command line / shell, parse เป็น semver เอง (review-3 Q4) | ต้องมี internet |
 | F-016 | Env resolver + env sets + URL rewrite | §11.1–11.2 | secret ไม่ลง log | precedence ผิด |
 | F-017 | Native runner + install (frozen lockfile, env Zero-touch) | §7 | Run approval, spawn args array; resolve executable เอง ไม่หาใน cwd ของ project, ห้าม `shell: true` บน POSIX, ตรวจ listener หลัง start ว่าอยู่ใน loopback (app ที่ไม่สน HOST — F-005 K11/S4/S8); route แบบ stream (`logs <n> -f`) ส่ง keep-alive byte ทุก < 15 วิ และใช้ connection แยก (daemon ไม่รับ pipelining, idle 15 วิ — F-003 U1/U2, ย้ายจาก F-004) | `next dev` เขียนไฟล์ (ข้อจำกัดที่รู้แล้ว) |
 | F-018 | Container runner พื้นฐาน | §7 | ไม่ privileged, mount ตามจำเป็น | — |

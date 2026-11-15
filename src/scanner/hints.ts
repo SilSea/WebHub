@@ -145,9 +145,10 @@ export async function portHint(
 }
 
 /**
- * A version-ish string (`22`, `>=3.11,<4`, `^1.2 || ~2`, `lts/iron`): no shell characters
- * (`;`, `$`, quotes, backticks, `&`, …). Hints are untrusted text for F-015, never a command
- * (security-1 S6).
+ * A version-ish string (`22`, `>=3.11,<4`, `^1.2 || ~2`, `lts/iron`): no quotes, `$`, backticks,
+ * `;` or `&`. Ranges need `|`, `<`, `>` and spaces, so this is NOT shell-safe: hints are
+ * untrusted text for F-015 and must never be put into a command line (security-1 S6,
+ * review-3 Q4).
  */
 const versionText = (s: string | undefined, max = 60): string | undefined => {
   const t = s?.trim();

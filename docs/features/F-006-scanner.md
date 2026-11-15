@@ -41,7 +41,7 @@
 
 ## 3. Design
 ### 3.1 Walk (`src/scanner/scan.ts` `step`, `src/scanner/fsread.ts`)
-- เริ่มจากแต่ละ scan root (ตรวจ: มีอยู่, เป็น folder, ไม่ใช่ link, ไม่ซ้อนกับ home — F-001); root ที่ใช้ไม่ได้ → `roots[i].status` + เดิน root อื่นต่อ
+- เริ่มจากแต่ละ scan root (ตรวจ: มีอยู่, เป็น folder, ไม่ใช่ link, ไม่ซ้อนกับ home — F-001); root ที่ใช้ไม่ได้ → `roots[i].status` + เดิน root อื่นต่อ; root ที่ซ้ำ หรืออยู่ใน root อื่น → `inside-root` ไม่เดินซ้ำ (review-2 R4)
 - BFS ความลึก ≤ config `maxDepth` (F-001, ค่าเริ่มต้น 3 — ครอบตัวอย่างลึกสุดใน §9) จาก root; ต่อ folder: `lstat` → ข้าม symlink / junction / reparse point ทุกชนิด (บันทึกใน `skipped` เป็น `link`) → `opendir` → อ่าน entry (≤ 5 000 ต่อ folder, เกิน = `skipped: too-many-entries`)
 - กัน TOCTOU (folder ถูกสลับเป็น junction ระหว่าง `lstat` กับ `opendir`): หลังเปิด `realpath` ต้องเท่ากับ path ที่คาด และอยู่ใน root → ไม่ตรง = ข้าม + `skipped: changed`
 - ไม่ลง: ชื่อใน config `ignore` (ไม่สนตัวพิมพ์) และ `node_modules`, `.git`, `.hg`, `.svn`, `vendor`, `.venv`, `venv`, `env`, `__pycache__`, `target`, `dist`, `build`, `.next`, `.nuxt`, `.output`, `.svelte-kit`, `coverage`, `.cache`, `.turbo`, `bin`, `obj`, `Library`, folder ที่ขึ้นต้นด้วย `.` (ยกเว้นอ่านไฟล์ marker ระดับ project), `$RECYCLE.BIN`, `System Volume Information`
@@ -65,8 +65,8 @@
 4. `effectiveProfile` (variants ตาม deps) → `start` / `static` / `port` / `devServer` ของ service
 5. compose: หาไฟล์ `compose.y(a)ml`, `docker-compose.y(a)ml` (+ `*.override.*`) ที่ root ของ candidate → parse (YAML safe ของ F-005: ยอม anchor / merge `<<` ตาม Q6: alias ≤ 100, `maxAliasCount` 100, node cap เดียวกับ F-005; ข้อความ error ไม่ยกเนื้อไฟล์) → service ที่มี `build` = app, ที่มี `image` ของ DB/cache ที่รู้จัก = infra; volume ที่ mount `.` / `./…` เข้า app = mount source
 6. runner ตาม §9 (ดู §1)
-7. monorepo (folder แม่ต้องอยู่ใน scan root เดียวกัน — ไม่สร้าง site นอก root, security-1 S4; compose ที่ folder แม่ — `build: ./frontend` — เป็นตัวกำหนด runner / `compose` ก่อน, review-1 C4): candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
-8. ซ้อน (เฉพาะใต้ candidate ที่เป็น `site` — `requirements.txt` หลงที่ root ไม่ซ่อน project ข้างล่าง, review-1 C6): `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่) — เช็คก่อน duplicate (review-1 C3); `site` ที่ไม่ใช่ static: fingerprint (§1) เท่ากับ candidate ที่แสดงอยู่และไม่ใช่ duplicate (ไม่ซ้อนกัน) → `duplicate`, ไม่ตรง → candidate ปกติ
+7. monorepo (compose ที่ parse ไม่ได้ไม่ถูกนับ + อยู่ใน `problems`; service ชื่อซ้ำระหว่างแม่กับลูกนับครั้งเดียว — review-2 R3; folder แม่ต้องอยู่ใน scan root เดียวกัน — ไม่สร้าง site นอก root, security-1 S4; compose ที่ folder แม่ — `build: ./frontend` — เป็นตัวกำหนด runner / `compose` ก่อน, review-1 C4): candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
+8. ซ้อน (non-site ซ่อนใต้ candidate ใดก็ได้ — Unity `Packages/`, Python sub-package, review-3 Q3; site ซ่อนใต้ `site` เท่านั้น — `requirements.txt` หลงที่ root ไม่ซ่อน project ข้างล่าง, review-1 C6): `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่) — เช็คก่อน duplicate (review-1 C3); `site` ที่ไม่ใช่ static: fingerprint (§1) เท่ากับ candidate ที่แสดงอยู่และไม่ใช่ duplicate (ไม่ซ้อนกัน) → `duplicate`, ไม่ตรง → candidate ปกติ
 9. port / via / publicDir / runtime hint ตาม §1 (ไม่เจอ port → `port` ของ profile, source `profile <id>`)
 10. ชื่อ: site ได้ชื่อเปล่าก่อน, duplicate / อื่น ๆ ได้ `-2`, `-3` (เรียงตาม path)
 
@@ -76,8 +76,8 @@ interface ScanResult {
   schemaVersion: 1;
   scanId: string;               // random 16 hex
   startedAt: string; finishedAt: string;
-  truncated: false | { reason: "time" | "folders" | "bytes" | "candidates" }; // ขีดแรกที่ชน
-  roots: { path: string; status: "ok" | "missing" | "not-a-folder" | "link" | "no-access" | "inside-home" }[];
+  truncated: false | { reason: "time" | "folders" | "bytes" | "candidates" }; // ขีดแรกที่ชนเท่านั้น (review-2 R5: ไม่บอกทุกเหตุ / ทุก root — ผลบางส่วนยังใช้ได้)
+  roots: { path: string; status: "ok" | "missing" | "not-a-folder" | "link" | "no-access" | "inside-home" | "inside-root" }[];
   candidates: Candidate[];      // เรียงตาม path
   skipped: { path: string; reason: "link" | "too-many-entries" | "changed" | "bad-name" | "no-access" }[]; // ≤ 500 (bad-name: path ของ folder แม่ ไม่ใช่ชื่อแปลก)
   problems: { file: string; message: string }[];   // profile ที่โหลดไม่ผ่าน, compose parse ไม่ได้ (ไม่ยกเนื้อไฟล์)
@@ -105,7 +105,7 @@ interface Candidate {
 ```
 - ค่า string ทุกตัวที่มาจาก project (ชื่อ, เหตุผล, path) ถูก sanitize ตอนแสดงใน CLI (F-004) และ escape ใน dashboard; ใน JSON เก็บตามจริง
 - **ไม่เก็บค่า `.env`** นอกจากเลข port ของ key `PORT` / `*_PORT` (Q5); `.env*` อ่านครั้งเดียวไม่เข้า cache ของ view (`readOnce`) — ไฟล์: `.env`, `.env.local`, `.env.development`, `.env.development.local`
-- ขนาดไฟล์ ≤ 5 MB (ขีดของ store) → candidate ≤ 2 000; ผลที่ serialize เกิน 4 MB → ตัด candidate ท้ายทีละ 10 % + `truncated: candidates` แทนการล้มทั้ง scan (review-1 C11)
+- ขนาดไฟล์ ≤ 5 MB (ขีดของ store) → candidate ≤ 2 000; ผลแบบที่ store เขียน (JSON pretty, review-3 Q1) เกิน 5 MB − 256 KB → ตัด candidate ท้ายทีละ 10 % + `truncated: candidates` แทนการล้มทั้ง scan (review-1 C11)
 - ข้อความจาก project ถูกตัดตามขีดของ schema ตอนสร้าง (ชื่อไฟล์ในข้อความ ≤ 60, reason ≤ 400, notWeb ≤ 200, ชื่อ + `-N` ≤ 40); candidate ที่ยังผิด schema → ตัดทิ้ง + problem; ผลทั้งก้อนผ่าน `ScanResult.parse` ก่อนบันทึก / ส่ง (security-1 S2)
 - Dockerfile อ่าน ≤ 64 KB, จับ `EXPOSE` / `FROM` ทีละบรรทัด (`[ \t]` ไม่ใช่ `\s`, ไม่มี flag `m`) — regex หลายบรรทัดเป็น O(n²) (security-1 S1)
 
@@ -184,7 +184,8 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 |---|---|---|---|---|
 | 1 | [test-1](../reports/F-006/test-1.md) 35/35 (+ ชุดเต็ม: เทสเดิมล่มเพราะโหลดเครื่อง — develop ล่มแบบเดียวกัน) | [review-1](../reports/F-006/review-1.md) FAIL 4 major | [security-1](../reports/F-006/security-1.md) FAIL 1 critical + 2 major | แก้ S1, C1/S3, C2/S2, C3, C4 |
 | 2 | [test-2](../reports/F-006/test-2.md) 40/40 | [review-2](../reports/F-006/review-2.md) (code + security) FAIL 2 major (R1 regression, R2) + 3 minor | (รวมใน review-2) | แก้ R1 / R2 (round robin), minor ที่ผู้ใช้เลือก: C5 C6 C9 C11 C12 C13 C14 S4 S5 S6 C19; ที่เหลือ → PLAN follow-up |
-| 3 | [test-3](../reports/F-006/test-3.md) | | | |
+| 3 | [test-3](../reports/F-006/test-3.md) 45/45, ชุดเต็ม 498/498 | [review-3](../reports/F-006/review-3.md) FAIL 1 major (Q1) + 3 minor | (รวม) | แก้ Q1; R3 R4 (ผู้ใช้เลือก), R5 → doc; Q2 Q3 Q4 (ผู้ใช้เลือกแก้ทั้ง 3) |
+| 4 | [test-4](../reports/F-006/test-4.md) 49/49, ชุดเต็ม 502/502 | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §9, §12, §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md

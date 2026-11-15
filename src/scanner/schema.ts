@@ -70,7 +70,15 @@ export const ScanResult = z.strictObject({
     .array(
       z.strictObject({
         path: str(4096),
-        status: z.enum(["ok", "missing", "not-a-folder", "link", "no-access", "inside-home"]),
+        status: z.enum([
+          "ok",
+          "missing",
+          "not-a-folder",
+          "link",
+          "no-access",
+          "inside-home",
+          "inside-root",
+        ]),
       }),
     )
     .max(100),

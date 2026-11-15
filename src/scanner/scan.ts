@@ -10,6 +10,7 @@ import type { Paths } from "../config/home.js";
 import { isInside } from "../fs/safe-path.js";
 import { type LoadedProfile, loadProfiles } from "../profiles/loader.js";
 import { effectiveProfile, evaluateDetect } from "../profiles/match.js";
+import { MAX_FILE_BYTES } from "../store/json-store.js";
 import {
   COMPOSE_FILES,
   ComposeError,
@@ -33,8 +34,24 @@ import { DiskView } from "./view.js";
 
 export const WEB_SCORE = 50;
 
-/** Serialized result size kept below the store limit (5 MB, F-001). */
-export const RESULT_MAX_BYTES = 4 * 1024 * 1024;
+/** Saved result size kept below the store limit (F-001 `MAX_FILE_BYTES`) with a margin. */
+export const RESULT_MAX_BYTES = MAX_FILE_BYTES - 256 * 1024;
+
+/** Bytes the store writes for `value` (same serialization as `writeDoc`). */
+const savedBytes = (value: unknown): number =>
+  Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`);
+
+/**
+ * Drops candidates from the end until the result fits the store (review-1 C11): a big result is
+ * cut, never lost. Measured as the store writes it, pretty-printed (review-3 Q1).
+ */
+export function fitToStore(result: ScanResult, max = RESULT_MAX_BYTES): ScanResult {
+  while (result.candidates.length > 0 && savedBytes(result) > max) {
+    result.candidates.length = Math.floor(result.candidates.length * 0.9);
+    result.truncated = { reason: "candidates" };
+  }
+  return result;
+}
 
 /** Folders never walked into (build output, dependencies, VCS, caches). */
 export const SKIP_DIRS = new Set(
@@ -246,9 +263,10 @@ async function composeOf(
     const r = rel === "" ? actual : `${rel}/${actual}`;
     const text = await view.text(r);
     if (text === undefined) continue;
-    files.push(r);
     try {
       services.push(...parseCompose(text).services);
+      // only files that could be read are listed (review-2 R3)
+      files.push(r);
     } catch (err) {
       if (problems.length < 500) {
         problems.push({
@@ -441,8 +459,9 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
                 .flatMap((c) => c.files)
                 .slice(0, 32)
                 .map((f) => clip(f, 400)),
-              app: composeParts.flatMap((c) => c.app).slice(0, 200),
-              infra: composeParts.flatMap((c) => c.infra).slice(0, 200),
+              // a service in the parent and a child compose is one service (review-2 R3)
+              app: [...new Set(composeParts.flatMap((c) => c.app))].slice(0, 200),
+              infra: [...new Set(composeParts.flatMap((c) => c.infra))].slice(0, 200),
               mountsSource: composeParts.some((c) => c.mountsSource),
             },
           }),
@@ -463,10 +482,12 @@ function nested(drafts: Draft[]): Draft[] {
   const out: Draft[] = [];
   const inner: Draft[] = [];
   for (const d of sorted) {
-    // only a web project owns what is inside it: a stray requirements.txt / tooling
-    // package.json higher up does not hide the projects below (review-1 C6)
+    // any project hides the non-web folders inside it (Unity Packages/, Python sub-packages —
+    // review-3 Q3); only a web project hides the sites below it: a stray requirements.txt /
+    // tooling package.json higher up does not hide them (review-1 C6)
     const parent = out.find(
-      (p) => p.kind === "site" && p.path !== d.path && isInside(p.path, d.path),
+      (p) =>
+        (d.kind !== "site" || p.kind === "site") && p.path !== d.path && isInside(p.path, d.path),
     );
     (parent === undefined ? out : inner).push(d);
   }
@@ -565,11 +586,30 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
     if (result.truncated === false) result.truncated = { reason: err.reason };
   };
   const walks: Walk[] = [];
+  const statuses: ({ path: string } & Awaited<ReturnType<typeof rootStatus>>)[] = [];
   for (const root of opts.scanRoots.slice(0, 100)) {
-    const r = await rootStatus(root, paths.home);
-    result.roots.push({ path: root, status: r.status });
-    if (r.real !== undefined) {
-      walks.push({ index: walks.length, root: r.real, queue: [{ abs: r.real, depth: 0 }] });
+    statuses.push({ path: root, ...(await rootStatus(root, paths.home)) });
+  }
+  // a root that is another root, or inside one, is walked once: as part of the outer root
+  // (review-2 R4: same candidate twice, same key)
+  // inside another usable root, or the same as an earlier one
+  const covered = (i: number, real: string): boolean =>
+    statuses.some(
+      (o, j) =>
+        j !== i &&
+        o.real !== undefined &&
+        (samePath(o.real, real) ? j < i : isInside(o.real, real)),
+    );
+  for (const [i, x] of statuses.entries()) {
+    const real = x.real;
+    const outer = real !== undefined && covered(i, real);
+    if (outer) {
+      result.roots.push({ path: x.path, status: "inside-root" });
+      continue;
+    }
+    result.roots.push({ path: x.path, status: x.status });
+    if (real !== undefined) {
+      walks.push({ index: walks.length, root: real, queue: [{ abs: real, depth: 0 }] });
     }
   }
   // walk round robin; a limit ends the walk, what was found is kept
@@ -613,16 +653,7 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
     return false;
   });
   result.finishedAt = new Date().toISOString();
-  // the store refuses files > 5 MB: keep the first candidates instead of losing the scan
-  // (review-1 C11)
-  while (
-    result.candidates.length > 0 &&
-    Buffer.byteLength(JSON.stringify(result)) > RESULT_MAX_BYTES
-  ) {
-    result.candidates.length = Math.floor(result.candidates.length * 0.9);
-    result.truncated = { reason: "candidates" };
-  }
-  return result;
+  return fitToStore(result);
 }
 
 /** Path shown relative to its scan root (CLI tables). */

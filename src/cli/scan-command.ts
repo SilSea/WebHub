@@ -183,9 +183,12 @@ export const scanCommand = {
         await sleep(POLL_MS, undefined, { signal: ctx.signal }).catch(() => {});
         continue;
       }
-      if (s.last?.scanId === scanId) return print(s.last, json, ctx);
-      if (s.lastError?.scanId === scanId) {
-        throw new CliError(EXIT.error, s.lastError.code, sanitize(s.lastError.message));
+      // a lean poll leaves out `last` while another scan runs: look once more in full before
+      // deciding ours is lost (review-3 Q2)
+      const done = s.running === null ? s : await state();
+      if (done.last?.scanId === scanId) return print(done.last, json, ctx);
+      if (done.lastError?.scanId === scanId) {
+        throw new CliError(EXIT.error, done.lastError.code, sanitize(done.lastError.message));
       }
       throw new CliError(EXIT.error, "SCAN_LOST", "the scan ended without a result (cancelled?)");
     }
