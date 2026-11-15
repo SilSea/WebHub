@@ -492,6 +492,8 @@ Dashboard (แท็บ Runtimes) โชว์ runtime บนเครื่อ�
 ## 9. Detection
 
 - Score ≥ 50 = เว็บ (rule มาจาก profile)
+- **อ่านอย่างเดียว** (F-006): ไม่รัน / import ไฟล์ของ project, ไม่ตาม symlink / junction, ลึก ≤ 4 จาก scan root, ขีด folder 20 000 / byte 64 MB / เวลา 60 วิ (เกิน = ผลบางส่วน + `truncated`); `.env*` เก็บแค่เลข port ของ `PORT` / `*_PORT`; ผลล่าสุดที่ `data/scan.json`; scan เป็นงานเบื้องหลัง (`POST/GET/DELETE /api/v1/scan`, `webhub scan`)
+- แบ่งงาน: F-006 = profile / score / not-web / runner / monorepo / duplicate / port+via / publicDir / runtime hint; **F-006b** = routes, shared service, DB, URL env, dev services, `.listen(N)`
 - Runner: compose build image → `compose`; compose mount source / infra-only → `hybrid`; ไม่มี compose → `native`; ผู้ใช้สลับได้
 - **Monorepo / แยก repo**: sub-folder `frontend|client|web|ui|*-frontend|*-web` + `backend|server|api|*-backend|*-api` → site เดียว (เช่น `cloudvps/cloudvps-frontend` + `cloudvps-backend`)
 - **Routes**: หา prefix จาก code (`.group("/api")`, `setGlobalPrefix`, `app.use('/api')`, `APIRouter(prefix=`) → route `strip:false`; ไม่เจอ prefix → `strip:true`; dep `socket.io` / `ws` → เพิ่ม `/socket.io/` (`ws:true`)
@@ -768,7 +770,7 @@ _WebHub/                      # repo (npm package source)
 ├── runtimes/                 # portable runtimes <lang>/<ver>/
 ├── data/                     # gitignored
 │   ├── sites/  compose/  profiles/  backups/  venvs/
-│   ├── ports.json  infra.json  secrets.json  auth.json  state.json
+│   ├── ports.json  infra.json  secrets.json  auth.json  state.json  scan.json
 └── logs/                       # daemon.log + daemon.log.1 (≤ 5 MB ต่อไฟล์ — CR-003), daemon-start.err
 ```
 
@@ -940,6 +942,7 @@ webhub daemon start | stop [--force] | status | logs [-n N] [-f]   # คำส�
 | 17 | review v7 (goal เดิม) | nginx: `@wake` แบบ rewrite + proxy.conf header ชุดเต็มทุก location; Host `webhub.internal` สำหรับ `/_wake`/`/_auth`; cookie host-only + login handoff ต่อ tool host; nginx/infra bind 127.0.0.1; install frozen lockfile + `COREPACK_ENABLE_AUTO_PIN=0`; sandbox isolated-vm; generated config ใน `$WEBHUB_HOME` (absolute mount); compose group ต่อ dir + project name จาก `compose config`; disable dependents; vite `via: arg`; roadmap (container runner → MVP-3, start modes → MVP-4, backup → MVP-5); HTTP port ≠ 80 ต่อ `:port`; mariadb 3307 + pinned major `15000–15999`; redis ACL แทน rename-command; `<site>.localhost` ใน container = nginx alias; reserved/CLI/ignore/deny-list | §3, §4, §5, §7, §10, §11, §13, §15, §19, §22 |
 | 18 | review v8 (goal เดิม) | session cookie ต่อ tool host + ลบ cookie ก่อนส่งเข้า tool; daemon resolver `*.localhost`; เลิก `proxy_intercept_errors`; redis shared เฉพาะ app ที่มี URL/username; mongo-express → phase 8; native `target` = `port`; override path absolute; `next dev` เป็นข้อจำกัดที่แจ้งใน run approval; git status `--no-optional-locks` | §3, §4, §5, §7, §10, §20, §22 |
 | 20 | F-005 profiles (2026-11-14) | YAML (`yaml`, parse แบบ safe) + zod strict; 7 built-in แรก (static, static-spa, vite, next, express, bun-elysia, fastapi); ผู้ใช้ทับ built-in ทั้งตัว; detect ไม่มี regex; cmd string → argv ไม่ผ่าน shell; range ใน variants ทำเอง; `GET /api/v1/profiles` + `webhub profiles [--check]`; import/export ทำทีหลังพร้อม run approval | §6.1, §13 |
+| 21 | F-006 scanner (2026-11-15) | อ่านอย่างเดียว ไม่ตาม link, ลึก 4 + ขีด folder/byte/เวลา; ผลที่ `data/scan.json`; scan เป็นงานเบื้องหลัง (`/api/v1/scan`, `webhub scan`); `.env` เก็บแค่ port; compose ยอม anchor จำกัด; TOML parser จำกัดของเราเอง; route/DB/URL env/dev services แยกเป็น F-006b | §9, §12 |
 | 19 | F-004 CLI (2026-11-13) | `webhub daemon start/stop/status/logs`; auto-start daemon เมื่อคำสั่งต้องใช้; log daemon 5 MB × 2 (CR-003); `webhub ui` ทำใน F-009 | §12, §13 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 

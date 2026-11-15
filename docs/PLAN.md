@@ -18,6 +18,7 @@
 | 6a | CR-004 เทส F-004 2 ตัวล่มตอนเครื่องโหลด (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-004-flaky-f004-tests.md) |
 | 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `done` | [spec](features/F-005-profiles.md) |
 | 7a | CR-005 เทส F-000 นับ temp dir กลาง ชนกับเทสขนาน (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-005-fixture-tempdir-race.md) |
+| 8 | F-006 Scanner + detector (แกน: walk, profile, score, not-web, runner, monorepo, duplicate, port/via, publicDir, runtime hint, `data/scan.json`, `/api/v1/scan`, `webhub scan`) | `planned` | [spec](features/F-006-scanner.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 
@@ -37,8 +38,9 @@
 F-000 ─► F-001 ─► F-002 ─► F-003 ─► F-004
                     │        │
                     │        └─► F-005 ─► F-006 ─► F-007 ─► F-008      (MVP-1)
+                    │                     └─► F-006b ─► (ก่อน F-009)
                     ├─► F-011 (hosts)
-F-007 ─► F-009 ─► F-010, F-012, F-013                                  (MVP-2)
+F-007, F-006b ─► F-009 ─► F-010, F-012, F-013                                 (MVP-2)
 F-007 ─► F-014 ─► F-015 ─► F-016 ─► F-017 ─► F-018                     (MVP-3)
 F-017 ─► F-019 ─► F-020 ─► F-021                                       (MVP-4)
 F-019 ─► F-022 ─► F-023 ─► F-024 ─► F-025 ; F-022 ─► F-026             (MVP-5)
@@ -62,7 +64,8 @@ F-021 ─► F-027 ─► F-028, F-029                                         (
 | F-003 | Daemon + API server + auth (token, Host allowlist, Origin, cookie, internal Host) | §10.3 | **หัวใจ R6**: DNS rebinding, CSRF, token leak | ทุก feature ต่อจากนี้พึ่ง — พลาดคือพังทั้งระบบ |
 | F-004 | CLI client (thin, ผ่าน daemon) | §13 | อ่าน token จากไฟล์, ไม่ใส่ token ใน argv; รอ `auth.pid` = PID ที่ spawn (H16); log ของ daemon จำกัดขนาด**เป็น byte** (CR-003 — F-003 security-6 U4, security-8 Y1); spawn daemon ให้ stdout/stderr ไปที่ไฟล์ (fd) หรือ `ignore` — **ห้าม pipe** ที่ CLI ถือไว้ (security-8 Y2); `webhub ui` ย้ายไป F-009 (F-004 Q2) | — |
 | F-005 | Profile loader (YAML + zod) + built-in (static, static-spa, vite, next, express, bun-elysia, fastapi) | §6, §19.5 | profile import ไม่รันอะไรจน approve | schema เปลี่ยนบ่อยช่วงแรก |
-| F-006 | Scanner + detector (score, runner, routes, via, URL env, DB, runtime, dedupe) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root | false positive/negative → fixtures |
+| F-006 | Scanner + detector แกน (score, runner, via, runtime hint, dedupe, monorepo) | §9 | อ่านอย่างเดียว, path ไม่หลุด scan root, ไม่ follow symlink ออกนอก root, `.env` เก็บแค่ port | false positive/negative → fixtures |
+| F-006b | Deep detect: route prefix จาก source + `socket.io`/`ws`, shared service, DB (compose image + deps + env keys), URL env (§11.2), dev services (§5.8), `.listen(N)` — ทำก่อน F-009 | §9 | อ่าน source แบบ text + regex จำกัด (ไม่มี ReDoS), ไม่เก็บค่า secret | regex พลาด → fixtures |
 | F-007 | Site registry + approve / ignore / add manual + override ไม่ถูก rescan ทับ | §11.4, §21.3 | validate ชื่อ (reserved), run approval: แสดง argv ที่ render แล้ว + executable ที่ resolve แล้ว, ผูกกับเนื้อหา profile ไม่ใช่แค่ id (F-005 S8) | — |
 | F-008 | `setup` wizard + `doctor` | §21.4 | — | — |
 
@@ -132,4 +135,4 @@ DB Studio v1/v2 + API Studio v1/v2 (§5.7, §22) · backup ตามเวลา
 | ทางเลือกที่ไม่เลือก | ทำ vertical slice (site เดียว end-to-end ก่อน) — เห็นผลเร็วกว่า แต่ต้องย้อนแก้ auth/config ภายหลัง = ขัด R1 (แก้ feature ที่ done) |
 
 ## 5. ขั้นถัดไป
-CR-004, F-005, CR-005 `done` (2026-11-15) → W1 ของ F-006 (scanner + detector)
+CR-004, F-005, CR-005 `done` (2026-11-15); F-006 `planned` (2026-11-15) → W3 ของ F-006 เมื่อผู้ใช้สั่ง
