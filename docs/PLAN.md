@@ -28,7 +28,7 @@
 
 **ติดตามต่อ (F-005):** (1) profile Python สำหรับ project pyproject-only (uv / poetry) — `fastapi` ตอนนี้ `requirements.txt` เท่านั้น (review-1 K2) → W1 item ใหม่; (2) เทส F-004 ล่มตอนเครื่องโหลด → ปิดแล้วด้วย [CR-004](changes/CR-004-flaky-f004-tests.md)
 
-**ติดตามต่อ (F-006, ผู้ใช้เลือก "แก้กลุ่มสำคัญ" 2026-11-15 — ที่เหลือ):** C8 rule เกิน 8 รอบ fill → ให้ไม่ match + problem; C10 / S7b junction สลับ folder กลางทาง + hard link (`nlink > 1`); C15 compose base + override รวมตามชื่อ service; C16 OneDrive placeholder (reparse point) ถูกนับเป็น link — ต้องทดสอบเครื่องจริง; C17 repo ที่มีแค่ `docs/index.html` → site ที่ repo + `publicDir: docs`; C18 เทสที่ขาด (CLI sanitize ESC บน Linux CI, exit 2, `.env` ผ่าน API / `--json`, 100k deps, junction swap, grep "ไม่มี write API / child_process"); S7c `realpath(home)` ก่อนเทียบ inside-home; C7 ส่วน fingerprint ที่ยังอ่านไฟล์ซ้ำ (lockfile ตัดออกแล้ว)
+**ติดตามต่อ (F-006, ผู้ใช้เลือก "แก้กลุ่มสำคัญ" 2026-11-15 — ที่เหลือ):** C8 rule เกิน 8 รอบ fill → ให้ไม่ match + problem; C10 / S7b junction สลับ folder กลางทาง + hard link (`nlink > 1`); C16 OneDrive placeholder (reparse point) ถูกนับเป็น link — ต้องทดสอบเครื่องจริง; C17 repo ที่มีแค่ `docs/index.html` → site ที่ repo + `publicDir: docs`; C18 เทสที่ขาด (CLI sanitize ESC บน Linux CI, exit 2, `.env` ผ่าน API / `--json`, 100k deps, junction swap, grep "ไม่มี write API / child_process"); S7c `realpath(home)` ก่อนเทียบ inside-home; C7 ส่วน fingerprint ที่ยังอ่านไฟล์ซ้ำ (lockfile ตัดออกแล้ว)
 
 **ติดตามต่อ (CR-004 review-1 N2):** `test/unit/cli-stop.test.ts` "daemon dead, program on the port" ใช้ขอบเวลา `< 3_000` ms — อาจล่มตอนเครื่องโหลดแบบเดียวกับ CR-004 → ถ้าเกิด: เปลี่ยนเป็นนับจำนวน `process.info` ผ่าน `f.setOnInfo` (ต้องมี CR, F-004 `done`)
 

@@ -529,6 +529,58 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
     expect(composeRunner(onlyDb)).toBe("hybrid");
   });
 
+  it("compose files as docker reads them: first base + first override (review-5 W1)", async () => {
+    const h = await tempHome();
+    try {
+      const p = join(dir, "p");
+      mkdirSync(p);
+      writeFileSync(join(p, "package.json"), '{"dependencies":{"express":"4"}}');
+      writeFileSync(
+        join(p, "compose.yaml"),
+        "services:\n  web:\n    image: node:22\n    volumes: ['.:/app']\n",
+      );
+      writeFileSync(
+        join(p, "docker-compose.yml"),
+        "services:\n  api:\n    build: .\n    ports: ['8080:8080']\n",
+      );
+      writeFileSync(
+        join(p, "compose.override.yaml"),
+        "services:\n  web:\n    ports: ['3000:3000']\n",
+      );
+      const r = await scan(h.paths, { scanRoots: [dir] });
+      const c = r.candidates[0];
+      expect(c?.compose).toEqual({
+        files: ["compose.yaml", "compose.override.yaml"],
+        app: ["web"],
+        infra: [],
+        mountsSource: true,
+      });
+      expect(c?.services.app?.port?.value).toBe(3000);
+      expect(r.problems.map((x) => x.file)).toContain(join(p, "docker-compose.yml"));
+
+      // an override alone is not a compose project
+      const q = join(dir, "q");
+      mkdirSync(q);
+      writeFileSync(join(q, "package.json"), '{"dependencies":{"express":"4"}}');
+      writeFileSync(join(q, "compose.override.yml"), "services:\n  api:\n    build: .\n");
+      const r2 = await scan(h.paths, { scanRoots: [q] });
+      expect(r2.candidates[0]?.compose).toBeUndefined();
+      expect(r2.candidates[0]?.runner).toBe("native");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("more than 200 merged services keep the candidate (review-5 W2)", () => {
+    const yaml = (from: number) =>
+      `services:\n${Array.from({ length: 150 }, (_, i) => `  s${from + i}:\n    build: .\n`).join("")}`;
+    const merged = mergeServices([
+      parseCompose(yaml(0)).services,
+      parseCompose(yaml(150)).services,
+    ]);
+    expect(merged).toHaveLength(200);
+  });
+
   it("parent + child compose: one service once; unreadable compose not listed (review-2 R3)", async () => {
     const h = await tempHome();
     try {

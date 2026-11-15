@@ -12,7 +12,9 @@ import { type LoadedProfile, loadProfiles } from "../profiles/loader.js";
 import { effectiveProfile, evaluateDetect } from "../profiles/match.js";
 import { MAX_FILE_BYTES } from "../store/json-store.js";
 import {
+  COMPOSE_BASE_FILES,
   COMPOSE_FILES,
+  COMPOSE_OVERRIDE_FILES,
   ComposeError,
   type ComposeService,
   composeRunner,
@@ -270,23 +272,35 @@ async function composeOf(
   const files: string[] = [];
   const parsed: ComposeService[][] = [];
   const names = await view.names(rel);
-  for (const f of COMPOSE_FILES) {
-    const actual = names.find((n) => n.toLowerCase() === f);
-    if (actual === undefined) continue;
-    const r = rel === "" ? actual : `${rel}/${actual}`;
+  const problem = (r: string, message: string) => {
+    if (problems.length < 500) problems.push({ file: join(view.root, ...r.split("/")), message });
+  };
+  const present = (list: readonly string[]) =>
+    list.flatMap((f) => {
+      const actual = names.find((n) => n.toLowerCase() === f);
+      return actual === undefined ? [] : [rel === "" ? actual : `${rel}/${actual}`];
+    });
+  // as `docker compose`: the first base file found + the first override file found
+  // (review-5 W1); no base file → no compose
+  const bases = present(COMPOSE_BASE_FILES);
+  const overrides = present(COMPOSE_OVERRIDE_FILES);
+  for (const r of [...bases.slice(1), ...overrides.slice(1)]) {
+    problem(r, "ignored: docker compose reads only the first compose file of a folder");
+  }
+  if (bases[0] === undefined) {
+    for (const r of overrides.slice(0, 1)) problem(r, "ignored: override without a compose file");
+    return { files, services: [] };
+  }
+  for (const r of [bases[0], ...overrides.slice(0, 1)]) {
     const text = await view.text(r);
-    if (text === undefined) continue;
+    if (text === undefined) break;
     try {
       parsed.push(parseCompose(text).services);
       // only files that could be read are listed (review-2 R3)
       files.push(r);
     } catch (err) {
-      if (problems.length < 500) {
-        problems.push({
-          file: join(view.root, ...r.split("/")),
-          message: err instanceof ComposeError ? err.message : "could not read compose file",
-        });
-      }
+      problem(r, err instanceof ComposeError ? err.message : "could not read compose file");
+      break; // a broken base: no compose; a broken override: base only
     }
   }
   // base + override files describe the same services (review-4 V2)

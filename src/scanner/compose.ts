@@ -18,6 +18,14 @@ export const COMPOSE_FILES = [
   "docker-compose.override.yml",
 ] as const;
 
+/** Base file names in the order `docker compose` looks for them; only the first found is read. */
+export const COMPOSE_BASE_FILES = COMPOSE_FILES.slice(0, 4);
+/** Override file names; only the first found is read, and only with a base file. */
+export const COMPOSE_OVERRIDE_FILES = COMPOSE_FILES.slice(4);
+
+/** Max services of one folder after merging (schema `compose.app` / `infra` ≤ 200). */
+export const MAX_SERVICES = 200;
+
 export const MAX_ALIASES = 100;
 const PWD = ["$", "{PWD}"].join("");
 export const MAX_NODES = 20_000;
@@ -209,7 +217,8 @@ export function mergeServices(files: readonly (readonly ComposeService[])[]): Co
       });
     }
   }
-  return [...byName.values()].map((s) => ({
+  // ≤ MAX_SERVICES: more would make the candidate invalid and drop it (review-5 W2)
+  return [...byName.values()].slice(0, MAX_SERVICES).map((s) => ({
     ...s,
     infra: !s.build && s.image !== undefined && INFRA_IMAGE.test(s.image.toLowerCase()),
   }));
