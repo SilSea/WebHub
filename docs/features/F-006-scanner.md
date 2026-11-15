@@ -177,6 +177,7 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 ## 9. Reports (R5)
 | รอบ | test | review | security | ผล |
 |---|---|---|---|---|
+| 1 | [test-1](../reports/F-006/test-1.md) 35/35 (+ ชุดเต็ม: เทสเดิมล่มเพราะโหลดเครื่อง — develop ล่มแบบเดียวกัน) | | | |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §9, §12, §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
