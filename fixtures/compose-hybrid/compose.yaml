@@ -1,0 +1,17 @@
+x-common: &common
+  restart: unless-stopped
+services:
+  web:
+    <<: *common
+    image: node:20
+    working_dir: /app
+    command: npm run dev
+    volumes:
+      - .:/app
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+  db:
+    <<: *common
+    image: postgres:15
+  cache:
+    image: redis:7

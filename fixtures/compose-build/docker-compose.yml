@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    container_name: compose-build
+    ports:
+      - "3200:3000"
+    environment:
+      DATABASE_URL: postgres://app:fixture-not-a-secret@db:5432/app
+    depends_on: [db]
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: fixture-not-a-secret

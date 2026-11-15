@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `planned` (2026-11-15) |
+| Status | `testing` |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §9 Detection, §6.3 ตัดคะแนน (ไม่ใช่เว็บ), §7 Runners (เลือก runner), §19.1 runtime version hint, §12 (`src/scanner/`), §13 (`webhub scan`), §21.5 fixtures |
 | Depends on | F-001 (config `scanRoots`, home, store, safe path), F-002 (platform: ไม่ใช้ shell), F-003 (API + auth), F-004 (CLI), F-005 (`loadProfiles`, `evaluateDetect`, `effectiveProfile`, `ProjectView`) |
@@ -10,7 +10,7 @@
 
 ## 1. เป้าหมาย / ขอบเขต
 **ทำ (in scope)** — ขอบเขตตามแนะนำใน Q1 (แยก "deep detect" ออกเป็น F-006b)
-- เดิน `scanRoots` แบบ**อ่านอย่างเดียว** หา folder ที่เป็น project (candidate) — ไม่ตาม symlink / junction, จำกัดความลึก / จำนวน / เวลา (Q2)
+- เดิน `scanRoots` แบบ**อ่านอย่างเดียว** หา folder ที่เป็น project (candidate) — ไม่ตาม symlink / junction, ความลึกตาม config `maxDepth` + ไม่เข้า folder ใน config `ignore` (F-001; ผู้ใช้เลือก 2026-11-15 แทนค่าคงที่ 4 ของ Q2), จำกัดจำนวน / เวลา
 - ต่อ candidate: สร้าง `ProjectView` (F-005) จาก disk ที่จำกัดอยู่ใน folder นั้น + รวม deps จาก `package.json` / `requirements.txt` / `pyproject.toml` → `evaluateDetect` กับทุก profile → profile ที่ชนะ (คะแนนสูงสุด, เสมอ → id ตามตัวอักษร) + ตัวเลือกอื่น + เหตุผล
 - ตัดคะแนน "ไม่ใช่เว็บ" (§6.3): browser extension (`manifest.json` ที่มี `manifest_version`), Roblox `*.rbxl(x)`, Unreal `*.uproject`, Unity `ProjectSettings/`, `*.csproj` ที่ไม่มี `Microsoft.AspNetCore`, `electron` / `tauri` / `@tauri-apps/*` ใน deps, Python ที่ไม่มี web framework (ไม่มี profile Python ไหน match) → `kind: "not-web"` + เหตุผล
 - Score ≥ 50 = เว็บ (§9)
@@ -42,10 +42,10 @@
 ## 3. Design
 ### 3.1 Walk (`src/scanner/walk.ts`)
 - เริ่มจากแต่ละ scan root (ตรวจ: มีอยู่, เป็น folder, ไม่ใช่ link, ไม่ซ้อนกับ home — F-001); root ที่ใช้ไม่ได้ → `roots[i].status` + เดิน root อื่นต่อ
-- BFS ความลึก ≤ **4** จาก root (Q2); ต่อ folder: `lstat` → ข้าม symlink / junction / reparse point ทุกชนิด (บันทึกใน `skipped` เป็น `link`) → `opendir` → อ่าน entry (≤ 5 000 ต่อ folder, เกิน = `skipped: too-many-entries`)
+- BFS ความลึก ≤ config `maxDepth` (F-001, ค่าเริ่มต้น 3 — ครอบตัวอย่างลึกสุดใน §9) จาก root; ต่อ folder: `lstat` → ข้าม symlink / junction / reparse point ทุกชนิด (บันทึกใน `skipped` เป็น `link`) → `opendir` → อ่าน entry (≤ 5 000 ต่อ folder, เกิน = `skipped: too-many-entries`)
 - กัน TOCTOU (folder ถูกสลับเป็น junction ระหว่าง `lstat` กับ `opendir`): หลังเปิด `realpath` ต้องเท่ากับ path ที่คาด และอยู่ใน root → ไม่ตรง = ข้าม + `skipped: changed`
-- ไม่ลง: `node_modules`, `.git`, `.hg`, `.svn`, `vendor`, `.venv`, `venv`, `env`, `__pycache__`, `target`, `dist`, `build`, `.next`, `.nuxt`, `.output`, `.svelte-kit`, `coverage`, `.cache`, `.turbo`, `bin`, `obj`, `Library`, folder ที่ขึ้นต้นด้วย `.` (ยกเว้นอ่านไฟล์ marker ระดับ project), `$RECYCLE.BIN`, `System Volume Information`
-- folder เป็น candidate เมื่อมี marker ของ profile ใด ๆ หรือ marker ทั่วไป (`package.json`, `index.html`, `compose*.y(a)ml` / `docker-compose*.y(a)ml`, `Dockerfile`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, `manage.py`, `composer.json`, `Gemfile`, marker ไม่ใช่เว็บ §6.3) → ยังเดินลงต่อเพื่อหา monorepo / project ซ้อน (ภายในความลึกรวม)
+- ไม่ลง: ชื่อใน config `ignore` (ไม่สนตัวพิมพ์) และ `node_modules`, `.git`, `.hg`, `.svn`, `vendor`, `.venv`, `venv`, `env`, `__pycache__`, `target`, `dist`, `build`, `.next`, `.nuxt`, `.output`, `.svelte-kit`, `coverage`, `.cache`, `.turbo`, `bin`, `obj`, `Library`, folder ที่ขึ้นต้นด้วย `.` (ยกเว้นอ่านไฟล์ marker ระดับ project), `$RECYCLE.BIN`, `System Volume Information`
+- folder เป็น candidate เมื่อมี marker ของ profile ใด ๆ หรือ marker ทั่วไป (`package.json`, `index.html`, `compose*.y(a)ml` / `docker-compose*.y(a)ml`, `Dockerfile`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, `manage.py`, `composer.json`, `Gemfile`, marker ไม่ใช่เว็บ §6.3) → ยังเดินลงต่อเพื่อหา monorepo / project ซ้อน (ภายในความลึกรวม); Unity: folder `ProjectSettings/` ก็นับเป็น marker
 - ขีดจำกัดรวมต่อ scan: folder ≤ 20 000, อ่านไฟล์รวม ≤ 64 MB, ไฟล์เดียว ≤ 256 KB (manifest), เวลา ≤ 60 วิ → เกิน = หยุด, `truncated: true` + เหตุผล (ผลที่ได้ถึงตอนนั้นยังใช้ได้)
 - ชื่อ entry ที่มี control char / ไม่ใช่ UTF-16 ที่ถูกต้อง → ข้าม + `skipped: bad-name` (กัน log / terminal injection)
 
@@ -64,8 +64,9 @@
 5. compose: หาไฟล์ `compose.y(a)ml`, `docker-compose.y(a)ml` (+ `*.override.*`) ที่ root ของ candidate → parse (YAML safe ของ F-005: ยอม anchor / merge `<<` ตาม Q6: alias ≤ 100, `maxAliasCount` 100, node cap เดียวกับ F-005; ข้อความ error ไม่ยกเนื้อไฟล์) → service ที่มี `build` = app, ที่มี `image` ของ DB/cache ที่รู้จัก = infra; volume ที่ mount `.` / `./…` เข้า app = mount source
 6. runner ตาม §9 (ดู §1)
 7. monorepo: candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
-8. duplicate: fingerprint (§1) ของ candidate ซ้อนเท่ากับ candidate อื่น → `duplicate`
-9. port / via / publicDir / runtime hint ตาม §1
+8. ซ้อน: fingerprint (§1) ของ candidate ซ้อนเท่ากับ candidate อื่น (ที่ไม่อยู่ใต้ตัวมัน) → `duplicate`; ไม่ตรง: `site` ที่ไม่ใช่ static → candidate ปกติ; `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่)
+9. port / via / publicDir / runtime hint ตาม §1 (ไม่เจอ port → `port` ของ profile, source `profile <id>`)
+10. ชื่อ: site ได้ชื่อเปล่าก่อน, duplicate / อื่น ๆ ได้ `-2`, `-3` (เรียงตาม path)
 
 ### 3.4 ผล scan (`data/scan.json`, schemaVersion 1)
 ```ts
@@ -73,10 +74,10 @@ interface ScanResult {
   schemaVersion: 1;
   scanId: string;               // random 16 hex
   startedAt: string; finishedAt: string;
-  truncated: false | { reason: "time" | "folders" | "bytes" };
-  roots: { path: string; status: "ok" | "missing" | "not-a-folder" | "link" | "no-access" }[];
+  truncated: false | { reason: "time" | "folders" | "bytes" | "candidates" };
+  roots: { path: string; status: "ok" | "missing" | "not-a-folder" | "link" | "no-access" | "inside-home" }[];
   candidates: Candidate[];      // เรียงตาม path
-  skipped: { path: string; reason: "link" | "too-many-entries" | "changed" | "bad-name" | "no-access" | "too-deep" }[]; // ≤ 500
+  skipped: { path: string; reason: "link" | "too-many-entries" | "changed" | "bad-name" | "no-access" }[]; // ≤ 500 (bad-name: path ของ folder แม่ ไม่ใช่ชื่อแปลก)
   problems: { file: string; message: string }[];   // profile ที่โหลดไม่ผ่าน, compose parse ไม่ได้ (ไม่ยกเนื้อไฟล์)
 }
 interface Candidate {
@@ -101,17 +102,17 @@ interface Candidate {
 }
 ```
 - ค่า string ทุกตัวที่มาจาก project (ชื่อ, เหตุผล, path) ถูก sanitize ตอนแสดงใน CLI (F-004) และ escape ใน dashboard; ใน JSON เก็บตามจริง
-- **ไม่เก็บค่า `.env`** นอกจากเลข port ของ key `PORT` / `*_PORT` (Q5)
+- **ไม่เก็บค่า `.env`** นอกจากเลข port ของ key `PORT` / `*_PORT` (Q5); `.env*` อ่านครั้งเดียวไม่เข้า cache ของ view (`readOnce`) — ไฟล์: `.env`, `.env.local`, `.env.development`, `.env.development.local`
 - ขนาดไฟล์ ≤ 5 MB (ขีดของ store) → candidate ≤ 2 000, เกิน = `truncated`
 
 ### 3.5 Interface
-- lib: `scan(paths, config, opts?: { signal?: AbortSignal; limits?: Partial<ScanLimits>; onProgress?(p: { folders: number; candidates: number }): void }): Promise<ScanResult>`
+- lib: `scan(paths, { scanRoots, maxDepth?, ignore?, scanId?, signal?, limits?, onProgress? }): Promise<ScanResult>` — limit → ผลบางส่วน + `truncated`; abort → throw
 - REST (auth เหมือน route อื่น):
-  - `POST /api/v1/scan` → `202 { scanId }`; มีงานอยู่ → `409 SCAN_RUNNING` + `scanId` เดิม
-  - `GET /api/v1/scan` → `{ running: { scanId, folders, candidates } | null, last: ScanResult | null }`
+  - `POST /api/v1/scan` → `202 { scanId }`; มีงานอยู่ → `409 SCAN_RUNNING` + `scanId` เดิม; daemon กำลังปิด → `503`
+  - `GET /api/v1/scan` → `{ running: { scanId, startedAt, folders, candidates } | null, last: ScanResult | null, lastError: { scanId, code, message } | null }` (message คงที่ ไม่มี path)
   - `DELETE /api/v1/scan` → ยกเลิกงานที่รัน (abort) — ผลบางส่วนไม่บันทึก
 - CLI: `webhub scan` (เริ่ม → poll ทุก 500 ms + แสดงความคืบหน้าบน stderr → ตาราง name / kind / profile / runner / port / path), `--json`, `--last` (ไม่ scan ใหม่ แค่แสดงผลล่าสุด); Ctrl+C → `DELETE`; exit 0 ปกติ, 2 ถ้า `truncated` หรือมี problem
-- daemon ปิดระหว่าง scan → abort, ไม่เขียนผลครึ่ง ๆ
+- daemon ปิดระหว่าง scan → abort + รอจบ (ก่อนปล่อย lock), ไม่เขียนผลครึ่ง ๆ; การรอ config ก็ยกเลิกได้
 
 ### 3.6 Platform
 - Windows: case-insensitive, junction = link (ข้าม), path ยาว > 260 (Node รองรับ), ชื่อสงวน (`CON`, `NUL`, …) ข้าม + `bad-name`
@@ -152,7 +153,7 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 | # | คำถาม | ทางเลือก | แนะนำ | คำตอบ |
 |---|---|---|---|---|
 | Q1 | ขอบเขต F-006 | (A) แกน: walk + profile + score + not-web + runner + monorepo + duplicate + port/via + publicDir + runtime hint; route prefix / DB / URL env / dev services / shared service แยกเป็น **F-006b** (ก่อน F-009) · (B) ทั้งหมดใน F-006 | A | A |
-| Q2 | ความลึกในการเดิน | 3 · **4** · 6 · ไม่จำกัด (แค่ขีด folder / เวลา) | 4 (ตัวอย่างลึกสุดใน §9 = `craft-anything/apps/craft-anything-web` = 3) | 4 |
+| Q2 | ความลึกในการเดิน | 3 · **4** · 6 · ไม่จำกัด (แค่ขีด folder / เวลา) | 4 (ตัวอย่างลึกสุดใน §9 = `craft-anything/apps/craft-anything-web` = 3) | 4 → **แก้ 2026-11-15**: ใช้ config `maxDepth` / `ignore` ที่ F-001 มีอยู่แล้ว (ค่าเริ่มต้น 3) — พบตอน W3 E1 ว่า spec ไม่ตรงระบบเดิม, ผู้ใช้เลือก "ใช้ config เดิม" |
 | Q3 | เก็บผล scan | (A) `data/scan.json` ผลล่าสุด (แทนที่ทุกครั้ง) · (B) memory อย่างเดียว | A | A |
 | Q4 | API / CLI | (A) งานเบื้องหลัง: `POST` เริ่ม / `GET` สถานะ+ผล / `DELETE` ยกเลิก; CLI รอ + ความคืบหน้า · (B) request เดียวรอจนจบ (จำกัด < 30 วิ) | A | A |
 | Q5 | `.env*` | (A) อ่าน หา key `PORT` / `*_PORT` เก็บแค่เลข port ค่าอื่นทิ้งทันที · (B) ไม่อ่าน `.env` เลย (port จาก `.env` → ผู้ใช้ใส่เองใน F-007) | A | A |
@@ -184,4 +185,6 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 | วันที่ | ขั้น | หมายเหตุ |
 |---|---|---|
 | 2026-11-15 | W1 ① | ร่าง spec |
+| 2026-11-15 | W3 E1 | spec ไม่ตรงระบบ: config F-001 มี `maxDepth` (3) + `ignore` อยู่แล้ว → ผู้ใช้เลือก "ใช้ config เดิม" (Q2 แก้) |
+| 2026-11-15 | W3 E2 | implement `src/scanner/*` (fsread, view, deps, compose, hints, scan, schema, routes), `webhub scan`, fixtures ×5 ใหม่ → `testing` |
 | 2026-11-15 | W1 ②–④ | ผู้ใช้ตอบ Q1–Q6 ตามแนะนำ (แยก F-006b, ลึก 4, `data/scan.json` + งานเบื้องหลัง, `.env` เก็บแค่ port, compose anchor จำกัด + TOML parser เอง) → `planned` |

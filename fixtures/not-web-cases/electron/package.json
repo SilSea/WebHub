@@ -1,0 +1,6 @@
+{
+  "name": "desktop",
+  "private": true,
+  "scripts": { "dev": "vite" },
+  "devDependencies": { "vite": "^7.0.0", "electron": "^33.0.0" }
+}
