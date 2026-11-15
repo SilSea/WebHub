@@ -6,7 +6,12 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ComposeError, composeRunner, parseCompose } from "../../src/scanner/compose.js";
+import {
+  ComposeError,
+  composeRunner,
+  mergeServices,
+  parseCompose,
+} from "../../src/scanner/compose.js";
 import {
   jsonObject,
   packageJsonDeps,
@@ -16,7 +21,7 @@ import {
 } from "../../src/scanner/deps.js";
 import { Budget, badName, DEFAULT_LIMITS, listDir, readSmall } from "../../src/scanner/fsread.js";
 import { envPorts, exposePort, fromImage, scriptPort, vitePort } from "../../src/scanner/hints.js";
-import { fitToStore, scan, slug } from "../../src/scanner/scan.js";
+import { type Draft, fitToStore, nested, scan, slug } from "../../src/scanner/scan.js";
 import { ScanResult } from "../../src/scanner/schema.js";
 import { tempHome } from "../helpers/home.js";
 
@@ -488,9 +493,40 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       const rev = await scan(h.paths, { scanRoots: [join(dir, "a"), dir] });
       expect(rev.roots.map((x) => x.status)).toEqual(["inside-root", "ok"]);
       expect(rev.candidates).toHaveLength(1);
+      // a root the outer walk does not reach (depth / ignore / dot folder) is still walked
+      // (review-4 V1)
+      for (const inner of [join(dir, "z", "b", "c", "d", "deep"), join(dir, "vendor", "x")]) {
+        mkdirSync(inner, { recursive: true });
+        writeFileSync(join(inner, "index.html"), "<p>hi</p>");
+      }
+      const deep = await scan(h.paths, {
+        scanRoots: [dir, join(dir, "z", "b", "c", "d", "deep"), join(dir, "vendor", "x")],
+      });
+      expect(deep.roots.map((x) => x.status)).toEqual(["ok", "inside-root", "inside-root"]);
+      expect(deep.candidates.map((c) => c.path).sort()).toEqual(
+        [join(dir, "a"), join(dir, "z", "b", "c", "d", "deep"), join(dir, "vendor", "x")].sort(),
+      );
     } finally {
       await h.cleanup();
     }
+  });
+
+  it("compose base + override: services merged by name (review-4 V2)", () => {
+    const merged = mergeServices([
+      parseCompose("services:\n  web:\n    build: .\n  db:\n    image: postgres:16\n").services,
+      parseCompose("services:\n  web:\n    ports: ['3000:3000']\n  db:\n    ports: ['5432:5432']\n")
+        .services,
+    ]);
+    expect(merged.map((x) => [x.name, x.build, x.infra])).toEqual([
+      ["web", true, false],
+      ["db", false, true],
+    ]);
+    expect(merged[0]?.ports.map((p) => p.target)).toEqual([3000]);
+    const onlyDb = mergeServices([
+      parseCompose("services:\n  db:\n    image: postgres:16\n").services,
+      parseCompose("services:\n  db:\n    ports: ['5432:5432']\n").services,
+    ]);
+    expect(composeRunner(onlyDb)).toBe("hybrid");
   });
 
   it("parent + child compose: one service once; unreadable compose not listed (review-2 R3)", async () => {
@@ -565,6 +601,32 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
     } finally {
       await h.cleanup();
     }
+  });
+
+  it("folders not looked at stay listed, also under a non-web project (review-4 V3)", () => {
+    const d = (path: string, kind: Draft["kind"], unread?: true): Draft => ({
+      key: "0123456789abcdef",
+      base: "x",
+      root: "/r",
+      path,
+      kind,
+      score: 0,
+      alternatives: [],
+      reasons: [],
+      notWeb: [],
+      services: {},
+      fingerprint: "",
+      ...(unread ? { unread } : {}),
+    });
+    const sepd = (...p: string[]) => join("/r", ...p);
+    const out = nested([
+      d(sepd("p"), "not-web"),
+      d(sepd("p", "x"), "unknown", true),
+      d(sepd("p", "y"), "unknown"),
+      d(sepd("s"), "site"),
+      d(sepd("s", "u"), "unknown", true),
+    ]).map((x) => x.path);
+    expect(out.sort()).toEqual([sepd("p"), sepd("p", "x"), sepd("s"), sepd("s", "u")].sort());
   });
 
   it("hostile content: long names, newline Dockerfile — result stays valid and fast", async () => {

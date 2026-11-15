@@ -16,6 +16,7 @@ import {
   ComposeError,
   type ComposeService,
   composeRunner,
+  mergeServices,
   parseCompose,
 } from "./compose.js";
 import {
@@ -170,9 +171,15 @@ const keyOf = (abs: string) =>
 /** BFS state of one scan root. */
 interface Walk {
   index: number;
+  /** Where this walk starts (folders listed must stay inside it). */
   root: string;
+  /** Outermost scan root that holds it: the root of what it finds (monorepo merge, S4). */
+  owner: string;
   queue: { abs: string; depth: number }[];
 }
+
+/** Folder key as the file system compares paths (case-insensitive on Windows). */
+const folderKey = (abs: string) => (process.platform === "win32" ? abs.toLowerCase() : abs);
 
 /**
  * Lists the next folder of one root (read-only, depth-limited). Roots are walked round robin,
@@ -185,6 +192,7 @@ async function step(
   skipDirs: ReadonlySet<string>,
   found: Found[],
   skipped: ScanResult["skipped"],
+  visited: Set<string>,
 ): Promise<void> {
   const skip = (path: string, reason: ScanResult["skipped"][number]["reason"]) => {
     if (skipped.length < budget.limits.skipped) skipped.push({ path, reason });
@@ -192,6 +200,9 @@ async function step(
   const next = w.queue.shift();
   if (next === undefined) return;
   const { abs, depth } = next;
+  // a folder another walk already listed (nested scan roots, review-4 V1) is listed once
+  if (visited.has(folderKey(abs))) return;
+  visited.add(folderKey(abs));
   const r = await listDir(abs, w.root, budget);
   if ("skip" in r) {
     skip(abs, r.skip);
@@ -204,7 +215,7 @@ async function step(
   });
   if (entries.some(isMarker) || entries.some(isUnityDir)) {
     if (found.length >= budget.limits.candidates) throw new Truncated("candidates");
-    found.push({ abs, root: w.root, walk: w.index, entries });
+    found.push({ abs, root: w.owner, walk: w.index, entries });
   }
   if (depth >= budget.limits.depth) return;
   for (const e of entries) {
@@ -241,10 +252,12 @@ async function fingerprint(view: DiskView): Promise<string> {
   return any ? h.digest("hex") : "";
 }
 
-type Draft = Omit<Candidate, "name"> & {
+export type Draft = Omit<Candidate, "name"> & {
   base: string;
   /** Real path of its scan root. */
   root: string;
+  /** Found but not looked at (out of time / bytes): may be a site, never hidden as a non-site. */
+  unread?: true;
   /** Compose files of the folder itself, whatever its kind (a compose-only monorepo parent). */
   ownCompose?: { files: string[]; services: ComposeService[] };
 };
@@ -255,7 +268,7 @@ async function composeOf(
   problems: ScanResult["problems"],
 ): Promise<{ files: string[]; services: ComposeService[] }> {
   const files: string[] = [];
-  const services: ComposeService[] = [];
+  const parsed: ComposeService[][] = [];
   const names = await view.names(rel);
   for (const f of COMPOSE_FILES) {
     const actual = names.find((n) => n.toLowerCase() === f);
@@ -264,7 +277,7 @@ async function composeOf(
     const text = await view.text(r);
     if (text === undefined) continue;
     try {
-      services.push(...parseCompose(text).services);
+      parsed.push(parseCompose(text).services);
       // only files that could be read are listed (review-2 R3)
       files.push(r);
     } catch (err) {
@@ -276,7 +289,8 @@ async function composeOf(
       }
     }
   }
-  return { files, services };
+  // base + override files describe the same services (review-4 V2)
+  return { files, services: mergeServices(parsed) };
 }
 
 /** Detection of one candidate folder (one service at its root). */
@@ -370,6 +384,7 @@ const unread = (f: Found): Draft => ({
   notWeb: [],
   services: {},
   fingerprint: "",
+  unread: true,
 });
 
 const RUNNER_RANK = { static: 0, native: 1, hybrid: 2, compose: 3 } as const;
@@ -477,7 +492,7 @@ function mergeMonorepos(drafts: Draft[]): Draft[] {
  * no web profile inside a project (packages, tools) → dropped; an `index.html`-only folder
  * inside a project → part of it, dropped.
  */
-function nested(drafts: Draft[]): Draft[] {
+export function nested(drafts: Draft[]): Draft[] {
   const sorted = [...drafts].sort((a, b) => a.path.length - b.path.length);
   const out: Draft[] = [];
   const inner: Draft[] = [];
@@ -487,13 +502,20 @@ function nested(drafts: Draft[]): Draft[] {
     // tooling package.json higher up does not hide them (review-1 C6)
     const parent = out.find(
       (p) =>
-        (d.kind !== "site" || p.kind === "site") && p.path !== d.path && isInside(p.path, d.path),
+        (!(d.kind === "site" || d.unread === true) || p.kind === "site") &&
+        p.path !== d.path &&
+        isInside(p.path, d.path),
     );
     (parent === undefined ? out : inner).push(d);
   }
   for (const d of inner) {
     // only a nested folder that would be shown on its own can be a copy: a `public/` with the
     // same boilerplate index.html in two projects is part of each, not a duplicate (review-1 C3)
+    // a folder not looked at may be a site: kept, never hidden (review-4 V3)
+    if (d.unread === true) {
+      out.push(d);
+      continue;
+    }
     if (d.kind !== "site") continue;
     if (d.profile === "static" || d.profile === "static-spa") continue;
     // the original is a shown, non-duplicate candidate outside this folder (review-1 C5)
@@ -519,7 +541,7 @@ function name(drafts: Draft[]): Candidate[] {
   const rank = (d: Draft) => (d.kind === "site" ? 0 : 1);
   return drafts
     .sort((a, b) => rank(a) - rank(b) || a.path.localeCompare(b.path))
-    .map(({ base, root: _r, ownCompose: _c, ...d }) => {
+    .map(({ base, root: _r, ownCompose: _c, unread: _u, ...d }) => {
       let n = base;
       for (let i = 2; used.has(n); i++) {
         // ≤ 40 with any suffix length (security-1 S2: `-1000` made 41)
@@ -590,28 +612,25 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
   for (const root of opts.scanRoots.slice(0, 100)) {
     statuses.push({ path: root, ...(await rootStatus(root, paths.home)) });
   }
-  // a root that is another root, or inside one, is walked once: as part of the outer root
-  // (review-2 R4: same candidate twice, same key)
-  // inside another usable root, or the same as an earlier one
-  const covered = (i: number, real: string): boolean =>
-    statuses.some(
-      (o, j) =>
-        j !== i &&
-        o.real !== undefined &&
-        (samePath(o.real, real) ? j < i : isInside(o.real, real)),
-    );
+  // the same root twice → walked once; a root inside another → `inside-root`, still walked
+  // (the outer walk may not reach it: depth, ignore, dot folders — review-4 V1), every folder
+  // listed once (review-2 R4)
   for (const [i, x] of statuses.entries()) {
     const real = x.real;
-    const outer = real !== undefined && covered(i, real);
-    if (outer) {
-      result.roots.push({ path: x.path, status: "inside-root" });
+    if (real === undefined) {
+      result.roots.push({ path: x.path, status: x.status });
       continue;
     }
-    result.roots.push({ path: x.path, status: x.status });
-    if (real !== undefined) {
-      walks.push({ index: walks.length, root: real, queue: [{ abs: real, depth: 0 }] });
-    }
+    const same = statuses.some((o, j) => j < i && o.real !== undefined && samePath(o.real, real));
+    const outers = statuses.flatMap((o) =>
+      o.real !== undefined && !samePath(o.real, real) && isInside(o.real, real) ? [o.real] : [],
+    );
+    result.roots.push({ path: x.path, status: same || outers.length > 0 ? "inside-root" : "ok" });
+    if (same) continue;
+    const owner = outers.reduce((a, b) => (b.length < a.length ? b : a), real);
+    walks.push({ index: walks.length, root: real, owner, queue: [{ abs: real, depth: 0 }] });
   }
+  const visited = new Set<string>();
   // walk round robin; a limit ends the walk, what was found is kept
   try {
     for (let busy = true; busy; ) {
@@ -619,7 +638,7 @@ export async function scan(paths: Paths, opts: ScanOptions): Promise<ScanResult>
       for (const w of walks) {
         if (w.queue.length === 0) continue;
         busy = true;
-        await step(w, budget, skipDirs, found, result.skipped);
+        await step(w, budget, skipDirs, found, result.skipped, visited);
         progress();
       }
     }

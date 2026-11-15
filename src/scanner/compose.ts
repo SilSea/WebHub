@@ -183,6 +183,39 @@ export function parseCompose(text: string): ComposeSummary {
 }
 
 /**
+ * Services of several compose files of one folder, merged by name in file order as
+ * `docker compose` does (base + override): `build` / `image` from any file (later wins),
+ * source mounts and ports from all, `infra` decided on the merged service (review-4 V2).
+ */
+export function mergeServices(files: readonly (readonly ComposeService[])[]): ComposeService[] {
+  const byName = new Map<string, ComposeService>();
+  for (const services of files) {
+    for (const s of services) {
+      const prev = byName.get(s.name);
+      if (prev === undefined) {
+        byName.set(s.name, { ...s, ports: [...s.ports] });
+        continue;
+      }
+      const image = s.image ?? prev.image;
+      const ports = [...prev.ports];
+      for (const p of s.ports) if (!ports.some((q) => q.text === p.text)) ports.push(p);
+      byName.set(s.name, {
+        name: s.name,
+        build: prev.build || s.build,
+        ...(image === undefined ? {} : { image }),
+        infra: false,
+        mountsSource: prev.mountsSource || s.mountsSource,
+        ports: ports.slice(0, 50),
+      });
+    }
+  }
+  return [...byName.values()].map((s) => ({
+    ...s,
+    infra: !s.build && s.image !== undefined && INFRA_IMAGE.test(s.image.toLowerCase()),
+  }));
+}
+
+/**
  * Runner from the compose services (DESIGN §9): an app built from source and not mounted →
  * `compose`; app mounted from source, or infra only → `hybrid`.
  */
