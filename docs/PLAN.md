@@ -19,6 +19,7 @@
 | 7 | F-005 Profile loader + schema + 7 built-in + `webhub profiles` | `done` | [spec](features/F-005-profiles.md) |
 | 7a | CR-005 เทส F-000 นับ temp dir กลาง ชนกับเทสขนาน (bugfix, test เท่านั้น) | `done` | [CR](changes/CR-005-fixture-tempdir-race.md) |
 | 8 | F-006 Scanner + detector (แกน: walk, profile, score, not-web, runner, monorepo, duplicate, port/via, publicDir, runtime hint, `data/scan.json`, `/api/v1/scan`, `webhub scan`) | `done` | [spec](features/F-006-scanner.md) |
+| 9 | F-007 Site registry (`data/sites/`, pending / approve + run approval ผูก planHash / ignore / add / list / remove, overrides ไม่ถูก rescan ทับ, `/api/v1/sites`) | `planned` | [spec](features/F-007-site-registry.md) |
 
 งาน `todo` ด้านล่างยังไม่เข้า queue จนกว่าจะผ่าน W1
 

@@ -713,6 +713,8 @@ proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
+**F-007 (schema v1)**: ไฟล์ site แยก `detected` (snapshot ผล scan ตอนรับ / `--refresh` — rescan ไม่ทับ) กับ `overrides` (ผู้ใช้แก้, ทับทีละ field) + `approval` (run approval: `planHash` = sha256 ของแผนการรัน — argv ที่ render แล้ว, executable path เต็ม, sha256 ของ profile; เปลี่ยน = `needs-approval`, runner เช็คก่อนรันทุกครั้ง); ฟิลด์อื่นในตัวอย่าง (routes, database, envSets, urlRewrites, …) เพิ่มด้วย migration โดย feature เจ้าของ; ignore = `data/ignored.json` (candidate key)
+
 `data/secrets.json` (password DB) + `data/auth.json` + `data/` ทั้งหมด → `.gitignore`
 
 ---
@@ -770,7 +772,7 @@ _WebHub/                      # repo (npm package source)
 ├── runtimes/                 # portable runtimes <lang>/<ver>/
 ├── data/                     # gitignored
 │   ├── sites/  compose/  profiles/  backups/  venvs/
-│   ├── ports.json  infra.json  secrets.json  auth.json  state.json  scan.json
+│   ├── ports.json  infra.json  secrets.json  auth.json  state.json  scan.json  ignored.json
 └── logs/                       # daemon.log + daemon.log.1 (≤ 5 MB ต่อไฟล์ — CR-003), daemon-start.err
 ```
 
@@ -815,7 +817,9 @@ webhub config export <file> | import <file>
 webhub autostart on|off
 webhub code <n> | term <n> | folder <n>   # เปิด VS Code / terminal / explorer
 webhub setup                         # first-run wizard (รันซ้ำได้)
-webhub add <path> [--profile <id>]   # เพิ่ม site manual (detect ไม่เจอ/ผิด)
+webhub add <path> [--profile <id>] [--name <n>]   # เพิ่ม site manual (detect ไม่เจอ/ผิด)
+webhub approve <n> [--name <n>] [--refresh] [--yes] | ignore <n> [--undo] | remove <n>   # F-007: approve = แสดงแผนการรัน (argv + exe + profile) แล้วยืนยัน
+webhub list [--pending|--ignored|--all] [--json]
 webhub roots add|remove|list <path>
 webhub doctor                        # ตรวจ Docker/runtime/ports/hosts/สิทธิ์ + บอกวิธีแก้
 webhub profiles import|export <file>
@@ -943,6 +947,7 @@ webhub daemon start | stop [--force] | status | logs [-n N] [-f]   # คำส�
 | 18 | review v8 (goal เดิม) | session cookie ต่อ tool host + ลบ cookie ก่อนส่งเข้า tool; daemon resolver `*.localhost`; เลิก `proxy_intercept_errors`; redis shared เฉพาะ app ที่มี URL/username; mongo-express → phase 8; native `target` = `port`; override path absolute; `next dev` เป็นข้อจำกัดที่แจ้งใน run approval; git status `--no-optional-locks` | §3, §4, §5, §7, §10, §20, §22 |
 | 20 | F-005 profiles (2026-11-14) | YAML (`yaml`, parse แบบ safe) + zod strict; 7 built-in แรก (static, static-spa, vite, next, express, bun-elysia, fastapi); ผู้ใช้ทับ built-in ทั้งตัว; detect ไม่มี regex; cmd string → argv ไม่ผ่าน shell; range ใน variants ทำเอง; `GET /api/v1/profiles` + `webhub profiles [--check]`; import/export ทำทีหลังพร้อม run approval | §6.1, §13 |
 | 21 | F-006 scanner (2026-11-15) | อ่านอย่างเดียว ไม่ตาม link, ลึกตาม `maxDepth` / `ignore` ของ config + ขีด folder/byte/เวลา; ผลที่ `data/scan.json`; scan เป็นงานเบื้องหลัง (`/api/v1/scan`, `webhub scan`); `.env` เก็บแค่ port; compose ยอม anchor จำกัด; TOML parser จำกัดของเราเอง; route/DB/URL env/dev services แยกเป็น F-006b | §9, §12 |
+| 22 | F-007 site registry (2026-11-15) | `data/sites/<name>.json` = detected + overrides + approval; run approval ตอน approve ผูก planHash (argv + exe + sha256 profile), 2 จังหวะ GET plan → POST planHash; rescan ไม่ทับ (`changed` + `--refresh`); ผูก real path (`missing`); ignore ตาม candidate key; PATCH override ชุดแรก | §11.4, §12, §13 |
 | 19 | F-004 CLI (2026-11-13) | `webhub daemon start/stop/status/logs`; auto-start daemon เมื่อคำสั่งต้องใช้; log daemon 5 MB × 2 (CR-003); `webhub ui` ทำใน F-009 | §12, §13 |
 | — | inconsistency v3 | Adminer → DB Studio; postgres ×6 → ×5; `depends_on: !reset []` → gen ใหม่ตัดเฉพาะ DB; alias ชื่อ container เดิม; CLI ผ่าน daemon | ทั้งเอกสาร |
 
