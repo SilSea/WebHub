@@ -566,6 +566,33 @@ describe("read-only access, links, limits", { timeout: 30_000 }, () => {
       const r2 = await scan(h.paths, { scanRoots: [q] });
       expect(r2.candidates[0]?.compose).toBeUndefined();
       expect(r2.candidates[0]?.runner).toBe("native");
+
+      // compose-go order: docker-compose.yml before .yaml, override .yml before .yaml (X1)
+      const o = join(dir, "o");
+      mkdirSync(o);
+      writeFileSync(join(o, "package.json"), '{"dependencies":{"express":"4"}}');
+      writeFileSync(
+        join(o, "docker-compose.yaml"),
+        "services:\n  a:\n    build: .\n    ports: ['1111:1111']\n",
+      );
+      writeFileSync(
+        join(o, "docker-compose.yml"),
+        "services:\n  b:\n    build: .\n    ports: ['2222:2222']\n",
+      );
+      writeFileSync(
+        join(o, "compose.override.yaml"),
+        "services:\n  b:\n    ports: ['3333:3333']\n",
+      );
+      writeFileSync(join(o, "compose.override.yml"), "services:\n  b:\n    ports: ['4444:4444']\n");
+      const r3 = await scan(h.paths, { scanRoots: [o] });
+      expect(r3.candidates[0]?.compose?.files).toEqual([
+        "docker-compose.yml",
+        "compose.override.yml",
+      ]);
+      expect(r3.candidates[0]?.compose?.app).toEqual(["b"]);
+      expect(r3.problems.map((x) => x.file).sort()).toEqual(
+        [join(o, "compose.override.yaml"), join(o, "docker-compose.yaml")].sort(),
+      );
     } finally {
       await h.cleanup();
     }

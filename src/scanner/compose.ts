@@ -7,21 +7,24 @@
  */
 import { isAlias, isMap, isPair, isScalar, parseDocument, visit } from "yaml";
 
-export const COMPOSE_FILES = [
+/**
+ * Base file names in the order `docker compose` looks for them (compose-go
+ * `DefaultFileNames`); only the first found is read (review-6 X1).
+ */
+export const COMPOSE_BASE_FILES = [
   "compose.yaml",
   "compose.yml",
-  "docker-compose.yaml",
   "docker-compose.yml",
-  "compose.override.yaml",
-  "compose.override.yml",
-  "docker-compose.override.yaml",
-  "docker-compose.override.yml",
+  "docker-compose.yaml",
 ] as const;
-
-/** Base file names in the order `docker compose` looks for them; only the first found is read. */
-export const COMPOSE_BASE_FILES = COMPOSE_FILES.slice(0, 4);
-/** Override file names; only the first found is read, and only with a base file. */
-export const COMPOSE_OVERRIDE_FILES = COMPOSE_FILES.slice(4);
+/** Override file names (compose-go `DefaultOverrideFileNames`); first found, with a base only. */
+export const COMPOSE_OVERRIDE_FILES = [
+  "compose.override.yml",
+  "compose.override.yaml",
+  "docker-compose.override.yml",
+  "docker-compose.override.yaml",
+] as const;
+export const COMPOSE_FILES = [...COMPOSE_BASE_FILES, ...COMPOSE_OVERRIDE_FILES] as const;
 
 /** Max services of one folder after merging (schema `compose.app` / `infra` ≤ 200). */
 export const MAX_SERVICES = 200;

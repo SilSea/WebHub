@@ -284,8 +284,11 @@ async function composeOf(
   // (review-5 W1); no base file → no compose
   const bases = present(COMPOSE_BASE_FILES);
   const overrides = present(COMPOSE_OVERRIDE_FILES);
-  for (const r of [...bases.slice(1), ...overrides.slice(1)]) {
+  for (const r of bases.slice(1)) {
     problem(r, "ignored: docker compose reads only the first compose file of a folder");
+  }
+  for (const r of overrides.slice(1)) {
+    problem(r, "ignored: docker compose reads only the first override file of a folder");
   }
   if (bases[0] === undefined) {
     for (const r of overrides.slice(0, 1)) problem(r, "ignored: override without a compose file");
@@ -293,7 +296,11 @@ async function composeOf(
   }
   for (const r of [bases[0], ...overrides.slice(0, 1)]) {
     const text = await view.text(r);
-    if (text === undefined) break;
+    if (text === undefined) {
+      // budget limits throw before this: here the file could not be read (review-6 X2)
+      problem(r, "could not read compose file");
+      break;
+    }
     try {
       parsed.push(parseCompose(text).services);
       // only files that could be read are listed (review-2 R3)

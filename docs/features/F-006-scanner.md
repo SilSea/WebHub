@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | `testing` |
+| Status | `done` (2026-11-15) |
 | Phase | MVP-1 (PLAN.md) |
 | DESIGN.md | §9 Detection, §6.3 ตัดคะแนน (ไม่ใช่เว็บ), §7 Runners (เลือก runner), §19.1 runtime version hint, §12 (`src/scanner/`), §13 (`webhub scan`), §21.5 fixtures |
 | Depends on | F-001 (config `scanRoots`, home, store, safe path), F-002 (platform: ไม่ใช้ shell), F-003 (API + auth), F-004 (CLI), F-005 (`loadProfiles`, `evaluateDetect`, `effectiveProfile`, `ProjectView`) |
@@ -65,7 +65,7 @@
 4. `effectiveProfile` (variants ตาม deps) → `start` / `static` / `port` / `devServer` ของ service
 5. compose: หาไฟล์ `compose.y(a)ml`, `docker-compose.y(a)ml` (+ `*.override.*`) ที่ root ของ candidate → parse (YAML safe ของ F-005: ยอม anchor / merge `<<` ตาม Q6: alias ≤ 100, `maxAliasCount` 100, node cap เดียวกับ F-005; ข้อความ error ไม่ยกเนื้อไฟล์) → service ที่มี `build` = app, ที่มี `image` ของ DB/cache ที่รู้จัก = infra; volume ที่ mount `.` / `./…` เข้า app = mount source
 6. runner ตาม §9 (ดู §1)
-7. compose ใน folder เดียว: อ่านเหมือน `docker compose` — ไฟล์ base แรกที่เจอ (`compose.yaml` → `compose.yml` → `docker-compose.yaml` → `docker-compose.yml`) + override แรก; base อื่นที่เกิน → problem; ไม่มี base → ไม่มี compose (review-5 W1); รวม service ตามชื่อก่อนจัด app / infra (review-4 V2), ≤ 200 service (review-5 W2); monorepo (compose ที่ parse ไม่ได้ไม่ถูกนับ + อยู่ใน `problems`; service ชื่อซ้ำระหว่างแม่กับลูกนับครั้งเดียว — review-2 R3; folder แม่ต้องอยู่ใน scan root เดียวกัน — ไม่สร้าง site นอก root, security-1 S4; compose ที่ folder แม่ — `build: ./frontend` — เป็นตัวกำหนด runner / `compose` ก่อน, review-1 C4): candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
+7. compose ใน folder เดียว: อ่านเหมือน `docker compose` (ลำดับของ compose-go, review-6 X1) — ไฟล์ base แรกที่เจอ (`compose.yaml` → `compose.yml` → `docker-compose.yml` → `docker-compose.yaml`) + override แรก (`compose.override.yml` → `.yaml` → `docker-compose.override.yml` → `.yaml`); ชื่อไม่สนตัวพิมพ์ (ถูกบน Windows; docker บน Linux สนตัวพิมพ์ — ต่างกันโดยตั้งใจ, X4); override ที่ parse ไม่ได้ → ใช้ base อย่างเดียว + problem (docker จะ error — ต่างโดยตั้งใจ: problem บอกผู้ใช้, F-007 อนุมัติก่อนรัน, X3); ไฟล์อ่านไม่ได้ → problem (X2); base อื่นที่เกิน → problem; ไม่มี base → ไม่มี compose (review-5 W1); รวม service ตามชื่อก่อนจัด app / infra (review-4 V2), ≤ 200 service (review-5 W2); monorepo (compose ที่ parse ไม่ได้ไม่ถูกนับ + อยู่ใน `problems`; service ชื่อซ้ำระหว่างแม่กับลูกนับครั้งเดียว — review-2 R3; folder แม่ต้องอยู่ใน scan root เดียวกัน — ไม่สร้าง site นอก root, security-1 S4; compose ที่ folder แม่ — `build: ./frontend` — เป็นตัวกำหนด runner / `compose` ก่อน, review-1 C4): candidate ลูกที่ชื่อตรง pattern frontend / backend ใต้ parent เดียว (parent ไม่มี marker เว็บเอง หรือมีแค่ compose) → รวมเป็น candidate ของ parent; ลูกแต่ละตัวเป็น service
 8. ซ้อน (folder ที่ยังไม่ได้อ่านเพราะหมดเวลา / byte ไม่ถูกซ่อน — review-4 V3; non-site ซ่อนใต้ candidate ใดก็ได้ — Unity `Packages/`, Python sub-package, review-3 Q3; site ซ่อนใต้ `site` เท่านั้น — `requirements.txt` หลงที่ root ไม่ซ่อน project ข้างล่าง, review-1 C6): `unknown` / `not-web` / static (`index.html` ใน project — `public/`, `docs/`) → ไม่แสดง (เป็นส่วนของ project แม่) — เช็คก่อน duplicate (review-1 C3); `site` ที่ไม่ใช่ static: fingerprint (§1) เท่ากับ candidate ที่แสดงอยู่และไม่ใช่ duplicate (ไม่ซ้อนกัน) → `duplicate`, ไม่ตรง → candidate ปกติ
 9. port / via / publicDir / runtime hint ตาม §1 (ไม่เจอ port → `port` ของ profile, source `profile <id>`)
 10. ชื่อ: site ได้ชื่อเปล่าก่อน, duplicate / อื่น ๆ ได้ `-2`, `-3` (เรียงตาม path)
@@ -187,7 +187,7 @@ Security checklist (WORKFLOW §8) ข้อที่เกี่ยว: input �
 | 3 | [test-3](../reports/F-006/test-3.md) 45/45, ชุดเต็ม 498/498 | [review-3](../reports/F-006/review-3.md) FAIL 1 major (Q1) + 3 minor | (รวม) | แก้ Q1; R3 R4 (ผู้ใช้เลือก), R5 → doc; Q2 Q3 Q4 (ผู้ใช้เลือกแก้ทั้ง 3) |
 | 4 | [test-4](../reports/F-006/test-4.md) 49/49, ชุดเต็ม 502/502 | [review-4](../reports/F-006/review-4.md) FAIL 2 major (V1, V2) + 1 minor | (รวม) | แก้ V1, V2; V3 (ผู้ใช้เลือกแก้) |
 | 5 | [test-5](../reports/F-006/test-5.md) 51/51 | [review-5](../reports/F-006/review-5.md) **PASS** (code + security) — 2 minor (W1, W2) | (รวม) | ผู้ใช้เลือกแก้ W1, W2 แล้ว merge |
-| 6 | [test-6](../reports/F-006/test-6.md) 53/53 | [review-6](../reports/F-006/review-6.md) (diff W1/W2) | (รวม) | |
+| 6 | [test-6](../reports/F-006/test-6.md) 53/53 | [review-6](../reports/F-006/review-6.md) (diff W1/W2) **PASS** — 1 minor + 3 nit | (รวม) | ผู้ใช้เลือกแก้ทั้งหมดแล้ว merge: X1 ลำดับ compose-go + เทส, X2 problem, X3 / X4 doc + ข้อความ |
 
 ## 10. เอกสารที่อัปเดต (R4)
 - [x] DESIGN.md §9, §12, §17  - [x] PLAN.md  - [x] features/README.md  - [ ] reports/README.md
